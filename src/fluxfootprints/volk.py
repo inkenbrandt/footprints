@@ -1,5 +1,3 @@
-import logging
-
 import cv2
 import configparser
 import pandas as pd
@@ -27,41 +25,7 @@ import geopandas as gpd
 import xarray
 import refet
 
-###############################################################################
-# Configure logging
-###############################################################################
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.CRITICAL)
-
-# You can send logs to stdout, a file, or elsewhere. Here we just use StreamHandler:
-stream_handler = logging.StreamHandler()
-# Customize the log format
-formatter = logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s\n"
-)
-stream_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
-
-
-# Define the file path (absolute or relative). For instance:
-log_file_path = "../logs/volk.log"
-
-# Create a FileHandler and set the level
-file_handler = logging.FileHandler(log_file_path)
-file_handler.setLevel(logging.CRITICAL)
-
-# Create a Formatter
-formatter = logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s\n"
-)
-
-# Set the formatter for the file handler
-file_handler.setFormatter(formatter)
-
-# Add the file handler to the logger
-logger.addHandler(file_handler)
-
-###############################################################################
+from .improved_ffp import FFPModel
 
 
 def load_configs(
@@ -73,7 +37,7 @@ def load_configs(
     Load station metadata and secrets from configuration files.
 
     Parameters:
-    ----------
+    -----------
     station : str
         Station identifier.
     config_path : str
@@ -82,7 +46,7 @@ def load_configs(
         Path to secrets configuration file.
 
     Returns:
-    -------
+    --------
     dict
         A dictionary containing station metadata and database URL.
     """
@@ -156,45 +120,55 @@ def fetch_and_preprocess_data(url, station, startdate):
         df.dropna(subset=["h2o", "wd", "ustar", "v_sigma"], inplace=True)
         return df
     except requests.RequestException as e:
-        logging.error(f"Failed to fetch data for station {station}: {e}")
+        print(f"Failed to fetch data for station {station}: {e}")
         return pd.DataFrame()
 
 
 def multiply_directories_rast(dir1=None, dir2=None, out_dir=None, model="ensemble"):
     """
-    Multiply matching GeoTIFF rasters from two directories based on dates in their filenames.
+    Multiply matching GeoTIFF rasters from two directories based on dates in their
+    filenames.
 
-    This function searches for GeoTIFF files in two directories (`dir1` and `dir2`) that
-    share a common date string in the format "YYYY_MM_DD". It multiplies pairs of rasters
-    using `multiply_geotiffs` and saves the results to `out_dir`.
+    This function searches for GeoTIFF files in two directories (``dir1`` and
+    ``dir2``) that share a common date string in the format ``"YYYY_MM_DD"``. It
+    multiplies pairs of rasters with :func:`multiply_geotiffs` and saves the
+    results to ``out_dir``.
 
     Parameters
     ----------
     dir1 : pathlib.Path or str, optional
-        Directory containing the first set of GeoTIFF files, typically with filenames
-        ending in "_weighted.tif". Defaults to "./output/usutw/".
+        Directory containing the first set of GeoTIFF files, typically with
+        filenames ending in ``"_weighted.tif"``.  Defaults to
+        ``"./output/usutw/"``.
     dir2 : pathlib.Path or str, optional
-        Directory containing the second set of GeoTIFF files, typically with filenames
-        starting with "ensemble_et_". Defaults to "G:/My Drive/OpenET Exports/".
+        Directory containing the second set of GeoTIFF files, typically with
+        filenames starting with ``"ensemble_et_"``.  Defaults to
+        ``"G:/My Drive/OpenET Exports/"``.
     out_dir : pathlib.Path or str, optional
         Output directory where the resulting multiplied rasters will be saved.
-        If the directory does not exist, it is created. Defaults to "./output/usutw_mult/".
+        If the directory does not exist, it is created.  Defaults to
+        ``"./output/usutw_mult/"``.
     model : str, optional
-        Name of the model used to identify files in `dir2`. Must match the file naming pattern
-        (e.g., 'ensemble', 'eemetric', or 'ssebop'). Default is 'ensemble'.
+        Name of the model used to identify files in ``dir2``.  Must match the
+        file‑naming pattern (e.g., ``"ensemble"``, ``"eemetric"``, or
+        ``"ssebop"``).  Default is ``"ensemble"``.
 
     Returns
     -------
     dict
-        Dictionary mapping pandas.Timestamp objects (derived from the matched date strings)
-        to the output of the `multiply_geotiffs` function for each matched raster pair.
+        Mapping of :class:`pandas.Timestamp` objects (derived from the matched
+        date strings) to the result returned by :func:`multiply_geotiffs` for
+        each raster pair.
 
     Notes
     -----
-    - Only files with matching "YYYY_MM_DD" date strings in both directories are processed.
-    - Filenames in `dir2` are expected to start with "{model}_et_" followed by the date.
-    - The function skips any files that do not have a matching pair in the other directory.
-    - The output filenames are formatted as "weighted_{model}_openet_{YYYY_MM_DD}.tif".
+    * Only files with matching ``"YYYY_MM_DD"`` date strings in both
+      directories are processed.
+    * Filenames in ``dir2`` must start with ``"{model}_et_"`` followed by the
+      date.
+    * Files without a matching pair in the other directory are skipped.
+    * Output filenames are formatted
+      ``"weighted_{model}_openet_{YYYY_MM_DD}.tif"``.
 
     Examples
     --------
@@ -203,11 +177,10 @@ def multiply_directories_rast(dir1=None, dir2=None, out_dir=None, model="ensembl
     ...     dir1=Path("./output/usutw/"),
     ...     dir2=Path("G:/My Drive/OpenET Exports/"),
     ...     out_dir=Path("./output/usutw_mult/"),
-    ...     model="ensemble"
+    ...     model="ensemble",
     ... )
-    >>> print(list(results.keys()))
-    [Timestamp('2021-03-05 00:00:00'), Timestamp('2021-03-06 00:00:00'), ...]
-
+    >>> list(results.keys())[:2]
+    [Timestamp('2021-03-05 00:00:00'), Timestamp('2021-03-06 00:00:00')]
     """
 
     # Set the paths to your two directories
@@ -395,11 +368,11 @@ def _compute_hourly_footprint(temp_df, station_x, station_y, zm, h_s, z0, dx, or
     for hour in range(6, 19):  # From 7 AM to 8 PM
         temp_line = temp_df[temp_df.index.hour == hour]
         if temp_line.empty:
-            logging.info(f"No data for {hour}:00, skipping.")
+            print(f"No data for {hour}:00, skipping.")
             continue
 
         try:
-            ffp_result = ffp_climatology(
+            ffp = FFPModel(
                 domain=[-origin_d, origin_d, -origin_d, origin_d],
                 dx=dx,
                 dy=dx,
@@ -416,7 +389,7 @@ def _compute_hourly_footprint(temp_df, station_x, station_y, zm, h_s, z0, dx, or
                 fig=0,
                 verbosity=0,
             )
-
+            ffp_result = ffp.run()
             f_2d = np.array(ffp_result["fclim_2d"]) * dx**2
             x_2d = np.array(ffp_result["x_2d"]) + station_x
             y_2d = np.array(ffp_result["y_2d"]) + station_y
@@ -424,7 +397,7 @@ def _compute_hourly_footprint(temp_df, station_x, station_y, zm, h_s, z0, dx, or
 
             footprints.append((hour, f_2d, x_2d, y_2d))
         except Exception as e:
-            logging.error(f"Error computing footprint for hour {hour}: {e}")
+            print(f"Error computing footprint for hour {hour}: {e}")
             continue
 
     return footprints
@@ -432,43 +405,45 @@ def _compute_hourly_footprint(temp_df, station_x, station_y, zm, h_s, z0, dx, or
 
 def write_footprint_to_raster(footprints, output_path, epsg=5070):
     """
-    Write hourly footprint climatologies to a multi-band GeoTIFF raster.
+    Write hourly footprint climatologies to a multi‑band GeoTIFF raster.
 
-    Each band in the output GeoTIFF corresponds to an hourly footprint.
-    The function encodes the footprint array (`f_2d`) and annotates each band
-    with metadata including the hour and total flux footprint.
+    Each band in the output GeoTIFF corresponds to one hourly footprint.  The
+    function encodes the footprint array (``f_2d``) and annotates each band
+    with metadata that includes the hour and the total flux‑footprint sum.
 
     Parameters
     ----------
     footprints : list of tuple
-        A list of tuples in the format `(hour, f_2d, x_2d, y_2d)` where:
-        - hour : int
-            Hour of the day (24-hour format).
-        - f_2d : numpy.ndarray
-            2D footprint array.
-        - x_2d : numpy.ndarray
-            2D array of x-coordinates.
-        - y_2d : numpy.ndarray
-            2D array of y-coordinates.
-    output_path : pathlib.Path
-        Path to the output GeoTIFF file.
+        List of tuples in the form ``(hour, f_2d, x_2d, y_2d)`` where
+
+        * **hour** (*int*) – Hour of the day (24‑hour clock).
+        * **f_2d** (*numpy.ndarray*) – 2‑D footprint values.
+        * **x_2d** (*numpy.ndarray*) – 2‑D array of *x* coordinates.
+        * **y_2d** (*numpy.ndarray*) – 2‑D array of *y* coordinates.
+    output_path : pathlib.Path or str
+        Destination path for the output GeoTIFF.
     epsg : int, optional
-        EPSG code for the coordinate reference system (CRS). Default is 5070 (NAD83 / Conus Albers).
+        EPSG code for the coordinate reference system.  Default is ``5070``
+        (NAD83 / Conus Albers).
 
     Returns
     -------
     None
-        The function writes a file to disk and does not return a value.
+        The function writes a file to disk and returns no value.
 
     Notes
     -----
-    - Each band is labeled with the hour (e.g., '0800') and total footprint value.
-    - Uses `find_transform(y_2d, x_2d)` to compute the affine transform.
-    - The output raster uses float64 precision and a no-data value of 0.0.
-    - If the input list is empty, no file is written and a log message is issued.
+    * Every band is labeled with the hour (e.g. ``"0800"``) and its total
+      footprint sum.
+    * Uses :func:`find_transform` on ``(y_2d, x_2d)`` to build the affine
+      transform.
+    * Output raster is ``float64`` with a no‑data value of ``0.0``.
+    * If ``footprints`` is empty, no file is written and a log message is
+      emitted.
     """
+
     if not footprints:
-        logging.info(f"No footprints to write for {output_path}. Skipping.")
+        print(f"No footprints to write for {output_path}. Skipping.")
         return
 
     try:
@@ -496,10 +471,10 @@ def write_footprint_to_raster(footprints, output_path, epsg=5070):
                     i, hour=f"{hour:02}00", total_footprint=np.nansum(f_2d)
                 )
 
-        logging.info(f"Footprint raster saved: {output_path}")
+        print(f"Footprint raster saved: {output_path}")
 
     except Exception as e:
-        logging.error(f"Failed to write raster {output_path}: {e}")
+        print(f"Failed to write raster {output_path}: {e}")
 
 
 def weighted_rasters(
@@ -510,13 +485,11 @@ def weighted_rasters(
 ):
     """
     Generate daily weighted footprint rasters based on hourly fetch and normalized ETo data.
-
     This function reads a Parquet file containing daily normalized ETo values for multiple
     stations, filters it by the specified station ID, and applies hourly weighting to existing
     footprint rasters. For each unweighted TIFF file in `out_dir`, the function:
     1. Parses the date from the filename.
-    2. Reads hourly bands from the raster, normalizes them by their global sum, and multiplies
-       by the normalized ETo value for that hour.
+    2. Reads hourly bands from the raster, normalizes them by their global sum, and multiplies by the normalized ETo value for that hour.
     3. Sums these hourly weighted rasters into a single daily footprint raster.
     4. Writes the result to a new file named `<YYYY-MM-DD>_weighted.tif` in `out_dir`.
 
@@ -535,15 +508,11 @@ def weighted_rasters(
 
     Notes
     -----
-    - Any TIFF files in `out_dir` with filenames starting with '20' (e.g., '2022-01-01.tif') are
-      processed, unless they already contain the substring 'weighted' in their filename.
-    - The function expects the TIFF filename to be in the form 'YYYY-MM-DD.tif' so it can parse
-      out the date.
-    - Only generates a weighted TIFF file if the total sum of the final footprint is within 0.15
-      of 1.0.
+    - Any TIFF files in `out_dir` with filenames starting with '20' (e.g., '2022-01-01.tif') are processed, unless they already contain the substring 'weighted' in their filename.
+    - The function expects the TIFF filename to be in the form 'YYYY-MM-DD.tif' so it can parse out the date.
+    - Only generates a weighted TIFF file if the total sum of the final footprint is within 0.15 of 1.0.
     - Hourly rasters with all NaN values are replaced with zeros.
-    - Written rasters preserve the same georeferencing, resolution, and coordinate reference
-      system as the input rasters.
+    - Written rasters preserve the same georeferencing, resolution, and coordinate reference system as the input rasters.
 
     Returns
     -------
@@ -580,13 +549,13 @@ def weighted_rasters(
         if "weighted" in out_f.stem:
             continue
 
-        logging.info(f"Processing {out_f.name}")
+        print(f"Processing {out_f.name}")
 
         # Parse the date from the file name
         try:
             date = datetime.datetime.strptime(out_f.stem, "%Y_%m_%d")
         except ValueError:
-            logging.warning(
+            print(
                 f"Skipping {out_f.name} because its filename is not in 'YYYY-MM-DD' format."
             )
             continue
@@ -598,7 +567,7 @@ def weighted_rasters(
 
         # Skip if output already exists
         if final_outf.is_file():
-            logging.info(f"Weighted file already exists for {date.date()}. Skipping.")
+            print(f"Weighted file already exists for {date.date()}. Skipping.")
             continue
 
         # Open the source raster once
@@ -616,7 +585,7 @@ def weighted_rasters(
                 try:
                     norm_eto = nldas_df.loc[dtindex, "daily_ETo_normed"]
                 except KeyError:
-                    logging.info(f"No NLDAS record for {dtindex}; using 0 as fallback.")
+                    print(f"No NLDAS record for {dtindex}; using 0 as fallback.")
                     norm_eto = 0.0
 
                 arr = src.read(band_idx)
@@ -641,7 +610,7 @@ def weighted_rasters(
             footprint_sum = final_footprint.sum()
             if np.isclose(footprint_sum, 1.0, atol=0.15):
                 # Write output raster
-                logging.info(f"Writing weighted footprint to {final_outf}")
+                print(f"Writing weighted footprint to {final_outf}")
                 with rasterio.open(
                     final_outf,
                     "w",
@@ -656,7 +625,7 @@ def weighted_rasters(
                 ) as out_raster:
                     out_raster.write(final_footprint, 1)
             else:
-                logging.warning(
+                print(
                     f"Final footprint sum check failed for {date.date()}: sum={footprint_sum:.3f}"
                 )
 
@@ -898,6 +867,68 @@ def calc_hourly_ffp_xr(
     years=None,
     output_dir=None,
 ):
+    """
+    Compute hourly ASCE reference evapotranspiration (ETo/ETr) for a set of
+    **gridded** meteorological NetCDF files and append the results to each file.
+
+    For every year in *years* the routine
+
+    1. Opens ``"<year>_utah_merged.nc"`` from *input_data_dir* as an
+       :class:`xarray.Dataset`.
+    2. Derives meteorological fields required by **RefET** (air temperature in
+       °C, actual vapor pressure *kPa*, wind speed m s⁻¹, short‑wave radiation
+       W m⁻²).
+    3. Calculates hourly ETo and ETr with :pyclass:`refet.Hourly` for an
+       elevation range of 1 100 – 1 975 m (25 m steps).
+    4. Stores the resulting 4‑D arrays in the dataset as ``ETo`` and ``ETr``
+       (dimensions ``elevation, time, lat, lon``).
+    5. Writes the augmented dataset to
+       ``"<year>_with_eto.nc"`` in *output_dir*.
+
+    Parameters
+    ----------
+    input_data_dir : str or pathlib.Path, optional
+        Directory that contains the yearly NetCDF files
+        ``"<year>_utah_merged.nc"``.  Defaults to the current working
+        directory.
+    years : list of int, optional
+        Years to process.  If *None* the default list
+        ``[2021, 2022, 2023, 2024]`` is used.
+    output_dir : str or pathlib.Path, optional
+        Destination directory for the ``*_with_eto.nc`` files.  If *None*,
+        the original *input_data_dir* is used.
+
+    Returns
+    -------
+    None
+        The function writes one NetCDF file per year and does not return a
+        Python object.
+
+    Notes
+    -----
+    * Elevations span **1 100 m to 1 975 m a.s.l.** in 25 m increments,
+      producing 36 elevation layers.
+    * Meteorological variable names in the input files must be
+
+      - ``Tair``  [K] – air temperature
+      - ``PSurf`` [Pa] – surface pressure
+      - ``Qair`` – specific humidity (kg kg⁻¹)
+      - ``Wind_E`` / ``Wind_N`` – east‐ and north‑component wind (m s⁻¹)
+      - ``SWdown`` [W m⁻²] – incident short‑wave radiation
+
+    * **Units**: output ETo/ETr are in millimetres per hour (``mm/hour``).
+    * The function prints each year to stdout as a simple progress indicator.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> calc_hourly_ffp_xr(
+    ...     input_data_dir=Path("/data/met/"),
+    ...     years=[2022, 2023],
+    ...     output_dir=Path("/data/met/eto/")
+    ... )
+    """
+
     if years is None:
         years = [2021, 2022, 2023, 2024]
     else:
@@ -1037,96 +1068,74 @@ def calc_hourly_ffp(
     origin_d=200.0,
 ):
     """
-    Calculate the footprint climatology for an eddy covariance flux station.
+    Calculate and write hourly footprint climatologies for an eddy‑covariance
+    station.
 
-    This function retrieves flux and meteorological data from a database, processes the data,
-    and calculates footprint climatology for each valid day. The results are stored as GeoTIFF
-    raster files representing daily footprints.
+    The routine fetches meteorological and flux data, applies the Kljun et al.
+    (2015) footprint model for every valid hour starting at *startdate*, and
+    stores the results as daily multi‑band GeoTIFFs (each band = one hour).
 
-    Parameters:
+    Parameters
     ----------
     station : str
-        Station identifier used to retrieve configuration and observational data.
-    startdate : str, optional (default: '2022-01-01')
-        The start date for querying flux and meteorological data.
-    out_path : str, optional (default=None)
-    config_path : str, optional
-        Path to the station configuration file containing metadata.
-    secrets_path : str, optional
-        Path to the secrets configuration file containing database credentials.
-    epsg : int, optional (default: 5070)
-        EPSG code for coordinate transformation (default is NAD83/Conus Albers).
-    h_c : float, optional (default: 0.2)
-        Height of the canopy in meters.
-    zm_s : float, optional (default: 2.0)
-        Measurement height above ground in meters.
-    dx : float, optional (default: 3.0)
-        Grid resolution for the footprint model in meters.
-    h_s : float, optional (default: 2000.0)
-        Assumed height of the atmospheric boundary layer in meters.
-    origin_d : float, optional (default: 200.0)
-        Distance from the origin defining the model domain in meters.
+        Site identifier used to locate configuration and observational data.
+    startdate : str, optional
+        First day to query data (``"YYYY‑MM‑DD"``).  Default is
+        ``"2022‑01‑01"``.
+    out_dir : str or pathlib.Path, optional
+        Destination directory for the daily ``*_weighted.tif`` rasters.  If
+        *None*, a folder named ``footprints`` is created next to the script.
+    config_path : str or pathlib.Path, optional
+        Path to a station configuration file containing metadata
+        (latitude, longitude, elevation, tower height).
+    secrets_path : str or pathlib.Path, optional
+        INI file holding database credentials.  Default is
+        ``"../../secrets/config.ini"``.
+    epsg : int, optional
+        EPSG code for the target projection; default is ``5070`` (NAD83 / CONUS
+        Albers).
+    h_c : float, optional
+        Mean canopy height *h<sub>c</sub>* [m].  Default is ``0.2``.
+    zm_s : float, optional
+        Measurement height above ground *zₘ* [m].  Default is ``2.0``.
+    dx : float, optional
+        Spatial resolution of the footprint grid [m].  Default is ``3.0``.
+    h_s : float, optional
+        Assumed boundary‑layer height *hₛ* [m].  Default is ``2000.0``.
+    origin_d : float, optional
+        Half‑width of the model domain (origin ± *origin_d*) [m].  Default is
+        ``200.0``.
 
-    Process:
-    --------
-    1. Loads station metadata (latitude, longitude, elevation) from a configuration file.
-    2. Retrieves flux data (`amfluxeddy`) from the database and preprocesses it:
-       - Converts timestamps to datetime format.
-       - Resamples data to hourly intervals.
-       - Filters out invalid or missing values.
-    3. Converts station coordinates from latitude/longitude to UTM using the specified EPSG code.
-    4. Computes displacement height (`d`) and adjusts the measurement height (`zm`).
-    5. Loops through each valid day and processes hourly footprint fields:
-       - Calls `ffp.ffp_climatology` to compute footprint climatology.
-       - Transforms footprint grid coordinates.
-       - Creates an affine transformation for georeferencing.
-    6. Writes the output to a multi-band GeoTIFF file, where each band represents an hourly footprint.
-    7. Closes the dataset safely after writing all footprint data.
-
-    Output:
+    Returns
     -------
-    - GeoTIFF Raster File: `{YYYY-MM-DD}_weighted.tif`
-      - Stores footprint climatology for each valid day.
-      - Georeferenced to the station’s UTM coordinates.
+    None
+        The function writes GeoTIFFs to *out_dir* and returns no value.
 
-    Dependencies:
-    -------------
-    - configparser
-    - requests
-    - pandas
-    - numpy
-    - pathlib
-    - pyproj
-    - rasterio
-    - micromet
-    - ffp (Footprint modeling library)
-    - multiprocessing
+    Notes
+    -----
+    * A day is processed only when ≥ 5 hourly records are valid.
+    * Existing raster files are **not** overwritten.
+    * Calculations use data between 06:00 and 20:00 local time.
+    * Errors during an hourly run are logged and that hour is skipped.
 
-    Example Usage:
-    --------------
-    >>> calc_ffp('US-UTW')
+    Examples
+    --------
+    >>> calc_hourly_ffp("US-UTW")
 
-    Parallel Execution:
-    -------------------
-    The function can be executed in parallel for multiple stations using multiprocessing:
+    Run in parallel for several stations:
 
-    >>> pool = mp.Pool(processes=8)
-    >>> pool.map(calc_ffp, ['US-UTW', 'US-XYZ', 'US-ABC'])
-
-    Notes:
-    ------
-    - The function skips days with fewer than 5 valid hourly records.
-    - Existing daily raster files are not overwritten.
-    - Only data from 6 AM to 8 PM is used for footprint calculations.
-    - Errors during hourly footprint computations are handled gracefully, skipping affected hours.
+    >>> import multiprocessing as mp
+    >>> with mp.Pool(processes=8) as pool:
+    ...     pool.map(calc_hourly_ffp, ["US-UTW", "US-XYZ", "US-ABC"])
     """
+
     if config_path is None:
         config_path = f"../station_config/{station}.ini"
 
     metadata = load_configs(station, config_path, secrets_path)
     df = fetch_and_preprocess_data(metadata["url"], station, startdate)
     if df.empty:
-        logging.info(f"No valid data found for station {station}. Skipping.")
+        print(f"No valid data found for station {station}. Skipping.")
         return
 
     transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}")
@@ -1148,12 +1157,12 @@ def calc_hourly_ffp(
     for date in df.index.date:
         temp_df = df[df.index.date == date].between_time("06:00", "20:00")
         if len(temp_df) < 5:
-            logging.info(f"Less than 5 hours of data on {date}, skipping.")
+            print(f"Less than 5 hours of data on {date}, skipping.")
             continue
 
         final_outf = out_dir / f"{date:%Y_%m_%d}.tif"
         if final_outf.is_file():
-            logging.info(f"Final footprint already exists: {final_outf}. Skipping.")
+            print(f"Final footprint already exists: {final_outf}. Skipping.")
             continue
 
         footprints = _compute_hourly_footprint(
@@ -1310,7 +1319,7 @@ def mask_fp_cutoff(f_array, cutoff=0.9):
     f_array = np.where(f_array >= sum_cutoff, f_array, np.nan)
     f_array[~np.isfinite(f_array)] = 0.00000000e000
 
-    logger.debug(f"mask_fp_cutoff: applied cutoff={cutoff}, sum_cutoff={sum_cutoff}")
+    print(f"mask_fp_cutoff: applied cutoff={cutoff}, sum_cutoff={sum_cutoff}")
     return f_array
 
 
@@ -1359,7 +1368,7 @@ def find_transform(xs, ys):
 
     # Calculate affine transform
     aff_transform = Affine(*cv2.getAffineTransform(in_xy, out_xy).flatten())
-    logger.debug("Affine transform calculated.")
+    print("Affine transform calculated.")
     return aff_transform
 
 
@@ -1436,47 +1445,52 @@ def download_nldas(
 
 
 def read_compiled_input(path: str | Path) -> tuple | None:
-    """
-    Read and validate compiled input data for footprint modeling.
+    r"""
+    Load a CSV file that contains pre‑compiled inputs for flux‑footprint
+    modelling, validate its contents, and return the cleaned data.
 
-    This function loads a CSV file and checks whether it includes all required
-    variables for flux footprint modeling. If valid, it parses the index as datetime,
-    resamples to hourly resolution, and drops rows missing critical data. It also
-    extracts geographic coordinates and drops unused columns.
+    The routine
+
+    1. reads the file into a :class:`pandas.DataFrame`;
+    2. parses the index as ``datetime`` and resamples to **hourly** means;
+    3. verifies that every required variable is present;
+    4. drops rows in which any required value is missing; and
+    5. extracts site latitude/longitude from the first row.
 
     Parameters
     ----------
     path : str or pathlib.Path
-        Path to the CSV file containing preprocessed input data.
+        Path to the CSV file containing the pre‑processed input data.
 
     Returns
     -------
-    tuple or None
-        Returns a tuple `(df, latitude, longitude)` if valid data is found, where:
-        - df : pandas.DataFrame
-            Cleaned and resampled input data with necessary variables for modeling.
-        - latitude : float
-            Latitude of the site (from the first row of the file).
-        - longitude : float
-            Longitude of the site (from the first row of the file).
+    tuple[pandas.DataFrame, float, float] or None
+    *If* the file is valid, a tuple ``(df, latitude, longitude)``
 
-        Returns `None` if required variables are missing or file is improperly formatted.
+    If required variables are missing or the file cannot be parsed,
+    the function returns ``None``.
 
     Notes
     -----
-    Required variables:
-        - latitude, longitude
-        - ET_corr (corrected evapotranspiration)
-        - wind_dir, u_star, sigma_v
-        - zm (measurement height), hc (canopy height), d (displacement height), L (Obukhov length)
-        - At least one of: u_mean (mean wind speed) or z0 (roughness length)
+    **Variables that *must* be present**
 
-    Optional retained columns (if present):
-        - IGBP_land_classification
-        - secondary_veg_type
+    - ``latitude``, ``longitude``
+    - ``ET_corr``                    – corrected evapotranspiration
+    - ``wind_dir``, ``u_star``, ``sigma_v``
+    - ``zm`` (measurement height), ``hc`` (canopy height),
+      ``d`` (displacement height), ``L`` (Obukhov length)
+    - *Either* ``u_mean`` (mean wind speed) *or* ``z0`` (roughness length)
 
-    - The data is resampled to hourly means using `pandas.resample("H").mean()`.
-    - Rows missing any required values after resampling are dropped.
+    **Optional columns that are retained if present**
+
+    - ``IGBP_land_classification``
+    - ``secondary_veg_type``
+
+    The data are resampled with::
+
+        df = df.resample("H").mean()
+
+    and any hourly row still missing a required value is dropped.
 
     Examples
     --------
@@ -1486,6 +1500,7 @@ def read_compiled_input(path: str | Path) -> tuple | None:
            'zm', 'hc', 'd', 'L', 'u_mean'],
           dtype='object')
     """
+
     ret = None
     need_vars = {
         "latitude",

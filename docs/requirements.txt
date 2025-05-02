@@ -19,3 +19,8 @@ sphinx-rtd-theme
 myst-parser
 pytest
 pytest-cov
+nbsphinx
+jupyter
+ipykernel
+jupyterlab
+notebook 

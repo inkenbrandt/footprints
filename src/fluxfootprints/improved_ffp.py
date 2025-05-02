@@ -1564,12 +1564,12 @@ class FFPModel:
         Calculate the standard deviation of crosswind spread σy.
 
         Implements Equations 18-19 from Kljun et al. (2015):
-        σy* = ac * sqrt((bc * |X*|^2)/(1 + cc|X*|))
+        ``σy* = ac * sqrt((bc * |X*|^2)/(1 + cc|X*|))``
 
         Where ac=2.17, bc=1.66, cc=20.0 (Equation 19)
 
         Real-scale σy is then obtained through:
-        σy = σy*/(scale_const) * zm * σv/u*
+        ``σy = σy*/(scale_const) * zm * σv/u*``
 
         Where scale_const depends on stability (Eq. not numbered in paper):
         - For unstable: 1e-5|zm/L|^(-1) + 0.80
@@ -1608,25 +1608,34 @@ class FFPModel:
         self, x: Union[float, np.ndarray]
     ) -> Union[float, np.ndarray]:
         """
-        Calculate the standard deviation of crosswind spread σy.
+        Calculate the standard deviation of cross‑wind spread :math:`\sigma_y`.
 
-        Implements Equations 18-19 from Kljun et al. (2015):
-        σy* = ac * sqrt((bc * |X*|^2)/(1 + cc|X*|))
+        Implements Eqs. 18–19 from *Kljun et al., 2015*:
 
-        Where ac=2.17, bc=1.66, cc=20.0 (Equation 19)
+        .. math::
 
-        Real-scale σy is then obtained through:
-        σy = σy*/(scale_const) * zm * σv/u*
+            \sigma_y^* = a_c \sqrt{\frac{b_c \lvert X^* \rvert^2}
+                                        {1 + c_c \lvert X^* \rvert}}
 
-        Where scale_const depends on stability (Eq. not numbered in paper):
-        - For unstable: 1e-5|zm/L|^(-1) + 0.80
-        - For stable: 1e-5|zm/L|^(-1) + 0.55
+            \sigma_y   = \frac{\sigma_y^*}{\text{scale\_const}}
+                        \; z_m \; \sigma_v / u_*
 
-        Args:
-            x (float or array): Distance from receptor [m]
+        where
 
-        Returns:
-            Standard deviation of crosswind spread [m]
+        * :math:`a_c = 2.17`
+        * :math:`b_c = 1.66`
+        * :math:`c_c = 20.0`
+        * ``scale_const`` depends on stability (see paper).
+
+        Parameters
+        ----------
+        x : float or ndarray
+            Up‑wind distance from the receptor [m].
+
+        Returns
+        -------
+        float or ndarray
+            Cross‑wind spread :math:`\sigma_y` [m].
         """
         # Get mean values of stability parameters for consistent calculation
         zm_mean = float(self.ds["zm"].mean())
