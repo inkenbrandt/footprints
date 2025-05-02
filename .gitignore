@@ -1,0 +1,4 @@
+/.pytest_cache
+/.idea
+/__pycache__
+/src/flux-footprints/__pycache__
