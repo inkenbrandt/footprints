@@ -5,3 +5,9 @@
 /.vscode
 /src/fluxfootprints/__pycache__
 /docs/_build
+/docs/notebooks/output
+/docs/notebooks/example.log
+/secrets
+/data/logs
+/data/station_data
+/data/station_config/output
