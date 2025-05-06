@@ -260,19 +260,6 @@ class ffp_climatology_new:
             }
         )
 
-        self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
-        self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
-        self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])
-        self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])
-        self.df["ustar"] = np.where(self.df["ustar"] <= 0.1, np.nan, self.df["ustar"])
-
-        self.df["wind_dir"] = np.where(
-            self.df["wind_dir"] > 360.0, np.nan, self.df["wind_dir"]
-        )
-        self.df["wind_dir"] = np.where(
-            self.df["wind_dir"] < 0.0, np.nan, self.df["wind_dir"]
-        )
-
         # Check if all required fields are in the DataFrame
         all_present = np.all(
             np.isin(["ol", "sigmav", "ustar", "wind_dir"], self.df.columns)
@@ -282,7 +269,20 @@ class ffp_climatology_new:
         else:
             self.raise_ffp_exception(1)
 
-        self.df = self.df.dropna(subset=["sigmav", "wind_dir", "h", "ol"], how="any")
+        self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
+        self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
+        self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])
+        self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])
+        self.df["ustar"] = np.where(self.df["ustar"] <= 0.05, np.nan, self.df["ustar"])
+
+        self.df["wind_dir"] = np.where(
+            self.df["wind_dir"] > 360.0, np.nan, self.df["wind_dir"]
+        )
+        self.df["wind_dir"] = np.where(
+            self.df["wind_dir"] < 0.0, np.nan, self.df["wind_dir"]
+        )
+
+        self.df = self.df.dropna(subset=["sigmav", "wind_dir", "h", "ol","ustar"], how="any")
         self.ts_len = len(self.df)
         self.logger.debug(f"input len is {self.ts_len}")
 

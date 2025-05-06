@@ -389,7 +389,7 @@ def run_km(
     # Cross‑wind Gaussian std ~  σ = a * |x|
     a = 0.35
 
-    fy = (xi ** ((1 + m) / r)) / (r * np.math.gamma((1 + m) / r))
+    fy = (xi ** ((1 + m) / r)) / (r * np.random.gamma((1 + m) / r))
     fy = fy * (np.abs(yv) ** (m / r - 1)) * np.exp(-xi / np.abs(yv))
 
     cross = (1 / (np.sqrt(2 * np.pi) * a * np.abs(yv))) * np.exp(

@@ -2093,7 +2093,7 @@ if __name__ == "__main__":
                 temp_line = temp_df.loc[temp_df.index.hour == t, :]
 
                 # Calculate footprint
-                temp_ffp = ffp_climatology(
+                ffpout = FFPModel(
                     domain=[-origin_d, origin_d, -origin_d, origin_d],
                     dx=dx,
                     dy=dx,
@@ -2111,7 +2111,7 @@ if __name__ == "__main__":
                 )
                 ####verbosoity=2 prints out errors; if z0 triggers errors, use umean
                 #    print(zm_s-d)
-
+                temp_ffp = ffpout.run()
                 f_2d = np.array(temp_ffp["fclim_2d"])
                 x_2d = np.array(temp_ffp["x_2d"]) + station_x
                 y_2d = np.array(temp_ffp["y_2d"]) + station_y

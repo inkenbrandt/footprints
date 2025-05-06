@@ -4,10 +4,10 @@ Unit‑tests for ep_footprint.py
 Covered items
 -------------
 * Footprint.error sentinel helper
-* kljun_04               – happy‑path & error branch
-* kormann_meixner_01     – basic sanity checks
-* hsieh_00               – basic sanity checks
-* handle_footprint       – routing logic (“kljun” → “km” fallback, neutral “none”, unknown model)
+* kljun               – happy‑path & error branch
+* kormann_meixner     – basic sanity checks
+* hsieh               – basic sanity checks
+* handle_footprint    – routing logic (“kljun” → “km” fallback, neutral “none”, unknown model)
 """
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ def test_error_helper():
 # ---------------------------------------------------------------------------
 # kljun_04
 # ---------------------------------------------------------------------------
-def test_kljun04_valid_output():
-    fp = ep.kljun_04(
+def test_kljun_valid_output():
+    fp = ep.kljun(
         std_w=0.5,  # √variance of w
         ustar=0.3,
         zL=0.1,
@@ -85,9 +85,9 @@ def test_kljun04_valid_output():
     assert_monotonic(fp)
 
 
-def test_kljun04_error_branch():
+def test_kljun_error_branch():
     # std_w flagged as error → returns sentinel footprint
-    fp = ep.kljun_04(
+    fp = ep.kljun(
         std_w=ep.ERROR,
         ustar=0.3,
         zL=0.1,
@@ -102,7 +102,7 @@ def test_kljun04_error_branch():
 # kormann_meixner_01
 # ---------------------------------------------------------------------------
 def test_kormann_meixner_basic():
-    fp = ep.kormann_meixner_01(
+    fp = ep.kormann_meixner(
         ustar=0.3,
         zL=0.1,
         wind_speed=5.0,
@@ -117,8 +117,8 @@ def test_kormann_meixner_basic():
 # ---------------------------------------------------------------------------
 # hsieh_00
 # ---------------------------------------------------------------------------
-def test_hsieh00_basic():
-    fp = ep.hsieh_00(
+def test_hsieh_basic():
+    fp = ep.hsieh(
         MO_length=-50.0,
         sonic_height=2.0,
         disp_height=0.0,
@@ -144,7 +144,7 @@ def test_handle_footprint_direct_match():
         disp_height=0.0,
         rough_length=0.1,
     )
-    fp_direct = ep.kljun_04(
+    fp_direct = ep.kljun(
         std_w=np.sqrt(params["var_w"]),
         ustar=params["ustar"],
         zL=params["zL"],
@@ -152,7 +152,7 @@ def test_handle_footprint_direct_match():
         disp_height=params["disp_height"],
         rough_length=params["rough_length"],
     )
-    fp_handle = ep.handle_footprint(**params, foot_model="kljun_04")
+    fp_handle = ep.handle_footprint(**params, foot_model="kljun")
     # All fields should match exactly
     for name in fp_direct.__dataclass_fields__:
         assert getattr(fp_direct, name) == pytest.approx(
@@ -172,10 +172,10 @@ def test_handle_footprint_fallback_to_km():
         disp_height=0.0,
         rough_length=0.1,
     )
-    fp_handle = ep.handle_footprint(**params, foot_model="kljun_04")
+    fp_handle = ep.handle_footprint(**params, foot_model="kljun")
 
     # Compare to direct K&M call
-    fp_km = ep.kormann_meixner_01(
+    fp_km = ep.kormann_meixner(
         ustar=params["ustar"],
         zL=params["zL"],
         wind_speed=params["wind_speed"],

@@ -16,9 +16,9 @@ from .compare import (
 from .ep_footprint import (
     Footprint,
     handle_footprint,
-    hsieh_00,
-    kljun_04,
-    kormann_meixner_01,
+    hsieh,
+    kljun,
+    kormann_meixner,
 )
 from .ffp_xr import ffp_climatology_new
 from .footprint_plotting import FootprintPlotter, add_plotting_to_footprint

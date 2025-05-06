@@ -1,4 +1,5 @@
 import numpy as np
+import scipy
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -143,49 +144,79 @@ def handle_footprint(
     foot_model: str = "kljun_04",
 ) -> Footprint:
     """
-    Hub for footprint model calculations.
+    Dispatch function for selecting and computing flux footprint models.
 
-    Args:
-        var_w: Variance of vertical wind
-        ustar: Friction velocity
-        zL: Stability parameter (z/L)
-        wind_speed: Wind speed
-        MO_length: Monin-Obukhov length
-        sonic_height: Height of sonic anemometer
-        disp_height: Displacement height
-        rough_length: Roughness length
-        foot_model: Footprint model to use ('kljun_04', 'kormann_meixner_01', 'hsieh_00')
+    This function selects an appropriate footprint model based on user input
+    and input parameter validity. It supports three footprint models: Kljun et al. (2004),
+    Kormann and Meixner (2001), and Hsieh et al. (2000). Automatically switches to a
+    fallback model if input constraints are violated.
 
-    Returns:
-        Footprint object containing calculation results
+    Parameters
+    ----------
+    var_w : float
+        Variance of vertical wind speed [m² s⁻²].
+    ustar : float
+        Friction velocity [m s⁻¹].
+    zL : float
+        Stability parameter (z / L) [-].
+    wind_speed : float
+        Mean horizontal wind speed [m s⁻¹].
+    MO_length : float
+        Monin-Obukhov length [m].
+    sonic_height : float
+        Height of the sonic anemometer above ground level [m].
+    disp_height : float
+        Displacement height [m].
+    rough_length : float
+        Surface roughness length [m].
+    foot_model : str, optional
+        Footprint model to use: one of {"kljun_04", "kormann_meixner_01", "hsieh_00"}.
+        Defaults to "kljun_04".
+
+    Returns
+    -------
+    Footprint
+        A dataclass containing footprint distance metrics. Returns an error footprint
+        if the selected model or parameters are invalid.
+
+    Notes
+    -----
+    If the `"kljun_04"` model is selected but input values are outside its
+    valid range, the function automatically switches to `"kormann_meixner_01"`.
+
+    See Also
+    --------
+    kljun_04 : Analytical footprint model by Kljun et al. (2004).
+    kormann_meixner_01 : Footprint model by Kormann and Meixner (2001).
+    hsieh_00 : Footprint model by Hsieh et al. (2000).
     """
     if foot_model == "none":
         return Footprint.error()
 
     # If Kljun model conditions not met, switch to Kormann and Meixner
-    if foot_model == "kljun_04" and (
+    if foot_model == "kljun" and (
         var_w <= 0.0
         or ustar < KJ_US_MIN
         or zL < KJ_ZL_MIN
         or zL > KJ_ZL_MAX
         or sonic_height < 1.0
     ):
-        foot_model = "kormann_meixner_01"
+        foot_model = "kormann_meixner"
 
     # Calculate std_w
     std_w = np.sqrt(var_w) if var_w >= 0.0 else ERROR
 
-    if foot_model == "kljun_04":
-        return kljun_04(std_w, ustar, zL, sonic_height, disp_height, rough_length)
-    elif foot_model == "kormann_meixner_01":
-        return kormann_meixner_01(ustar, zL, wind_speed, sonic_height, disp_height)
-    elif foot_model == "hsieh_00":
-        return hsieh_00(MO_length, sonic_height, disp_height, rough_length)
+    if foot_model == "kljun":
+        return kljun(std_w, ustar, zL, sonic_height, disp_height, rough_length)
+    elif foot_model == "kormann_meixner":
+        return kormann_meixner(ustar, zL, wind_speed, sonic_height, disp_height)
+    elif foot_model == "hsieh":
+        return hsieh(MO_length, sonic_height, disp_height, rough_length)
     else:
         return Footprint.error()
 
 
-def kljun_04(
+def kljun(
     std_w: float,
     ustar: float,
     zL: float,
@@ -194,7 +225,48 @@ def kljun_04(
     rough_length: float,
 ) -> Footprint:
     """
-    Footprint calculations based on Kljun et al. (2004, BLM)
+    Estimate footprint characteristics using the Kljun et al. (2004) parameterization.
+
+    This function computes footprint distances corresponding to peak and cumulative
+    source area contributions (1–90%) using the analytical model from Kljun et al. (2004,
+    Boundary-Layer Meteorology). It assumes steady-state, horizontally homogeneous
+    turbulence and neutral to moderately stable or unstable atmospheric conditions.
+
+    Parameters
+    ----------
+    std_w : float
+        Standard deviation of vertical velocity fluctuations [m s⁻¹].
+    ustar : float
+        Friction velocity [m s⁻¹].
+    zL : float
+        Stability parameter (z / L), where L is the Obukhov length [-].
+    sonic_height : float
+        Height of the sonic anemometer above ground level [m].
+    disp_height : float
+        Displacement height (zero-plane displacement) [m].
+    rough_length : float
+        Surface roughness length [m].
+
+    Returns
+    -------
+    Footprint
+        A dataclass containing the peak location and distances at which 1%, 10%, 30%, 50%,
+        70%, 80%, and 90% of the footprint is accumulated. Returns an error footprint
+        if inputs are invalid.
+
+    Notes
+    -----
+    The model is valid for:
+    - 0.01 < z/L < 15
+    - u* ≥ 0.21 m s⁻¹
+    - z - d > 1.0 m
+    - z₀ > 0
+
+    References
+    ----------
+    Kljun, N., Calanca, P., Rotach, M. W., & Schmid, H. P. (2004).
+    A simple parameterisation for flux footprint predictions.
+    Boundary-Layer Meteorology, 112(3), 503–523. https://doi.org/10.1023/B:BOUN.0000030653.71031.96
     """
     # Initialize to error
     if std_w == ERROR or ustar < KJ_US_MIN or zL < KJ_ZL_MIN or zL > KJ_ZL_MAX:
@@ -240,21 +312,50 @@ def kljun_04(
     )
 
 
-def kormann_meixner_01(
+def kormann_meixner(
     ustar: float, zL: float, wind_speed: float, sonic_height: float, disp_height: float
 ) -> Footprint:
     """
-    Footprint calculations based on Kormann and Meixner (2001)
+    Estimate footprint characteristics using the Kormann and Meixner (2001) analytical model.
 
-    Args:
-        ustar: Friction velocity
-        zL: Stability parameter (z/L)
-        wind_speed: Wind speed
-        sonic_height: Height of sonic anemometer
-        disp_height: Displacement height
+    This function computes the location of peak flux contribution and source area distances
+    corresponding to cumulative contributions of 1–90% using the model described by
+    Kormann and Meixner (2001). It integrates a 1D crosswind-integrated footprint function
+    derived from power-law profiles of wind speed and eddy diffusivity.
 
-    Returns:
-        Footprint object containing calculation results
+    Parameters
+    ----------
+    ustar : float
+        Friction velocity [m s⁻¹].
+    zL : float
+        Stability parameter (z / L) [-].
+    wind_speed : float
+        Mean horizontal wind speed at measurement height [m s⁻¹].
+    sonic_height : float
+        Height of the sonic anemometer above ground level [m].
+    disp_height : float
+        Displacement height [m].
+
+    Returns
+    -------
+    Footprint
+        A dataclass containing the peak location and distances at which 1%, 10%, 30%, 50%,
+        70%, 80%, and 90% of the footprint is accumulated.
+
+    Notes
+    -----
+    - Applies Monin-Obukhov similarity theory for stability correction.
+    - Assumes horizontally homogeneous surface conditions and power-law profiles for both
+      eddy diffusivity and wind speed.
+    - Integration is terminated at 90% cumulative contribution.
+    - For unstable conditions (z/L < 0), non-linear stability corrections are applied via
+      Paulson (1970) similarity functions.
+
+    References
+    ----------
+    Kormann, R., & Meixner, F. X. (2001).
+    An analytical footprint model for non-neutral stratification.
+    Boundary-Layer Meteorology, 99(2), 207–224. https://doi.org/10.1023/A:1018991015119
     """
     # von Karman constant
     k = 0.41
@@ -321,7 +422,7 @@ def kormann_meixner_01(
         x = i * dx
         # Cross-wind integrated 1D function (gamma function approximation)
         contribution = (
-            zeta**mu * np.exp(-zeta / x) / (x ** (1.0 + mu) * np.math.gamma(mu))
+            zeta**mu * np.exp(-zeta / x) / (x ** (1.0 + mu) * scipy.special.gamma(mu))
         )
         integral += contribution * dx
 
@@ -347,20 +448,48 @@ def kormann_meixner_01(
     )
 
 
-def hsieh_00(
+def hsieh(
     MO_length: float, sonic_height: float, disp_height: float, rough_length: float
 ) -> Footprint:
     """
-    Footprint calculations based on Hsieh et al. (2000)
+    Estimate footprint characteristics using the Hsieh et al. (2000) model.
 
-    Args:
-        MO_length: Monin-Obukhov length
-        sonic_height: Height of sonic anemometer
-        disp_height: Displacement height
-        rough_length: Roughness length
+    This function implements the analytical footprint model developed by
+    Hsieh et al. (2000), based on Monin-Obukhov similarity theory and a
+    stability-dependent formulation. It calculates the peak flux contribution
+    distance and footprint extents based on integrated contributions.
 
-    Returns:
-        Footprint object containing calculation results
+    Parameters
+    ----------
+    MO_length : float
+        Monin-Obukhov length [m].
+    sonic_height : float
+        Height of the sonic anemometer above ground level [m].
+    disp_height : float
+        Displacement height [m].
+    rough_length : float
+        Surface roughness length [m].
+
+    Returns
+    -------
+    Footprint
+        A dataclass containing the peak location and distances at which 1%, 10%, 30%, 50%,
+        70%, 80%, and 90% of the footprint is accumulated.
+
+    Notes
+    -----
+    - The model distinguishes between stable, unstable, and neutral atmospheric conditions
+      using the stability parameter zL = zu / L.
+    - `zu` is a derived scaling height incorporating roughness and log-profile assumptions.
+    - Integration is performed over 1D footprint function values to estimate distance thresholds.
+
+    References
+    ----------
+    Hsieh, C.-I., Katul, G., & Chi, T.-W. (2000).
+    An analytical model for estimating the footprint of turbulent fluxes in
+    thermally stratified atmospheric flows.
+    Journal of Geophysical Research: Atmospheres, 105(D8), 9651–9664.
+    https://doi.org/10.1029/2000JD900052
     """
     # von Karman constant
     k = 0.41

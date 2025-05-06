@@ -9,15 +9,36 @@ from scipy.stats import gaussian_kde
 
 def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
     """
-    Convert polar coordinates from a DataFrame to Cartesian coordinates.
+    Convert polar coordinates in a DataFrame to Cartesian coordinates.
 
-    Parameters:
-        df (pd.DataFrame): Input DataFrame containing polar coordinates.
-        wd_column (str): Column name for degrees from north.
-        dist_column (str): Column name for distance from origin.
+    This function adds Cartesian coordinate columns (`X_<dist_column>` and
+    `Y_<dist_column>`) to the input DataFrame based on polar inputs defined
+    by wind direction (in degrees from North) and radial distance.
 
-    Returns:
-        pd.DataFrame: A DataFrame with added 'X' and 'Y' columns.
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame containing polar coordinate columns.
+    wd_column : str, optional
+        Name of the column representing wind direction in degrees from North,
+        by default "WD".
+    dist_column : str, optional
+        Name of the column representing distance from origin,
+        by default "Dist".
+
+    Returns
+    -------
+    pandas.DataFrame
+        Modified DataFrame with two new columns:
+        - `'X_<dist_column>'`: Cartesian X coordinate
+        - `'Y_<dist_column>'`: Cartesian Y coordinate
+
+    Notes
+    -----
+    - The function treats `-9999` and `NaN` as missing values.
+    - Wind direction is converted such that 0° = North, 90° = East, etc.
+    - Cartesian conversion is performed using:
+      `X = dist * cos(θ)` and `Y = dist * sin(θ)` where θ = (90 - WD) in degrees.
     """
     # Create copies of the input columns to avoid modifying original data
     wd = df[wd_column].copy()
@@ -48,17 +69,38 @@ def aggregate_to_daily_centroid(
     weighted=True,
 ):
     """
-    Aggregate half-hourly coordinate data to daily centroids.
+    Aggregate sub-daily coordinate data to daily centroids.
 
-    Parameters:
-        df (pd.DataFrame): DataFrame containing timestamp and coordinates.
-        date_column (str): Column containing datetime values.
-        x_column (str): Column name for X coordinate.
-        y_column (str): Column name for Y coordinate.
-        weighted (bool): Weighted by ET column or not (default: True).
+    This function groups coordinate data by calendar date and computes the
+    centroid of X and Y values. If `weighted=True`, centroids are computed
+    using a weighted average based on the 'ET' (evapotranspiration) column.
 
-    Returns:
-        pd.DataFrame: Aggregated daily centroids.
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame containing timestamps and coordinate columns.
+    date_column : str, optional
+        Name of the column with datetime objects, by default "Timestamp".
+    x_column : str, optional
+        Name of the column representing X coordinates, by default "X".
+    y_column : str, optional
+        Name of the column representing Y coordinates, by default "Y".
+    weighted : bool, optional
+        If True, uses the 'ET' column as weights for centroid calculation;
+        otherwise computes an unweighted mean. Default is True.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with one row per date and columns for:
+        - `'Date'`: datetime.date object
+        - `x_column`: daily centroid X coordinate
+        - `y_column`: daily centroid Y coordinate
+
+    Notes
+    -----
+    - Requires a column named `'ET'` if `weighted=True`.
+    - Assumes the timestamp column can be parsed with `pd.to_datetime`.
     """
     # Define a lambda function to compute the weighted mean:
     wm = lambda x: np.average(x, weights=df.loc[x.index, "ET"])
@@ -101,19 +143,45 @@ def generate_density_raster(
     weight_field="ET",
 ):
     """
-    Generate a density raster from a point GeoDataFrame, weighted by the ET field.
+    Generate a weighted kernel density raster from a point GeoDataFrame.
 
-    Parameters:
-        gdf (GeoDataFrame): Input point GeoDataFrame with an 'ET' field.
-        resolution (float): Raster cell size in meters (default: 50m).
-        buffer_distance (float): Buffer beyond point extent (default: 200m).
-        epsg (int): Coordinate system EPSG code (default: 5070).
-        weight_field (str): Weight field name (default: ET).
+    This function uses a Gaussian kernel density estimation (KDE) to create a raster
+    from spatial point data, where each point is weighted by a specified attribute
+    (e.g., evapotranspiration). The output raster is georeferenced with an affine
+    transform and buffered beyond the point extent.
 
-    Returns:
-        raster (numpy.ndarray): Normalized density raster.
-        transform (Affine): Affine transformation for georeferencing.
-        bounds (tuple): (xmin, ymin, xmax, ymax) of the raster extent.
+    Parameters
+    ----------
+    gdf : geopandas.GeoDataFrame
+        Input GeoDataFrame containing point geometries and a weight field.
+    resolution : float, optional
+        Size of each raster cell in projection units (typically meters),
+        by default 50.
+    buffer_distance : float, optional
+        Distance to extend the raster beyond the extent of the points, in the same
+        units as the CRS (e.g., meters), by default 200.
+    epsg : int, optional
+        EPSG code for the output coordinate reference system, by default 5070
+        (NAD83 / Conus Albers).
+    weight_field : str, optional
+        Name of the column in `gdf` to use as weights in the KDE calculation,
+        by default "ET".
+
+    Returns
+    -------
+    density : numpy.ndarray
+        2D array of KDE density values (not normalized by default).
+    transform : affine.Affine
+        Affine transformation mapping array coordinates to geographic space.
+    bounds : tuple of float
+        Bounding box of the raster extent as (xmin, ymin, xmax, ymax).
+
+    Notes
+    -----
+    - This function assumes that the input geometries are point features.
+    - The returned density array is not normalized unless the line
+      `density /= np.sum(density)` is uncommented.
+    - The output CRS is set using `gdf.to_crs(epsg=...)`.
     """
 
     # Ensure correct CRS

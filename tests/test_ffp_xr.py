@@ -42,7 +42,7 @@ def valid_df():
         {
             # required fields (will be renamed internally)
             "V_SIGMA": [0.4, 0.5],
-            "USTAR": [0.3, 0.35],
+            "USTAR": [0.3, 0.6],
             "MO_LENGTH": [120.0, 150.0],
             "wd": [45.0, 90.0],
             # optional extras
@@ -51,7 +51,9 @@ def valid_df():
             "atm_bound_height": [2000.0, 2000.0],
             "inst_height": [2.0, 2.0],
         },
-        index=pd.date_range("2025‑05‑01", periods=2, freq="30min"),
+        index=pd.date_range("2025-05-01",
+                            periods=2,
+                            freq="30min"),
     )
 
 
@@ -81,10 +83,9 @@ def test_run_basic(valid_df, logger):
 # 2. Input filtering & ts_len
 # ---------------------------------------------------------------------------
 def test_input_filtering_drops_low_ustar(valid_df, logger):
-    """Rows with u* ≤ 0.1 are discarded during preprocessing."""
+    """Rows with u* ≤ 0.05 are discarded during preprocessing."""
     df = valid_df.copy()
-    df.loc[df.index[0], "USTAR"] = 0.05  # below threshold → should be removed
-
+    df.loc[df.index[0], "USTAR"] = 0.03  # below threshold → should be removed
     model = ffp_xr.ffp_climatology_new(df, smooth_data=False, logger=logger)
     # After filtering we expect only one time‑step left
     assert model.ts_len == 1
