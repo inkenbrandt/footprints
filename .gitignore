@@ -1,7 +1,6 @@
 /.pytest_cache
 /.idea
 /__pycache__
-/src/flux-footprints/__pycache__
 /.vscode
 /src/fluxfootprints/__pycache__
 /docs/_build
@@ -11,4 +10,6 @@
 /data/logs
 /data/station_data
 /data/station_config/output
-/data/station_config/gridMET_data
+/docs/notebooks/NLDAS_data
+/docs/notebooks/2021_utah_merged.parquet
+/docs/notebooks/2021_utah_merged.nc

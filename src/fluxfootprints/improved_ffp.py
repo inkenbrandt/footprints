@@ -51,11 +51,11 @@ class FFPModel:
     """
 
     REQUIRED_COLUMNS = [
-        "V_SIGMA",  # Standard deviation of lateral velocity fluctuations
-        "USTAR",  # Friction velocity
-        "MO_LENGTH",  # Obukhov length
-        "WD",  # Wind direction
-        "WS",  # Wind speed
+        "sigmav",  # Standard deviation of lateral velocity fluctuations
+        "ustar",  # Friction velocity
+        "ol",  # Obukhov length
+        "wind_dir",  # Wind direction
+        "umean",  # Wind speed
     ]
 
     def __init__(
@@ -136,15 +136,32 @@ class FFPModel:
         ValueError
             If any input parameters are invalid or inconsistent.
         """
-        if logger is None:
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.INFO)
-            self.logger.addHandler(logging.StreamHandler())
-        else:
-            self.logger = logger
+        self.verbosity = int(verbosity)
+
+        # Set up logger
+        self.logger = logger or self._setup_logger()
+        self.logger.setLevel(logging.DEBUG if verbosity > 1 else logging.WARNING)
+
+        # Model constants
+        self.k = 0.4  # von Karman constant
+        self.oln = 5000.0  # neutral stability limit
+
+        # Add RSL-specific parameters
+        self.n_rsl = 2.75  # RSL height multiplier (2 ≤ n ≤ 5 per paper)
+        self.rsl_params = {
+            "conv": {"ps1": 0.8},  # p value for convective conditions
+            "stab": {"ps1": 0.55},  # p value for stable conditions
+        }
 
         # Validate input DataFrame
-        self._validate_input_df(df)
+        self.df = self._validate_input_df(df)
+
+        # Process input data
+        self.prep_df_fields(
+            crop_height=crop_height,
+            inst_height=inst_height,
+            atm_bound_height=atm_bound_height,
+        )
 
         # Initialize basic attributes
         self.sigma_y = None
@@ -152,7 +169,6 @@ class FFPModel:
         self.fclim_2d = None
         self.f_2d = None
 
-        self.df = df.copy()  # Make a copy to avoid modifying original
         self.domain = self._validate_domain(domain)
         self.dx = float(dx)
         self.dy = float(dy)
@@ -174,32 +190,9 @@ class FFPModel:
 
         self.smooth_data = bool(smooth_data)
         self.crop = bool(crop)
-        self.verbosity = int(verbosity)
-
-        # Set up logger
-        self.logger = logger or self._setup_logger()
-        self.logger.setLevel(logging.DEBUG if verbosity > 1 else logging.INFO)
-
-        # Model constants
-        self.k = 0.4  # von Karman constant
-        self.oln = 5000.0  # neutral stability limit
-
-        # Add RSL-specific parameters
-        self.n_rsl = 2.75  # RSL height multiplier (2 ≤ n ≤ 5 per paper)
-        self.rsl_params = {
-            "conv": {"ps1": 0.8},  # p value for convective conditions
-            "stab": {"ps1": 0.55},  # p value for stable conditions
-        }
 
         # Initialize model parameters (will be updated based on stability)
         self.initialize_model_parameters()
-
-        # Process input data
-        self.prep_df_fields(
-            crop_height=crop_height,
-            inst_height=inst_height,
-            atm_bound_height=atm_bound_height,
-        )
 
         # Set up computational domain
         self.define_domain()
@@ -227,10 +220,25 @@ class FFPModel:
         ValueError
             If required columns are missing from the DataFrame.
         """
+        df1 = df.copy()  # Make a copy to avoid modifying original
+
+        # Rename fields to standard names
+        df1 = df1.rename(
+            columns={
+                "V_SIGMA": "sigmav",
+                "USTAR": "ustar",
+                "wd": "wind_dir",
+                "WD": "wind_dir",
+                "MO_LENGTH": "ol",
+                "ws": "umean",
+                "WS": "umean",
+            }
+        )
+
         missing_cols = [
             col
             for col in self.REQUIRED_COLUMNS
-            if col not in map(str.upper, df.columns)
+            if col not in map(str.lower, df1.columns)
         ]
         if missing_cols:
             raise ValueError(
@@ -239,10 +247,12 @@ class FFPModel:
 
         # Check for invalid values
         for col in self.REQUIRED_COLUMNS:
-            if df[col].isnull().any():
+            if df1[col].isnull().any():
                 self.logger.warning(f"Found null values in column {col}")
-            if not np.isfinite(df[col]).all():
+            if not np.isfinite(df1[col]).all():
                 self.logger.warning(f"Found non-finite values in column {col}")
+
+        return df1
 
     def _validate_domain(self, domain: list) -> list:
         """
@@ -601,19 +611,6 @@ class FFPModel:
         self.df["h_c"] = crop_height
         self.df["z0"] = crop_height * 0.123  # roughness length
         self.df["h"] = atm_bound_height
-
-        # Rename fields to standard names
-        self.df = self.df.rename(
-            columns={
-                "V_SIGMA": "sigmav",
-                "USTAR": "ustar",
-                "wd": "wind_dir",
-                "WD": "wind_dir",
-                "MO_LENGTH": "ol",
-                "ws": "umean",
-                "WS": "umean",
-            }
-        )
 
         # Apply validity checks
         self._apply_validity_masks()
@@ -1608,9 +1605,9 @@ class FFPModel:
         self, x: Union[float, np.ndarray]
     ) -> Union[float, np.ndarray]:
         """
-        Calculate the standard deviation of cross‑wind spread :math:`\sigma_y`.
+        Calculate the standard deviation of cross-wind spread :math:`\sigma_y`.
 
-        Implements Eqs. 18–19 from *Kljun et al., 2015*:
+        Implements Eqs. 18-19 from *Kljun et al., 2015*:
 
         .. math::
 
@@ -1630,12 +1627,12 @@ class FFPModel:
         Parameters
         ----------
         x : float or ndarray
-            Up‑wind distance from the receptor [m].
+            Up-wind distance from the receptor [m].
 
         Returns
         -------
         float or ndarray
-            Cross‑wind spread :math:`\sigma_y` [m].
+            Cross-wind spread :math:`\sigma_y` [m].
         """
         # Get mean values of stability parameters for consistent calculation
         zm_mean = float(self.ds["zm"].mean())
