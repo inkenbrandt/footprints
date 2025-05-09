@@ -13,6 +13,7 @@ authors = [
     {name = "Paul Inkenbrandt", email = "paulinkenbrandt@utah.gov"},
     {name = "Kathryn Ladig", email = "kladig@utah.gov"},
     {name = "Natascha Kljun", email = "natascha.kljun@cec.lu.se"},
+    {name = "John Volk", email = "John.Volk@dri.edu "},
 ]
 dependencies = [
     "python>=3.10",
@@ -29,7 +30,13 @@ dependencies = [
     "pyproj>=3.2",
     "rasterio>=1.2",
     "geopandas>=0.9",
+    "shapely>=1.7",
+    "affine>=2.3",
+    "cv2>=4.5",
+    "fluxdataqaqc>=0.1.0",
+    "refet>=0.1.0",
 ]
+
 
 [project.optional-dependencies]
 docs = [
@@ -38,6 +45,8 @@ docs = [
     "sphinx-copybutton>=0.5",
     "sphinx-autodoc-typehints>=1.12",
     "myst-parser>=0.15",
+    "numpydoc>=1.1",
+    "nbsphinx>=0.8",
 ]
 test = [
     "pytest>=6.0",

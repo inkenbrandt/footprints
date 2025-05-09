@@ -1,42 +1,10 @@
-import logging
 import numbers
-from typing import Optional, Tuple, Union
-
-import cv2
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
-import configparser
-import pandas as pd
 import numpy as np
-import pathlib
-import pyproj
-import rasterio
-
-from rasterio.warp import calculate_default_transform, reproject, Resampling
-import logging
-import multiprocessing as mp
-import datetime
-from affine import Affine
-from fluxdataqaqc import Data
 from matplotlib.colors import LogNorm
 from numpy import ma
 from scipy import signal as sg
-
-from scipy.ndimage import gaussian_filter
-
-import os
-import glob
-import re
-
-import requests
-from pathlib import Path
-
-import rasterio.features
-from shapely.geometry import shape
-import geopandas as gpd
-
-import xarray
-import refet
 
 
 def ffp_climatology(
@@ -163,7 +131,7 @@ def ffp_climatology(
     # Check that all lists have same length, if not raise an error and exit
     ts_len = len(ustar)
 
-    logger.debug(f"input len is {ts_len}")
+    print(f"input len is {ts_len}")
 
     if any(len(lst) != ts_len for lst in [sigmav, wind_dir, h, ol]):
         # at least one list has a different length, exit with error message
@@ -203,7 +171,7 @@ def ffp_climatology(
         umean,
     )
 
-    logger.debug(
+    print(
         f"variables ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans input: {ustars}, {sigmavs}, {hs}, {ols}, {wind_dirs}, {zms}, {z0s}, {umeans}"
     )
 
@@ -283,7 +251,7 @@ def ffp_climatology(
 
     # Put domain into more convenient vars
     xmin, xmax, ymin, ymax = domain
-    logger.info(f"Domain: {domain}")
+    print(f"Domain: {domain}")
     # Define rslayer if not passed
     if rslayer is None:
         rslayer = 0
@@ -307,7 +275,7 @@ def ffp_climatology(
     if fig is None:
         fig = 0
 
-    logger.debug(
+    print(
         f"parameters rslayer, smooth_data, crop, pulse, fig: {rslayer}, {smooth_data}, {crop}, {pulse}, {fig}"
     )
 
@@ -330,12 +298,12 @@ def ffp_climatology(
     x = np.linspace(xmin, xmax, nx + 1)
     y = np.linspace(ymin, ymax, ny + 1)
     x_2d, y_2d = np.meshgrid(x, y)
-    logger.debug(f"x_2d: {x_2d}, y_2d: {y_2d}")
+    print(f"x_2d: {x_2d}, y_2d: {y_2d}")
     # Polar coordinates
     # Set theta such that North is pointing upwards and angles increase clockwise
     rho = np.sqrt(x_2d**2 + y_2d**2)
     theta = np.arctan2(x_2d, y_2d)
-    logger.debug(f"rho: {rho}, theta: {theta}")
+    print(f"rho: {rho}, theta: {theta}")
     # initialize raster for footprint climatology
     fclim_2d = np.zeros(x_2d.shape)
 
@@ -349,10 +317,10 @@ def ffp_climatology(
         for vals in zip(ustars, sigmavs, hs, ols, wind_dirs, zms)
     ]
 
-    logger.debug(f"List of valids {valids}")
+    print(f"List of valids {valids}")
 
     if verbosity > 1:
-        logger.info("Beginning footprint calculations...")
+        print("Beginning footprint calculations...")
 
     for ix, (ustar, sigmav, h, ol, wind_dir, zm, z0, umean) in enumerate(
         zip(ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans)
@@ -360,13 +328,13 @@ def ffp_climatology(
         # Counter
         if verbosity > 1 and ix % pulse == 0:
             print("Calculating footprint ", ix + 1, " of ", ts_len)
-            logger.info(f"Calculating footprint {ix + 1} of {ts_len}")
+            print(f"Calculating footprint {ix + 1} of {ts_len}")
 
         valids[ix] = check_ffp_inputs(
             ustar, sigmav, h, ol, wind_dir, zm, z0, umean, rslayer, verbosity
         )
 
-        logger.debug(f"valids of {ix} are {valids[ix]}")
+        print(f"valids of {ix} are {valids[ix]}")
 
         # If inputs are not valid, skip current footprint
         if not valids[ix]:
@@ -377,7 +345,7 @@ def ffp_climatology(
             if wind_dir is not None:
                 rotated_theta = theta - wind_dir * np.pi / 180.0
 
-                logger.debug(f"rotated_theta: {rotated_theta}")
+                print(f"rotated_theta: {rotated_theta}")
             # ===========================================================================
             # Create real scale crosswind integrated footprint and dummy for
             # rotated scaled footprint
@@ -396,14 +364,14 @@ def ffp_climatology(
                         - 2.0 * np.arctan(xx)
                         + np.pi / 2
                     )
-                    logger.debug(f"psi_f = {psi_f}, xx = {xx}")
+                    print(f"psi_f = {psi_f}, xx = {xx}")
                 elif ol > 0 and ol < oln:
                     psi_f = -5.3 * zm / ol
                     # print(psi_f, zm, ol)
-                    logger.debug(f"psi_f = {psi_f}, zm = {zm}, ol = {ol}")
+                    print(f"psi_f = {psi_f}, zm = {zm}, ol = {ol}")
 
                 if (np.log(zm / z0) - psi_f) > 0:
-                    logger.debug("Calculating xstar_ci_dummy...")
+                    print("Calculating xstar_ci_dummy...")
                     xstar_ci_dummy = (
                         rho
                         * np.cos(rotated_theta)
@@ -427,7 +395,7 @@ def ffp_climatology(
                 else:
                     flag_err = 3
                     valids[ix] = 0
-                    logger.debug("flag err 3")
+                    print("flag err 3")
             else:
                 # Use umean if z0 not available
                 xstar_ci_dummy = (
@@ -484,15 +452,15 @@ def ffp_climatology(
             # ===========================================================================
             # Add to footprint climatology raster
             fclim_2d = fclim_2d + f_2d
-            logger.debug(f"fclim_2d: {fclim_2d}, f_2d: {f_2d}")
+            print(f"fclim_2d: {fclim_2d}, f_2d: {f_2d}")
     # ===========================================================================
     # Continue if at least one valid footprint was calculated
     n = sum(valids)
-    logger.debug(f"n: {n}")
+    print(f"n: {n}")
     vs = None
     clevs = None
     if n == 0:
-        logger.warning("No valid footprints were calculated.")
+        print("No valid footprints were calculated.")
         print("No footprint calculated")
         flag_err = 1
     else:
@@ -649,47 +617,47 @@ def check_ffp_inputs(ustar, sigmav, h, ol, wind_dir, zm, z0, umean, rslayer, ver
     # Check passed values for physical plausibility and consistency
     if zm <= 0.0:
         raise_ffp_exception(2, verbosity)
-        logger.debug(f"zm <= 0.0   zm={zm}")
+        print(f"zm <= 0.0   zm={zm}")
         return False
     if z0 is not None and umean is None and z0 <= 0.0:
         raise_ffp_exception(3, verbosity)
-        logger.debug("z0 is not None and umean is None and z0 <= 0.0")
+        print("z0 is not None and umean is None and z0 <= 0.0")
         return False
     if h <= 10.0:
         raise_ffp_exception(4, verbosity)
-        logger.debug(f"h <= 10.0  h={h}")
+        print(f"h <= 10.0  h={h}")
         return False
     if zm > h:
         raise_ffp_exception(5, verbosity)
-        logger.debug(f"zm > h  zm={zm}, h={h}")
+        print(f"zm > h  zm={zm}, h={h}")
         return False
     if z0 is not None and umean is None and zm <= 12.5 * z0:
-        logger.debug(f"zm <= 12.5 * z0   zm={zm}, z0={z0}")
+        print(f"zm <= 12.5 * z0   zm={zm}, z0={z0}")
         if rslayer == 1:
             raise_ffp_exception(6, verbosity)
-            logger.debug("rslayer == 1")
+            print("rslayer == 1")
         else:
             raise_ffp_exception(20, verbosity)
-            logger.debug("rslayer != 1")
+            print("rslayer != 1")
             return False
     if (float(zm) / ol).any() <= -15.5:
         raise_ffp_exception(7, verbosity)
-        logger.debug(f"float(zm) / ol).any() <= -15.5  zm={zm}, ol={ol}")
+        print(f"float(zm) / ol).any() <= -15.5  zm={zm}, ol={ol}")
         return False
     if sigmav.any() <= 0:
         raise_ffp_exception(8, verbosity)
-        logger.debug(f"sigmav.any() <= 0  sigmav={sigmav}")
+        print(f"sigmav.any() <= 0  sigmav={sigmav}")
         return False
     if ustar.any() <= 0.1:
         raise_ffp_exception(9, verbosity)
-        logger.debug(f"ustar.any() <= 0.1 {ustar}")
+        print(f"ustar.any() <= 0.1 {ustar}")
         return False
     if wind_dir.any() > 360:
         raise_ffp_exception(10, verbosity)
-        logger.debug(f"wind_dir.any() > 360   wind_dir={wind_dir}")
+        print(f"wind_dir.any() > 360   wind_dir={wind_dir}")
         return False
     if wind_dir.any() < 0:
-        logger.debug(f"wind_dir.any() < 0  wind_dir={wind_dir}")
+        print(f"wind_dir.any() < 0  wind_dir={wind_dir}")
         raise_ffp_exception(10, verbosity)
         return False
     return True
@@ -740,7 +708,7 @@ def get_contour_levels(f, dx, dy, rs=None):
     pclevs[:] = np.nan
     ars = np.empty(len(rs))
     ars[:] = np.nan
-    logger.debug(pclevs)
+    print(pclevs)
 
     sf = np.sort(f, axis=None)[::-1]
     msf = ma.masked_array(
@@ -762,7 +730,7 @@ def get_contour_vertices(x, y, f, lev):
     cs = plt.contour(x, y, f, [lev])
     plt.close()
     segs = cs.allsegs[0][0]
-    logger.debug(segs)
+    print(segs)
     xr = [vert[0] for vert in segs]
     yr = [vert[1] for vert in segs]
     # Set contour to None if it's found to reach the physical domain
@@ -1023,12 +991,12 @@ def raise_ffp_exception(code, verbosity):
     string = ex["type"] + "(" + str(ex["code"]).zfill(4) + "):\n " + ex["msg"]
 
     if verbosity > 0:
-        logger.warning("")
+        print("")
 
     if ex["type"] == exTypes["fatal"]:
         if verbosity > 0:
             string = string + "\n FFP_fixed_domain execution aborted."
-            logger.error(string)
+            print(string)
         else:
             string = ""
         raise Exception(string)
@@ -1036,14 +1004,10 @@ def raise_ffp_exception(code, verbosity):
         string = string + "\n Execution continues."
         if verbosity > 1:
             print(string)
-            logger.warning(string)
     elif ex["type"] == exTypes["error"]:
         string = string + "\n Execution continues."
         if verbosity > 1:
             print(string)
-            logger.error(string)
     else:
         if verbosity > 1:
             print(string)
-            logger.warning(string)
-

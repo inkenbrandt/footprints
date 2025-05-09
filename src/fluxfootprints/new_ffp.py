@@ -6,84 +6,68 @@ from scipy.ndimage import gaussian_filter
 import xarray
 
 
-
-
 class FFPclim:
     """
-    Derive a flux footprint estimate based on the simple parameterisation FFP
+    Initialize the FFPclim class for computing flux footprint climatologies.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input time series data containing meteorological parameters and flux tower metadata.
+    domain : np.ndarray, optional
+        Spatial domain extents as [xmin, xmax, ymin, ymax]. Default is [-1000, 1000, -1000, 1000].
+    dx : int, optional
+        Grid resolution in the x-direction (meters). Default is 2.
+    dy : int, optional
+        Grid resolution in the y-direction (meters). Default is 2.
+    nx : int, optional
+        Number of grid cells in x-direction. Default is 1000.
+    ny : int, optional
+        Number of grid cells in y-direction. Default is 1000.
+    rs : list or np.ndarray, optional
+        Source area fractions (0–1) for which contour levels should be derived. Default is [0.1 to 0.8].
+    crop_height : float, optional
+        Canopy or vegetation height in meters. Default is 0.2.
+    atm_bound_height : float, optional
+        Atmospheric boundary layer height in meters. Default is 2000.0.
+    inst_height : float, optional
+        Instrument measurement height in meters. Default is 2.0.
+    rslayer : bool, optional
+        Whether to allow footprint calculation within the roughness sublayer. Default is False.
+    smooth_data : bool, optional
+        Whether to apply Gaussian smoothing to footprint climatology. Default is True.
+    crop : bool, optional
+        Whether to crop output to contour extent. Default is False.
+    verbosity : int, optional
+        Logging verbosity level (0: silent, 1–5: increasing detail). Default is 2.
+    fig : bool, optional
+        Whether to generate diagnostic plots. Default is False.
+    logger : logging.Logger, optional
+        Logger for status messages and error handling.
+    time : optional
+        Optional timestamp or index metadata (not actively used).
+    crs : int, optional
+        Coordinate reference system identifier. Placeholder for geospatial integration.
+    station_x : float, optional
+        X-coordinate of the measurement station. Placeholder for geospatial integration.
+    station_y : float, optional
+        Y-coordinate of the measurement station. Placeholder for geospatial integration.
+    **kwargs : dict
+        Additional keyword arguments (e.g., "show_heatmap") that control downstream processing.
+
+    Notes
+    -----
+    This initializer configures all parameters and performs initial checks, preprocessing,
+    domain definition, and conversion of input data to xarray format. Key constants and
+    lookup tables are also initialized for use in footprint modeling.
+
+    References
+    ----------
     See Kljun, N., P. Calanca, M.W. Rotach, H.P. Schmid, 2015:
     The simple two-dimensional parameterisation for Flux Footprint Predictions FFP.
     Geosci. Model Dev. 8, 3695-3713, doi:10.5194/gmd-8-3695-2015, for details.
     contact: n.kljun@swansea.ac.uk
 
-    This function calculates footprints within a fixed physical domain for a series of
-    time steps, rotates footprints into the corresponding wind direction and aggregates
-    all footprints to a footprint climatology. The percentage of source area is
-    calculated for the footprint climatology.
-    For determining the optimal extent of the domain (large enough to include footprints)
-    use calc_footprint_FFP.py.
-
-    FFP Input
-        All vectors need to be of equal length (one value for each time step)
-        zm       = Measurement height above displacement height (i.e. z-d) [m]
-                   usually a scalar, but can also be a vector
-        z0       = Roughness length [m] - enter [None] if not known
-                   usually a scalar, but can also be a vector
-        umean    = Vector of mean wind speed at zm [ms-1] - enter [None] if not known
-                   Either z0 or umean is required. If both are given,
-                   z0 is selected to calculate the footprint
-        h        = Vector of boundary layer height [m]
-        ol       = Vector of Obukhov length [m]
-        sigmav   = Vector of standard deviation of lateral velocity fluctuations [ms-1]
-        ustar    = Vector of friction velocity [ms-1]
-        wind_dir = Vector of wind direction in degrees (of 360) for rotation of the footprint
-
-        Optional input:
-        domain       = Domain size as an array of [xmin xmax ymin ymax] [m].
-                       Footprint will be calculated for a measurement at [0 0 zm] m
-                       Default is smallest area including the r% footprint or [-1000 1000 -1000 1000]m,
-                       whichever smallest (80% footprint if r not given).
-        dx, dy       = Cell size of domain [m]
-                       Small dx, dy results in higher spatial resolution and higher computing time
-                       Default is dx = dy = 2 m. If only dx is given, dx=dy.
-        nx, ny       = Two integer scalars defining the number of grid elements in x and y
-                       Large nx/ny result in higher spatial resolution and higher computing time
-                       Default is nx = ny = 1000. If only nx is given, nx=ny.
-                       If both dx/dy and nx/ny are given, dx/dy is given priority if the domain is also specified.
-        rs           = Percentage of source area for which to provide contours, must be between 10% and 90%.
-                       Can be either a single value (e.g., "80") or a list of values (e.g., "[10, 20, 30]")
-                       Expressed either in percentages ("80") or as fractions of 1 ("0.8").
-                       Default is [10:10:80]. Set to "None" for no output of percentages
-        rslayer      = Calculate footprint even if zm within roughness sublayer: set rslayer = 1
-                       Note that this only gives a rough estimate of the footprint as the model is not
-                       valid within the roughness sublayer. Default is 0 (i.e. no footprint for within RS).
-                       z0 is needed for estimation of the RS.
-        smooth_data  = Apply convolution filter to smooth footprint climatology if smooth_data=1 (default)
-        crop         = Crop output area to size of the 80% footprint or the largest r given if crop=1
-        pulse        = Display progress of footprint calculations every pulse-th footprint (e.g., "100")
-        verbosity    = Level of verbosity at run time: 0 = completely silent, 1 = notify only of fatal errors,
-                       2 = all notifications
-        fig          = Plot an example figure of the resulting footprint (on the screen): set fig = 1.
-                       Default is 0 (i.e. no figure).
-
-    FFP output
-        FFP      = Structure array with footprint climatology data for measurement at [0 0 zm] m
-        x_2d	    = x-grid of 2-dimensional footprint [m]
-        y_2d	    = y-grid of 2-dimensional footprint [m]
-        fclim_2d = Normalised footprint function values of footprint climatology [m-2]
-        rs       = Percentage of footprint as in input, if provided
-        fr       = Footprint value at r, if r is provided
-        xr       = x-array for contour line of r, if r is provided
-        yr       = y-array for contour line of r, if r is provided
-        n        = Number of footprints calculated and included in footprint climatology
-        flag_err = 0 if no error, 1 in case of error, 2 if not all contour plots (rs%) within specified domain,
-                   3 if single data points had to be removed (outside validity)
-
-    Created: 19 May 2016 natascha kljun
-    Converted from matlab to python, together with Gerardo Fratini, LI-COR Biosciences Inc.
-    version: 1.4
-    last change: 11/12/2019 Gerardo Fratini, ported to Python 3.x
-    Copyright (C) 2015,2016,2017,2018,2019,2020 Natascha Kljun
     """
 
     def __init__(
@@ -196,10 +180,30 @@ class FFPclim:
         zm_s=2.0,
         h_s=2000.0,
     ):
-        # h_c Height of canopy [m]
-        # Estimated displacement height [m]
-        # zm_s Measurement height [m] from AMF metadata
-        # h_s Height of atmos. boundary layer [m] - assumed
+        """
+        Prepare and validate required DataFrame fields for footprint modeling.
+
+        Parameters
+        ----------
+        h_c : float, optional
+            Crop or canopy height in meters. Default is 0.2 m.
+        d_h : float or None, optional
+            Displacement height in meters. If None, estimated from h_c.
+        zm_s : float, optional
+            Instrument measurement height in meters. Default is 2.0 m.
+        h_s : float, optional
+            Atmospheric boundary layer height in meters. Default is 2000.0 m.
+
+        Raises
+        ------
+        ValueError
+            If any required fields are missing or input values fail validation.
+
+        Notes
+        -----
+        This function estimates roughness and displacement height if not provided,
+        renames required columns, performs range checks, and drops invalid rows.
+        """
 
         if d_h is None:
             d_h = 10 ** (0.979 * np.log10(h_c) - 0.154)
@@ -246,6 +250,25 @@ class FFPclim:
         self.logger.debug(f"input len is {self.ts_len}")
 
     def raise_ffp_exception(self, code):
+        """
+        Raise an FFP-specific exception with descriptive message.
+
+        Parameters
+        ----------
+        code : int
+            Error code corresponding to a predefined FFP error condition.
+
+        Raises
+        ------
+        ValueError
+            If the code corresponds to a fatal error.
+
+        Notes
+        -----
+        Error codes and messages correspond to input and processing validity checks
+        related to flux footprint modeling requirements.
+        """
+
         exceptions = {
             1: "At least one required parameter is missing. Check the inputs.",
             2: "zm (measurement height) must be larger than zero.",
@@ -270,6 +293,14 @@ class FFPclim:
             raise ValueError(f"FFP Exception {code}: {message}")
 
     def define_domain(self):
+        """
+        Define the spatial domain and coordinate grids for footprint calculations.
+
+        Notes
+        -----
+        This method constructs Cartesian and polar 2D grids using the domain
+        extents and resolutions, and initializes the footprint climatology array.
+        """
         # ===========================================================================
         # Create 2D grid
         self.xv, self.yv = np.meshgrid(self.x, self.y, indexing="xy")
@@ -296,11 +327,29 @@ class FFPclim:
         # ===========================================================================
 
     def create_xr_dataset(self):
+        """
+        Convert the internal DataFrame into an xarray.Dataset for time-indexed modeling.
+
+        Notes
+        -----
+        This conversion facilitates vectorized xarray operations and assigns 'time'
+        as the primary dimension for input variables.
+        """
         # Time series inputs as an xarray.Dataset
         self.df.index.name = "time"
         self.ds = xarray.Dataset.from_dataframe(self.df)
 
     def calc_xr_footprint(self):
+        """
+        Calculate the time-resolved footprint using vectorized xarray operations.
+
+        Notes
+        -----
+        This method applies the Kljun et al. (2015) parameterization in a grid-wise
+        fashion using wind direction rotation, stability corrections, and dispersion
+        assumptions. The result is accumulated into a footprint climatology field.
+        """
+
         # Rotate coordinates into wind direction
         self.rotated_theta = self.theta - (self.ds["wind_dir"] * np.pi / 180.0)
 
@@ -419,16 +468,19 @@ class FFPclim:
                 output_core_dims=[["x", "y"]],
             )
 
-    def smooth_and_contour(self, rs=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]):
+    def smooth_and_contour(self):
         """
-        Compute footprint climatology using xarray structures for efficient, vectorized operations.
+        Compute smoothed and normalized footprint climatology and extract contour levels.
 
-        Parameters:
-            rs (list): Contour levels to compute.
-            smooth_data (bool): Whether to smooth data using Gaussian filtering.
+        Returns
+        -------
+        xarray.Dataset
+            Dataset containing contour masks for each specified source area fraction.
 
-        Returns:
-            xr.Dataset: Aggregated footprint climatology.
+        Notes
+        -----
+        Applies optional Gaussian smoothing and constructs cumulative distribution-based
+        contour masks for the normalized footprint field.
         """
 
         # Ensure the footprint data is normalized
@@ -459,6 +511,24 @@ class FFPclim:
         return climatology
 
     def run(self):
+        """
+        Execute the complete flux footprint climatology workflow.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+            - 'x_2d': 2D x-coordinate grid (np.ndarray)
+            - 'y_2d': 2D y-coordinate grid (np.ndarray)
+            - 'fclim_2d': Accumulated footprint climatology (xarray.DataArray)
+            - 'f_2d': Time-resolved footprint raster (xarray.DataArray)
+            - 'rs': List of source area fractions used (list)
+
+        Notes
+        -----
+        This wrapper calls the core footprint calculation routine and returns results
+        in a structured dictionary.
+        """
         self.calc_xr_footprint()
         # self.smooth_and_contour()
         return {
@@ -468,4 +538,3 @@ class FFPclim:
             "f_2d": self.f_2d,
             "rs": self.rs,
         }
-
