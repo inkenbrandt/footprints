@@ -25,3 +25,4 @@ jupyterlab
 notebook 
 opencv-python
 fluxdataqaqc
+numpydoc
