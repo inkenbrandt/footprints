@@ -24,3 +24,4 @@ ipykernel
 jupyterlab
 notebook 
 opencv-python
+fluxdataqaqc
