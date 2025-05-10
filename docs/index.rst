@@ -13,5 +13,7 @@ fluxfootprint documentation
    
    fluxfootprints
    modules
+   exp
+   modeltypes
    Quick-start notebook <notebooks/test.ipynb>
 
