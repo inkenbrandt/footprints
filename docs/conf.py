@@ -16,7 +16,7 @@ import fluxfootprints  # Import the package to be documented
 project = "fluxfootprint"
 copyright = "2025, Paul Inkenbrandt, Natascha Kljun, John Volk"
 author = "Paul Inkenbrandt, Natascha Kljun, John Volk"
-release = "0.1.2"
+release = "0.1.3"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -40,7 +40,15 @@ bibtex_bibfiles = ["refs.bib"]  # Your BibTeX file(s)
 bibtex_reference_style = "author_year"  # Use author-year style for citations
 bibtex_default_style = "plain"
 templates_path = ["_templates"]
-exclude_patterns = ["_build/*", "Thumbs.db", ".DS_Store", "docs/_build/*", "tests/*"]
+exclude_patterns = [
+    "_build/*",
+    "Thumbs.db",
+    ".DS_Store",
+    "docs/_build/*",
+    "tests/*",
+    "docs/notebook/output/*",
+    "docs/notebook/NLDAS_data/*",
+]
 
 
 # -- Options for HTML output -------------------------------------------------

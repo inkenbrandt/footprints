@@ -13,3 +13,7 @@
 /docs/notebooks/NLDAS_data
 /docs/notebooks/2021_utah_merged.parquet
 /docs/notebooks/2021_utah_merged.nc
+/dist
+/docs/_static
+/docs/_templates
+/src/fluxfootprints.egg-info

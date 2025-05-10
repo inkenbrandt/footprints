@@ -5,6 +5,9 @@ import geopandas as gpd
 
 from rasterio.transform import from_origin
 from scipy.stats import gaussian_kde
+import geopandas as gpd
+import pandas as pd
+from shapely.geometry import Point
 
 
 def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
@@ -214,3 +217,133 @@ def generate_density_raster(
     transform = from_origin(xmin, ymax, resolution, resolution)
 
     return density, transform, (xmin, ymin, xmax, ymax)
+
+
+def concat_fetch_gdf(data, epsg=5070):
+    dataxy = data.dropna(
+        subset=[
+            "X_FETCH_90",
+            "Y_FETCH_90",
+            "X_FETCH_55",
+            "Y_FETCH_55",
+            "X_FETCH_40",
+            "Y_FETCH_40",
+        ],
+        how="any",
+    )
+
+    dates = np.concatenate(
+        (dataxy.index.values, dataxy.index.values, dataxy.index.values)
+    )
+
+    xs = np.concatenate(
+        (
+            dataxy["X_FETCH_90"].values,
+            dataxy["X_FETCH_55"].values,
+            dataxy["X_FETCH_40"].values,
+        )
+    )
+    ys = np.concatenate(
+        (
+            dataxy["Y_FETCH_90"].values,
+            dataxy["Y_FETCH_55"].values,
+            dataxy["Y_FETCH_40"].values,
+        )
+    )
+
+    weights = np.concatenate(
+        (
+            [90] * len(dataxy["X_FETCH_90"]),
+            [55] * len(dataxy["X_FETCH_55"]),
+            [40] * len(dataxy["X_FETCH_40"]),
+        )
+    )
+
+    # Create a DataFrame
+    df = pd.DataFrame(
+        {
+            "datetime_start": dates,
+            "x": xs,
+            "y": ys,
+            "weights": weights,
+        }
+    )
+
+    df = df.set_index("datetime_start")
+
+    dfday = df.groupby(pd.Grouper(freq="1D")).apply(
+        lambda g: pd.Series(
+            {
+                "x": (g["x"] * g["weights"]).sum() / g["weights"].sum(),
+                "y": (g["y"] * g["weights"]).sum() / g["weights"].sum(),
+                "weights": g["weights"].mean(),
+            }
+        )
+    )
+
+    # Convert to GeoDataFrame
+    gdf_day = gpd.GeoDataFrame(
+        dfday, geometry=[Point(xy) for xy in zip(dfday.x, dfday.y)]
+    )
+
+    # Convert to GeoDataFrame
+    gdf = gpd.GeoDataFrame(df, geometry=[Point(xy) for xy in zip(df.x, df.y)])
+
+    # Optionally set a CRS (e.g., WGS84)
+    gdf_day = gdf_day.set_crs(epsg=epsg)
+    gdf_day = gdf_day.dropna()
+
+    gdf = gdf.set_crs(epsg=epsg)
+    gdf = gdf.dropna()
+
+    return gdf_day, gdf
+
+
+def impute_evapotranspiration(df, in_field="ET", out_field="ET"):
+    """
+    Impute missing data in a half-hourly evapotranspiration time series.
+
+    Args:
+        df (pd.DataFrame): DataFrame with a datetime index and a column 'ET' containing evapotranspiration data.
+
+    Returns:
+        pd.DataFrame: DataFrame with missing values imputed.
+    """
+    df = df.copy()  # Avoid modifying the original DataFrame
+
+    # Ensure datetime index
+    df.index = pd.to_datetime(df.index)
+
+    # Step 1: Linear interpolation for small gaps
+    df[out_field] = df[in_field].interpolate(
+        method="linear", limit=4
+    )  # Limit to prevent long-term bias
+
+    # Step 2: Seasonal and daily imputation
+    df["hour"] = df.index.hour
+    df["minute"] = df.index.minute
+    df["day_of_year"] = df.index.dayofyear
+
+    # Compute typical ET values at the same time across different years
+    daily_medians = df.groupby(["day_of_year", "hour", "minute"])[out_field].median()
+
+    # Impute missing values using seasonal daily median
+    def impute_from_medians(row):
+        if pd.isna(row[out_field]):
+            return daily_medians.get(
+                (row["day_of_year"], row["hour"], row["minute"]), np.nan
+            )
+        return row[out_field]
+
+    df[out_field] = df.apply(impute_from_medians, axis=1)
+
+    # Step 3: Rolling mean smoothing to refine imputations
+    df[out_field] = df[out_field].bfill().ffill()  # Handle any remaining NaNs
+    df[out_field] = (
+        df[out_field].rolling(window=6, min_periods=1, center=True).mean()
+    )  # Smooth over 3 hours
+
+    # Drop helper columns
+    df.drop(columns=["hour", "minute", "day_of_year"], inplace=True)
+
+    return df

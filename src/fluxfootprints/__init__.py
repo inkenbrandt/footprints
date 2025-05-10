@@ -2,6 +2,7 @@ from .tools import (
     polar_to_cartesian_dataframe,
     aggregate_to_daily_centroid,
     generate_density_raster,
+    concat_fetch_gdf,
 )
 from .compare import (
     compare_footprints,

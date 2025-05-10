@@ -787,13 +787,14 @@ class FFPModel:
         4. Roughness sublayer validity: zm > z* ≈ n*hrs
            where hrs ≈ 10z₀ and 2 ≤ n ≤ 5 (Section 2)
 
-        Returns:
-            xr.Dataset: Dataset containing boolean masks for:
-                - height_valid: True where 20z₀ < zm < he
-                - stability_valid: True where -15.5 ≤ zm/L
-                - turbulence_valid: True where u* > 0.1 and σv > 0
-                - rsl_valid: True where measurement height above RSL
-                Combined validity is stored in self.valid_footprint
+        Returns
+        -------
+        xr.Dataset: Dataset containing boolean masks for:
+        - height_valid: True where 20z₀ < zm < he
+        - stability_valid: True where -15.5 ≤ zm/L
+        - turbulence_valid: True where u* > 0.1 and σv > 0
+        - rsl_valid: True where measurement height above RSL
+        Combined validity is stored in self.valid_footprint
         """
         validity_mask = xr.Dataset()
 
@@ -830,8 +831,10 @@ class FFPModel:
         """
         Calculate Π4 with comprehensive stability function implementation including neutral conditions.
 
-        Returns:
-            xr.DataArray: Calculated Π4 values with proper neutral condition handling
+        Returns
+        -------
+        xr.DataArray
+        Calculated Π4 values with proper neutral condition handling
         """
         stability_param = self.ds["zm"] / self.ds["ol"]
 
@@ -1607,7 +1610,7 @@ class FFPModel:
         """
         Calculate the standard deviation of cross-wind spread :math:`\sigma_y`.
 
-        Implements Eqs. 18-19 from *Kljun et al., 2015*:
+        Implements Eqs. 18-19 from *Kljun et al., 2015*:
 
         .. math::
 
@@ -1632,8 +1635,9 @@ class FFPModel:
         Returns
         -------
         float or ndarray
-            Cross-wind spread :math:`\sigma_y` [m].
+            Cross-wind spread :math:`\sigma_y` [m].
         """
+
         # Get mean values of stability parameters for consistent calculation
         zm_mean = float(self.ds["zm"].mean())
         h_mean = float(self.ds["h"].mean())
