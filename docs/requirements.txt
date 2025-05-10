@@ -26,3 +26,4 @@ notebook
 opencv-python
 fluxdataqaqc
 numpydoc
+sphinxcontrib-bibtex
