@@ -33,7 +33,6 @@ dependencies = [
     "shapely>=1.7",
     "affine>=2.3",
     "opencv-python>=4.5",
-    "fluxdataqaqc>=0.1.0",
     "refet>=0.1.0",
 
 ]
