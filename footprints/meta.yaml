@@ -1,5 +1,5 @@
 {% set name = "footprints" %}
-{% set version = "0.1.7" %}
+{% set version = "0.1.8" %}
 
 package:
   name: {{ name|lower }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/inkenbrandt/footprints/archive/v{{ version }}.tar.gz
-  sha256: eb46f5f7ca4994f33f64d1ac9b8a2be6785ad3db5cd014d0367e25d858b71139
+  sha256: 70f202e540664d3dbd77704f1573bd8a7eb710e4382139e8867bf5f767f74664
 
 build:
   noarch: python
@@ -39,7 +39,6 @@ requirements:
     - shapely >=1.7
     - affine >=2.3
     - opencv >=4.5
-    - fluxdataqaqc >=0.1.0
     - refet >=0.1.0
 
 test:
@@ -57,4 +56,4 @@ about:
 
 extra:
   recipe-maintainers:
-    - inkenbrandt
+    - paul
