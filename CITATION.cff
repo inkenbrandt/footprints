@@ -13,7 +13,7 @@ authors:
 - family-names: "Schroeder"
   given-names: "Martin"
 title: "fluxfootprints"
-version: 0.1.9
+version: 0.1.10
 doi: 10.5281/zenodo.1234
 date-released: 2025-05-01
 url: "https://github.com/inkenbrandt/footprints"
