@@ -1,16 +1,16 @@
 """footprint_compare.py
 ========================
-Utility functions for computing and comparing eddy‑covariance flux‑footprint
+Utility functions for computing and comparing eddy-covariance flux-footprint
 models.
 
-The module provides a small toolkit to **re‑run the side‑by‑side evaluations**
+The module provides a small toolkit to **re-run the side-by-side evaluations**
 we discussed earlier:
 
-1. Run multiple footprint models (classic Kljun‑FFP, the xarray rewrite
-   ``ffp_xr``\, the analytic Kormann‑Meixner (KM) approximation, or any other
-   user‑supplied function).
+1. Run multiple footprint models (classic Kljun-FFP, the xarray rewrite
+   `ffp_xr`, the analytic Kormann-Meixner (KM) approximation, or any other
+   user-supplied function).
 2. Compute common diagnostic metrics against a chosen reference model
-   (RMSE, peak‑location bias, 80 % source‑area overlap).
+   (RMSE, peak-location bias, 80 % source-area overlap).
 3. Return a tidy ``pandas.DataFrame`` *and* create optional difference plots.
 
 All heavy lifting (meteorological inputs, domain definition …) is delegated to
@@ -21,7 +21,7 @@ Example
 >>> import pandas as pd, numpy as np
 >>> from footprint_compare import (
 ...     run_ffp, run_ffp_xr, run_km, compare_footprints)
->>> met = pd.DataFrame({  # 24 h synthetic
+>>> met = pd.DataFrame({  # 24 h synthetic
 ...     "wind_dir": 0.0, "ws": 5.0, "sigmav": .5,
 ...     "ustar": .3, "ol": 200.0},
 ...     index=pd.date_range("2025-05-01", periods=24, freq="h"))
@@ -380,13 +380,13 @@ def run_km(
     xv, yv = np.meshgrid(x, y)
 
     # Parameters (roughly tuned to mimic FFP peak)
-    m, n = 1.0, 0.5  # power‑law exponents for u, K (neutral)
+    m, n = 1.0, 0.5  # power-law exponents for u, K (neutral)
     r = 2 + m - n
-    U = 1.0  # non‑dimensional wind speed
+    U = 1.0  # non-dimensional wind speed
     kappa = 0.4
     xi = (U * zm**r) / (r**2 * kappa * z0**n)
 
-    # Cross‑wind Gaussian std ~  σ = a * |x|
+    # Cross-wind Gaussian std ~  σ = a * |x|
     a = 0.35
 
     fy = (xi ** ((1 + m) / r)) / (r * np.random.gamma((1 + m) / r))
@@ -403,7 +403,7 @@ def run_km(
 
 
 # -----------------------------------------------------------------------------
-# High‑level comparison utilities
+# High-level comparison utilities
 # -----------------------------------------------------------------------------
 
 
@@ -427,11 +427,11 @@ def compare_footprints(
     plot
         If True, draw a difference map for each entry.
     vlim
-        Symmetric colour‑bar limit for difference plots.  By default the max
+        Symmetric colour-bar limit for difference plots.  By default the max
         absolute difference across all models is used.
     Returns
     -------
-    ``pandas.DataFrame`` with rows = model names, columns = metrics.
+    ``pandas.DataFrame`` with rows = model names, columns = metrics.
     """
     x_ref, y_ref = ref_grid
     records = {}
@@ -462,7 +462,7 @@ def compare_footprints(
 
 
 # -----------------------------------------------------------------------------
-# Convenience: run *all* models on same met‑data & compare in one call
+# Convenience: run *all* models on same met-data & compare in one call
 # -----------------------------------------------------------------------------
 
 

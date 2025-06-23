@@ -282,7 +282,9 @@ class ffp_climatology_new:
             self.df["wind_dir"] < 0.0, np.nan, self.df["wind_dir"]
         )
 
-        self.df = self.df.dropna(subset=["sigmav", "wind_dir", "h", "ol","ustar"], how="any")
+        self.df = self.df.dropna(
+            subset=["sigmav", "wind_dir", "h", "ol", "ustar"], how="any"
+        )
         self.ts_len = len(self.df)
         self.logger.debug(f"input len is {self.ts_len}")
 
@@ -485,6 +487,7 @@ class ffp_climatology_new:
         """
 
         # Ensure the footprint data is normalized
+        self.ds["footprint"] = self.fclim_2d
         self.ds["footprint"] = self.ds["footprint"] / self.ds["footprint"].sum(
             dim=("x", "y")
         )

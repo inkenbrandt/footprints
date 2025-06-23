@@ -1132,7 +1132,7 @@ def calc_hourly_ffp(
         config_path = f"../station_config/{station}.ini"
 
     metadata = load_configs(station, config_path, secrets_path)
-    df = fetch_and_preprocess_data(metadata["url"], station, startdate)
+    df = fetch_and_preprocess_data(metadata["climate_file_path"], station, startdate)
     if df.empty:
         print(f"No valid data found for station {station}. Skipping.")
         return

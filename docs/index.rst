@@ -15,7 +15,9 @@ fluxfootprint documentation
    modules
    exp
    modeltypes
-   Quick-start notebook <notebooks/footprint.ipynb>
-   AMF Daily <notebooks/amf_daily.ipynb>
+   Quick-start notebook 1 <notebooks/ffp_usage_demo.ipynb>
+   Quick-start notebook 2 <notebooks/FFPModel_quickstart.ipynb>
+   FFP xarray notebook <notebooks/ffp_xr_tutorial.ipynb>
+   Kormann Meixner notebook <notebooks/kormann_meixner_tutorial.ipynb>
    Row Footprint <notebooks/row_footprint.ipynb>
 

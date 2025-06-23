@@ -1,72 +1,22 @@
-"""kormann_meixner_footprint.py
+"""
+kormann_meixner_footprint.py
 ================================================
-Python implementation of the analytical flux–footprint model of Kormann & Meixner (2001).
+Python implementation of the analytical flux-footprint model of Kormann & Meixner (2001).
 
-This script provides utilities to estimate the scalar‐flux footprint of an eddy–covariance
-measurement using the closed‐form solutions derived in:
+This script provides utilities to estimate the scalar-flux footprint of an eddy-covariance
+measurement using the closed-form solutions derived in:
 
-    Kormann, R., & Meixner, F. X. (2001). *An analytical footprint model for non‐neutral
-    stratification*. **Boundary‑Layer Meteorology, 99**, 207‑224. https://doi.org/10.1023/A:1018991015119
+    Kormann, R., & Meixner, F. X. (2001). *An analytical footprint model for non-neutral
+    stratification*. **Boundary-Layer Meteorology, 99**, 207-224. https://doi.org/10.1023/A:1018991015119
 
-Only standard scientific‑Python packages are required (``numpy`` and ``scipy``).
+Only standard scientific-Python packages are required (``numpy`` and ``scipy``).
 
-The implementation follows the *analytical* approach described in Section 4 of the
-paper to relate Monin‑Obukhov similarity profiles to the power‑law formulation used
+The implementation follows the *analytical* approach described in Section 4 of the
+paper to relate Monin-Obukhov similarity profiles to the power-law formulation used
 in the footprint derivation.  If you require the more accurate (but slower)
 *numerical* approach, see the companion functions in
 :pyfunc:`analytical_power_law_parameters` and :pyfunc:`numerical_power_law_parameters`—the
-remainder of the code is agnostic to which parameter‑estimation routine is used.
-
-Example
--------
-Estimate the cross‑wind‑integrated footprint ``f(x)`` and the full 2‑D footprint
-``phi(x, y)`` for a 3‑m tower under weakly unstable conditions::
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from kormann_meixner_footprint import (
-        analytical_power_law_parameters, length_scale_xi,
-        crosswind_integrated_footprint, footprint_2d
-    )
-
-    # ------------------------------------------------------------------
-    # Input micrometeorological parameters (replace with observations)
-    z_m   = 3.0      # measurement height (m)
-    z_0   = 0.03     # aerodynamic roughness length (m)
-    L     = -50.0    # Obukhov length (m)  (negative ⇒ unstable)
-    u_star = 0.35    # friction velocity (m s⁻¹)
-    u_zm  = 2.8      # mean wind speed at z_m (m s⁻¹)
-    sigma_v = 0.8    # cross‑wind velocity std‑dev (m s⁻¹)
-    
-    # ------------------------------------------------------------------
-    # 1) Derive power‑law exponents m, n and proportionality constants U, kappa
-    m, n, U, kappa = analytical_power_law_parameters(z_m, z_0, L, u_star, u_zm)
-
-    # 2) Compute the length‑scale \xi at the measurement height
-    xi = length_scale_xi(z_m, U, kappa, m, n)
-
-    # 3) Evaluate the cross‑wind‑integrated footprint f(x)
-    x = np.logspace(-1, 3.2, 500)          # 0.1–1 000 m upstream
-    f_x = crosswind_integrated_footprint(x, xi, m, n)
-
-    # 4) Evaluate the full 2‑D footprint on a coarse grid
-    X, Y, phi = footprint_2d(x, np.linspace(-200, 200, 301), xi, m, n, u_zm, sigma_v)
-
-    # 5) Plot the results
-    plt.loglog(x, f_x)
-    plt.xlabel("upwind distance x (m)")
-    plt.ylabel("f(x, z_m)  [m⁻¹]")
-    plt.title("Cross‑wind‑integrated footprint")
-    plt.show()
-
-    # Contours of the 2‑D footprint
-    plt.contourf(X, Y, phi, levels=20, cmap="viridis")
-    plt.xlabel("x (m)")
-    plt.ylabel("y (m)")
-    plt.title("Footprint density φ(x, y, z_m)")
-    plt.colorbar(label="φ  [m⁻²]")
-    plt.axis("equal"); plt.show()
-
+remainder of the code is agnostic to which parameter-estimation routine is used.
 """
 
 from __future__ import annotations
@@ -78,12 +28,13 @@ from typing import Tuple
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-KAPPA = 0.4  # von‑Kármán constant
+KAPPA = 0.4  # von-Kármán constant
 PI_SQRT2 = np.sqrt(2.0 * np.pi)
 
 # -----------------------------------------------------------------------------
-# Monin–Obukhov similarity functions (Businger–Dyer relationships)
+# Monin-Obukhov similarity functions (Businger-Dyer relationships)
 # -----------------------------------------------------------------------------
+
 
 def _phi_m(z_over_L: float) -> float:
     """
@@ -152,18 +103,20 @@ def _psi_m(z_over_L: float) -> float:
     """
     if z_over_L >= 0.0:  # stable or neutral
         return 5.0 * z_over_L
-    # unstable (Paulson 1970)
+    # unstable (Paulson 1970)
     ζ = (1.0 - 16.0 * z_over_L) ** 0.25
     return (
         -2.0 * np.log((1.0 + ζ) / 2.0)
-        - np.log((1.0 + ζ ** 2) / 2.0)
+        - np.log((1.0 + ζ**2) / 2.0)
         + 2.0 * np.arctan(ζ)
         - np.pi / 2.0
     )
 
+
 # -----------------------------------------------------------------------------
-# Power‑law parameters
+# Power-law parameters
 # -----------------------------------------------------------------------------
+
 
 def analytical_power_law_parameters(
     z_m: float,
@@ -177,35 +130,35 @@ def analytical_power_law_parameters(
     Parameters
     ----------
     z_m
-        Eddy‑covariance measurement height (m).
+        Eddy-covariance measurement height (m).
     z_0
         Aerodynamic roughness length (m).
     L
         Obukhov length (m) (negative ⇒ unstable).
     u_star
-        Friction velocity (m s⁻¹).
+        Friction velocity (m s⁻¹).
     u_zm
-        Mean wind speed at *z_m* (m s⁻¹).
+        Mean wind speed at *z_m* (m s⁻¹).
 
     Returns
     -------
     m, n, U, kappa
-        Power‑law exponents and proportionality constants for
+        Power-law exponents and proportionality constants for
         ``u(z) = U z**m`` and ``K(z) = kappa z**n``.
     """
     z_by_L = z_m / L if L != 0.0 else 0.0
 
-    # Exponent for wind‑speed profile (Eq. 36)
+    # Exponent for wind-speed profile (Eq. 36)
     m = (u_star / (KAPPA * u_zm)) * _phi_m(z_by_L)
 
-    # Exponent for eddy diffusivity profile (Eq. 36)
+    # Exponent for eddy diffusivity profile (Eq. 36)
     if L >= 0.0:
         n = 1.0 / (1.0 + 5.0 * z_by_L)
     else:
         n = (1.0 - 24.0 * z_by_L) / (1.0 - 16.0 * z_by_L)
 
     # Proportionality constants by matching at z_m
-    U = u_zm / (z_m ** m)
+    U = u_zm / (z_m**m)
     kappa = (KAPPA * u_star / _phi_c(z_by_L)) / (z_m ** (n - 1.0))
 
     return m, n, U, kappa
@@ -214,6 +167,7 @@ def analytical_power_law_parameters(
 # -----------------------------------------------------------------------------
 # Core footprint equations
 # -----------------------------------------------------------------------------
+
 
 def length_scale_xi(z: float, U: float, kappa: float, m: float, n: float) -> float:
     """
@@ -241,7 +195,7 @@ def length_scale_xi(z: float, U: float, kappa: float, m: float, n: float) -> flo
         Characteristic length-scale ξ(z) (m).
     """
     r = 2.0 + m - n
-    return (U * z ** r) / (r ** 2 * kappa)
+    return (U * z**r) / (r**2 * kappa)
 
 
 def crosswind_integrated_footprint(
@@ -275,7 +229,7 @@ def crosswind_integrated_footprint(
     """
     r = 2.0 + m - n
     mu = (1.0 + m) / r
-    coeff = (xi ** mu) / gamma(mu)
+    coeff = (xi**mu) / gamma(mu)
     x = np.asarray(x)
     return coeff * x ** (-(1.0 + mu)) * np.exp(-xi / x)
 
@@ -289,20 +243,20 @@ def footprint_2d(
     u_zm: float,
     sigma_v: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return 2‑D footprint density φ(x, y, z_m).
+    """Return 2-D footprint density φ(x, y, z_m).
 
     Parameters
     ----------
     x, y
-        1‑D arrays of upstream and cross‑stream distances (m).  Positive *x* is
-        up‑wind.
+        1-D arrays of upstream and cross-stream distances (m).  Positive *x* is
+        up-wind.
     xi, m, n
         Parameters returned by :pyfunc:`length_scale_xi` and
         :pyfunc:`analytical_power_law_parameters`.
     u_zm
-        Mean wind speed at measurement height (m s⁻¹).
+        Mean wind speed at measurement height (m s⁻¹).
     sigma_v
-        Standard deviation of cross‑wind velocity fluctuations (m s⁻¹).
+        Standard deviation of cross-wind velocity fluctuations (m s⁻¹).
 
     Returns
     -------
@@ -313,21 +267,23 @@ def footprint_2d(
     y = np.asarray(y)
     X, Y = np.meshgrid(x, y, indexing="xy")
 
-    # Cross‑wind integrated footprint
+    # Cross-wind integrated footprint
     f_x = crosswind_integrated_footprint(X, xi, m, n)
 
-    # Cross‑wind dispersion σ(x) (short‑range limit)
+    # Cross-wind dispersion σ(x) (short-range limit)
     sigma = sigma_v * X / u_zm
 
-    # Gaussian cross‑wind distribution Dy(x, y)
+    # Gaussian cross-wind distribution Dy(x, y)
     Dy = 1.0 / (PI_SQRT2 * sigma) * np.exp(-0.5 * (Y / sigma) ** 2)
 
     phi = Dy * f_x
     return X, Y, phi
 
+
 # -----------------------------------------------------------------------------
 # Fetch and auxiliary functions
 # -----------------------------------------------------------------------------
+
 
 def cumulative_fetch(x_p: float, xi: float, m: float, n: float) -> float:
     """
@@ -351,7 +307,7 @@ def cumulative_fetch(x_p: float, xi: float, m: float, n: float) -> float:
     -------
     float
         Fraction of total flux (between 0 and 1) originating upwind of x_p.
-    """   
+    """
     r = 2.0 + m - n
     mu = (1.0 + m) / r
     return gammaincc(mu, xi / x_p)  # upper incomplete Γ / Γ(μ)
@@ -388,23 +344,25 @@ def effective_fetch(fraction: float, xi: float, m: float, n: float) -> float:
     from scipy.optimize import brentq
 
     if not 0.0 < fraction < 1.0:
-        raise ValueError("fraction must be in the open interval (0, 1)")
+        raise ValueError("fraction must be in the open interval (0, 1)")
 
-    # root‑solve gammaincc(mu, xi/x) = fraction  ⇒  xi/x = Q⁻¹
+    # root-solve gammaincc(mu, xi/x) = fraction  ⇒  xi/x = Q⁻¹
     r = 2.0 + m - n
     mu = (1.0 + m) / r
 
     def _res(x):
         return gammaincc(mu, xi / x) - fraction
 
-    # bracket the root (x in (xi*1e‑6, xi*1e6) is usually sufficient)
+    # bracket the root (x in (xi*1e-6, xi*1e6) is usually sufficient)
     return brentq(_res, xi * 1e-6, xi * 1e6)
 
+
 # -----------------------------------------------------------------------------
-# Command‑line interface
+# Command-line interface
 # -----------------------------------------------------------------------------
 
-def _cli():  # noqa: D401 – simple CLI wrapper
+
+def _cli():  # noqa: D401 - simple CLI wrapper
     """Run a quick demo if executed as a script."""
     import argparse, sys, textwrap, matplotlib.pyplot as plt
 
@@ -413,8 +371,8 @@ def _cli():  # noqa: D401 – simple CLI wrapper
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=textwrap.dedent(
             """\
-            Quick command‑line driver for the Kormann–Meixner footprint model.
-            Prints the effective fetch (63 % cumulative) and plots f(x).
+            Quick command-line driver for the Kormann-Meixner footprint model.
+            Prints the effective fetch (63 % cumulative) and plots f(x).
             """
         ),
     )
@@ -423,8 +381,10 @@ def _cli():  # noqa: D401 – simple CLI wrapper
     p.add_argument("L", type=float, help="Obukhov length (m)")
     p.add_argument("u_star", type=float, help="friction velocity (m s⁻¹)")
     p.add_argument("u_zm", type=float, help="mean wind speed at z_m (m s⁻¹)")
-    p.add_argument("sigma_v", type=float, help="cross‑wind velocity SD (m s⁻¹)")
-    p.add_argument("--fraction", type=float, default=0.63, help="cumulative fraction for fetch")
+    p.add_argument("sigma_v", type=float, help="cross-wind velocity SD (m s⁻¹)")
+    p.add_argument(
+        "--fraction", type=float, default=0.63, help="cumulative fraction for fetch"
+    )
     args = p.parse_args()
 
     m, n, U, kappa = analytical_power_law_parameters(
@@ -433,8 +393,8 @@ def _cli():  # noqa: D401 – simple CLI wrapper
     xi = length_scale_xi(args.z_m, U, kappa, m, n)
     x_p = effective_fetch(args.fraction, xi, m, n)
 
-    print(f"Power‑law exponents: m={m:.3f}, n={n:.3f}")
-    print(f"Length‑scale ξ = {xi:.2f} m")
+    print(f"Power-law exponents: m={m:.3f}, n={n:.3f}")
+    print(f"Length-scale ξ = {xi:.2f} m")
     print(f"Effective fetch (fraction={args.fraction:.2f}) = {x_p:.1f} m")
 
     # Plot f(x)
@@ -445,7 +405,7 @@ def _cli():  # noqa: D401 – simple CLI wrapper
     plt.legend()
     plt.xlabel("upwind distance x (m)")
     plt.ylabel("f(x)  [m⁻¹]")
-    plt.title("Kormann–Meixner footprint")
+    plt.title("Kormann-Meixner footprint")
     plt.show()
 
     return 0

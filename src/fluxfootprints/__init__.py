@@ -47,4 +47,4 @@ from .volk import (
     weighted_rasters,
     write_footprint_to_raster,
 )
-from .improved_ffp import FFPModel
+from .improved_ffp import *
