@@ -9,6 +9,7 @@ requests
 xarray
 netcdf4
 pyproj
+refet
 rasterio
 geopandas
 sphinx

@@ -48,3 +48,5 @@ from .volk import (
     write_footprint_to_raster,
 )
 from .improved_ffp import *
+
+__version__ = "0.1.12"
