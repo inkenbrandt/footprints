@@ -15,7 +15,7 @@
 2. [Installation](#installation)
 3. [Quick‑start Example](#quick-start-example)
 4. [Command‑line Interface](#command-line-interface)
-5. [Documentation](#documentation)
+5. [Documentation](https://fluxfootprints.readthedocs.io/en/latest/)
 6. [Input Requirements](#input-requirements)
 7. [Citing & Referencing](#citing--referencing)
 8. [Contributing](#contributing)
@@ -115,7 +115,7 @@ Run `fluxfootprint --help` for all options.
 Full API docs, tutorials, and example notebooks are hosted at **Read the Docs**:
 
 ```
-https://fluxfootprint.readthedocs.io
+https://fluxfootprints.readthedocs.io/en/latest/
 ```
 
 To build locally:
