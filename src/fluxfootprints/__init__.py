@@ -48,5 +48,6 @@ from .volk import (
     write_footprint_to_raster,
 )
 from .improved_ffp import *
+from .new_ffp import FFPclim
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
