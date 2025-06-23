@@ -50,6 +50,7 @@ exclude_patterns = [
     "docs/notebook/NLDAS_data/*",
 ]
 
+nbsphinx_allow_errors = True
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
