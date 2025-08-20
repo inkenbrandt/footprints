@@ -42,7 +42,7 @@
 
 ```bash
 # Stable release (PyPI)
-pip install fluxfootprint
+pip install fluxfootprints
 
 # Development version (GitHub)
 pip install git+https://github.com/YourOrg/fluxfootprint.git
