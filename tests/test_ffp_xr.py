@@ -20,7 +20,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from fluxfootprints import ffp_xr
+from fluxfootprints.adapters import ffp_xr
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +51,7 @@ def valid_df():
             "atm_bound_height": [2000.0, 2000.0],
             "inst_height": [2.0, 2.0],
         },
-        index=pd.date_range("2025-05-01",
-                            periods=2,
-                            freq="30min"),
+        index=pd.date_range("2025-05-01", periods=2, freq="30min"),
     )
 
 

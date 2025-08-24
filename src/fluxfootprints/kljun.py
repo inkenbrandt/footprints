@@ -10,7 +10,7 @@ This version includes improvements for better alignment with the theoretical fra
 """
 
 import logging
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List, Iterable, Dict
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -18,9 +18,93 @@ from scipy import signal
 from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
 import traceback
+from shapely.geometry import Polygon, LineString
+from shapely.ops import unary_union
+from skimage.measure import find_contours
+import geopandas as gpd
+
+from shapely.affinity import rotate, translate
 
 
-class FFPModel:
+def to_utm_polys(
+    self,
+    gdf: gpd.GeoDataFrame,
+    wind_dir_col: str = "wind_dir",
+    easting: float = 0.0,
+    northing: float = 0.0,
+    crs_utm: Optional[str] = None,
+) -> gpd.GeoDataFrame:
+    """
+    Rotate each geometry by its wind direction (meteorological: from->to) and translate to UTM.
+    Assumes gdf has a 'time' column; we look up wind direction at that time from self.df.
+    """
+    # make a time->wind_dir lookup (in degrees where 0 = from North; convert to math angle if needed)
+    wdir = self.df[wind_dir_col]
+    wmap = wdir.reindex(pd.to_datetime(gdf["time"]), method="nearest").to_numpy()
+
+    geoms = []
+    for geom, wd in zip(gdf.geometry, wmap):
+        # Convert met convention (coming from wd) to rotation (to direction)
+        # If your solver already “points” x downstream, you might only need to rotate by -wd
+        geom_r = rotate(geom, angle=-wd, origin=(0, 0), use_radians=False)
+        geom_t = translate(geom_r, xoff=easting, yoff=northing)
+        geoms.append(geom_t)
+    out = gdf.copy()
+    out.geometry = geoms
+    if crs_utm:
+        out.set_crs(crs_utm, inplace=True)
+    return out
+
+
+def _mass_preserving_threshold(
+    F_yx: np.ndarray, x: np.ndarray, y: np.ndarray, r: float
+) -> float:
+    """
+    Compute the threshold tau such that the integral of F over cells with F>=tau
+    equals fraction r of the total mass.
+    """
+    # cell areas from 1-D spacings
+    dx = np.abs(np.gradient(x))
+    dy = np.abs(np.gradient(y))
+    cell_area = dy[:, None] * dx[None, :]  # (ny,nx)
+
+    flat = (F_yx * cell_area).ravel()
+    order = np.argsort(flat)[::-1]
+    csum = np.cumsum(flat[order])
+    total = csum[-1]
+    if not np.isfinite(total) or total <= 0:
+        return np.nan
+    idx = np.searchsorted(csum, r * total, side="left")
+    # Threshold is the F value at that boundary
+    return np.sort(F_yx.ravel())[::-1][idx]  # type: ignore
+
+
+def _contour_paths(
+    F_yx: np.ndarray, x: np.ndarray, y: np.ndarray, level: float
+) -> List[np.ndarray]:
+    """
+    Return a list of Nx2 arrays of (x,y) vertices for the contour at 'level'.
+    F_yx is indexed as [y, x].
+    """
+    if not np.isfinite(level):
+        return []
+    # skimage works in pixel coordinates; we map to physical (x,y)
+    cs = find_contours(F_yx, level=level)
+    paths = []
+    ny, nx = F_yx.shape
+    for arr in cs:
+        # arr[:,0] is row (y index), arr[:,1] is col (x index)
+        yi = np.clip(arr[:, 0], 0, ny - 1)
+        xi = np.clip(arr[:, 1], 0, nx - 1)
+        # map fractional indices → coords via linear interpolation along each axis
+        # using np.interp between index range and coord arrays
+        xs = np.interp(xi, np.arange(nx), x)
+        ys = np.interp(yi, np.arange(ny), y)
+        paths.append(np.c_[xs, ys])
+    return paths
+
+
+class FootprintModel:
     """
     Flux Footprint Prediction (FFP) model based on Kljun et al. (2015).
 
@@ -168,6 +252,8 @@ class FFPModel:
         self.sigma_y_correction = None
         self.fclim_2d = None
         self.f_2d = None
+        self.f2d_time = None  # will be an xarray.DataArray with dims ('time','y','x')
+        self.f2d_climo = None  # keep your existing time-collapsed 2-D (y,x)
 
         self.domain = self._validate_domain(domain)
         self.dx = float(dx)
@@ -252,7 +338,7 @@ class FFPModel:
             if not np.isfinite(df1[col]).all():
                 self.logger.warning(f"Found non-finite values in column {col}")
 
-        return df1
+        return df1  # type: ignore
 
     def _validate_domain(self, domain: list) -> list:
         """
@@ -532,11 +618,11 @@ class FFPModel:
             Boolean mask of valid rows.
         """
         # Calculate RSL height
-        h_rs = 10 * self.df["z0"]  # Roughness element height
+        h_rs = 10 * self.df["z0"]  # type: ignore # Roughness element height
         z_star = self.n_rsl * h_rs  # RSL height
 
         # Check if measurement height is above RSL
-        rsl_valid = self.df["zm"] > z_star
+        rsl_valid = self.df["zm"] > z_star  # type: ignore
 
         # Log RSL check results
         invalid_count = np.sum(~rsl_valid)
@@ -607,16 +693,16 @@ class FFPModel:
         d_h = 10 ** (0.979 * np.log10(crop_height) - 0.154)
 
         # Add derived fields
-        self.df["zm"] = inst_height - d_h  # measurement height above displacement
-        self.df["h_c"] = crop_height
-        self.df["z0"] = crop_height * 0.123  # roughness length
-        self.df["h"] = atm_bound_height
+        self.df["zm"] = inst_height - d_h  # type: ignore # measurement height above displacement
+        self.df["h_c"] = crop_height  # type: ignore
+        self.df["z0"] = crop_height * 0.123  # type: ignore # roughness length
+        self.df["h"] = atm_bound_height  # type: ignore
 
         # Apply validity checks
         self._apply_validity_masks()
 
         # Drop invalid data
-        self.df = self.df.dropna(subset=["sigmav", "wind_dir", "h", "ol"])
+        self.df = self.df.dropna(subset=["sigmav", "wind_dir", "h", "ol"])  # type: ignore
         self.ts_len = len(self.df)
         self.logger.debug(f"Valid input length: {self.ts_len}")
 
@@ -639,15 +725,15 @@ class FFPModel:
         """
         Apply basic physical constraints to filter invalid data in the DataFrame.
         """
-        self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
-        self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
-        self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])
-        self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])
-        self.df["ustar"] = np.where(self.df["ustar"] <= 0.1, np.nan, self.df["ustar"])
-        self.df["wind_dir"] = np.where(
-            (self.df["wind_dir"] > 360.0) | (self.df["wind_dir"] < 0.0),
-            np.nan,
-            self.df["wind_dir"],
+        self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])  # type: ignore
+        self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])  # type: ignore
+        self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])  # type: ignore
+        self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])  # type: ignore
+        self.df["ustar"] = np.where(self.df["ustar"] <= 0.1, np.nan, self.df["ustar"])  # type: ignore
+        self.df["wind_dir"] = np.where(  # type: ignore
+            (self.df["wind_dir"] > 360.0) | (self.df["wind_dir"] < 0.0),  # type: ignore
+            np.nan,  # type: ignore
+            self.df["wind_dir"],  # type: ignore
         )
 
     def define_domain(self):
@@ -697,8 +783,8 @@ class FFPModel:
 
     def create_xr_dataset(self):
         """Create xarray Dataset from input DataFrame."""
-        self.df.index.name = "time"
-        self.ds = xr.Dataset.from_dataframe(self.df)
+        self.df.index.name = "time"  # type: ignore
+        self.ds = xr.Dataset.from_dataframe(self.df)  # type: ignore
 
     def handle_stability_regimes(self):
         """
@@ -905,7 +991,7 @@ class FFPModel:
             skernel = np.array([[0.05, 0.1, 0.05], [0.1, 0.4, 0.1], [0.05, 0.1, 0.05]])
 
             # Apply convolution twice as specified in paper
-            smoothed = self.fclim_2d.copy()
+            smoothed = self.fclim_2d.copy()  # type: ignore
 
             # Track original stats
             self.logger.debug(
@@ -1081,7 +1167,7 @@ class FFPModel:
             )
 
             self._log_array_stats("2d_footprint", self.f_2d)
-
+            self.f2d_time = self.f_2d.copy()
             # Calculate footprint climatology
             footprint_sum = self.f_2d.sum(dim="time")
             total_sum = float(footprint_sum.sum())
@@ -1170,9 +1256,9 @@ class FFPModel:
         tuple of xarray.DataArray
             Π₁, Π₂, Π₃, Π₄ values.
         """
-        if not hasattr(self, "f_2d"):
+        if not hasattr(self, "f_2d") or self.f_2d is None:
             raise AttributeError(
-                "f_2d must be initialized before calculating pi groups"
+                "self.f_2d must be initialized and not None before calculating pi groups"
             )
 
         # Π1 = fy*zm
@@ -1456,9 +1542,9 @@ class FFPModel:
         self,
         zm: Union[float, xr.DataArray],
         h: Union[float, xr.DataArray],
-        u_zm: Union[float, xr.DataArray] = None,
-        ustar: Union[float, xr.DataArray] = None,
-        z0: Union[float, xr.DataArray] = None,
+        u_zm: Union[float, xr.DataArray] = None,  # type: ignore
+        ustar: Union[float, xr.DataArray] = None,  # type: ignore
+        z0: Union[float, xr.DataArray] = None,  # type: ignore
         k: float = 0.4,
     ) -> Union[float, xr.DataArray]:
         """
@@ -1549,7 +1635,7 @@ class FFPModel:
         x_peak = self.calc_real_footprint_peak(
             self.ds["zm"], self.ds["h"], self.ds["umean"], self.ds["ustar"]
         )
-        sigma_y_peak = self.calc_crosswind_spread(x_peak)
+        sigma_y_peak = self.calc_crosswind_spread(x_peak)  # type: ignore
 
         # Scale crosswind extent based on distance from peak
         def scale_sigma(x_dist):
@@ -1694,9 +1780,9 @@ class FFPModel:
                 self.X, self.Y = np.meshgrid(self.x, self.y)
 
             self.logger.debug(f"Domain shapes - x: {len(self.x)}, y: {len(self.y)}")
-            self.logger.debug(f"Footprint climatology shape: {self.fclim_2d.shape}")
+            self.logger.debug(f"Footprint climatology shape: {self.fclim_2d.shape}")  # type: ignore
             self.logger.debug(
-                f"Footprint climatology stats - min: {float(self.fclim_2d.min())}, max: {float(self.fclim_2d.max())}"
+                f"Footprint climatology stats - min: {float(self.fclim_2d.min())}, max: {float(self.fclim_2d.max())}"  # type: ignore
             )
 
             # Plot filled contours
@@ -1815,8 +1901,8 @@ class FFPModel:
                             self.logger.warning("f_2d missing time dimension")
 
                     # Add source areas if calculated
-                    if hasattr(self, "source_areas") and self.source_areas is not None:
-                        for r_level, area_dict in self.source_areas.items():
+                    if hasattr(self, "source_areas") and self.source_areas is not None:  # type: ignore
+                        for r_level, area_dict in self.source_areas.items():  # type: ignore
                             for key, value in area_dict.items():
                                 if isinstance(value, xr.DataArray):
                                     results[f"{r_level}_{key}"] = value
@@ -1837,8 +1923,16 @@ class FFPModel:
         return None
 
     def save_results(self, filename: str):
-        """
-        Save model results to a netCDF file.
+        """Saves the model results and relevant parameters to a netCDF file.
+        The output file includes:
+            - 2D footprint data (`footprint_2d`)
+            - Climatological footprint data (`footprint_climatology`)
+            - Domain coordinates (`domain_x`, `domain_y`)
+            - Model parameters (`parameters`): crop height, instrument height, atmospheric boundary height
+            - Source areas (if available) as additional variables
+            filename (str): Path to the netCDF file where results will be saved.
+        Side Effects:
+            Writes a netCDF file to disk and logs the save operation.
 
         Args:
             filename: Path where the results should be saved
@@ -1851,10 +1945,10 @@ class FFPModel:
                 "domain_y": xr.DataArray(self.y, dims=["y"]),
                 "parameters": xr.DataArray(
                     {
-                        "crop_height": float(self.df["h_c"].iloc[0]),
-                        "inst_height": float(self.df["zm"].iloc[0])
-                        + float(self.df["h_c"].iloc[0]),
-                        "atm_bound_height": float(self.df["h"].iloc[0]),
+                        "crop_height": float(self.df["h_c"].iloc[0]),  # type: ignore
+                        "inst_height": float(self.df["zm"].iloc[0])  # type: ignore
+                        + float(self.df["h_c"].iloc[0]),  # type: ignore
+                        "atm_bound_height": float(self.df["h"].iloc[0]),  # type: ignore
                     }
                 ),
             }
@@ -1862,8 +1956,160 @@ class FFPModel:
 
         # Add source areas as individual variables
         if hasattr(self, "source_areas"):
-            for key, value in self.source_areas.items():
+            for key, value in self.source_areas.items():  # type: ignore
                 results[key] = value
 
         results.to_netcdf(filename)
         self.logger.info(f"Results saved to {filename}")
+
+    def contours_per_time(
+        self,
+        r_levels: Iterable[float] = (0.8, 0.9),
+        only_largest: bool = True,
+        crs: Optional[str] = None,
+    ) -> gpd.GeoDataFrame:
+        """
+        Build polygons of mass-preserving isopleths for each time slice.
+
+        Parameters
+        ----------
+        r_levels : iterable of floats
+            Fractions of mass (0-1). e.g., (0.8, 0.9) for 80% and 90% contours.
+        only_largest : bool
+            If True, keep only the largest polygon per (time, r). Otherwise keep all rings.
+        crs : Optional[str]
+            CRS for the output GeoDataFrame. If None, keep unitless (meters in tower frame).
+        """
+        if self.f2d_time is None:
+            raise RuntimeError("Run calc_xr_footprint(keep_per_time=True) first.")
+
+        x = self.f2d.coords["x"].values  # type: ignore
+        y = self.f2d.coords["y"].values  # type: ignore
+        times = pd.to_datetime(self.f2d.coords["time"].values)  # type: ignore
+
+        rows = []
+        for it in range(self.f2d_time.sizes["time"]):
+            F_yx = self.f2d_time.isel(time=it).values
+            for r in r_levels:
+                tau = _mass_preserving_threshold(F_yx, x, y, r)
+                paths = _contour_paths(F_yx, x, y, tau)
+
+                if not paths:
+                    continue
+                # Build polygons; optionally keep largest
+                polys = []
+                for P in paths:
+                    if P.shape[0] < 4:
+                        continue
+                    # Ensure closed ring for Polygon
+                    if not np.allclose(P[0], P[-1]):
+                        P = np.vstack([P, P[0]])
+                    poly = Polygon(P)
+                    if poly.is_valid and poly.area > 0:
+                        polys.append(poly)
+
+                if not polys:
+                    continue
+
+                if only_largest:
+                    poly = max(polys, key=lambda p: p.area)
+                    rows.append({"time": times[it], "r": r, "geometry": poly})
+                else:
+                    rows.extend(
+                        {"time": times[it], "r": r, "geometry": p} for p in polys
+                    )
+
+        gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=crs)
+        return gdf
+
+    def _contour_level_for_fraction(self, F_2d: xr.DataArray, r: float) -> float:  # type: ignore
+        """
+        Given a 2-D footprint (x,y) for *one* time, find the value threshold
+        whose superlevel set encloses fraction r of the total integral.
+        """
+        # assume uniform spacing dx, dy from the model grid
+        dx = (self.x[1] - self.x[0]) if len(self.x) > 1 else 1.0
+        dy = (self.y[1] - self.y[0]) if len(self.y) > 1 else 1.0
+
+        flat = np.sort(F_2d.values.ravel())[::-1]
+        total = float(F_2d.sum()) * dx * dy
+        if total <= 0:
+            return 0.0
+
+        cumsum = np.cumsum(flat) * dx * dy
+        idx = np.searchsorted(cumsum / total, r)
+        if idx >= len(flat):
+            idx = len(flat) - 1
+        return float(flat[idx])
+
+    def contour_timeseries(
+        self,
+        rs: list[float] | None = None,
+        times: Optional[xr.DataArray] = None,
+        return_masks: bool = False,
+    ) -> xr.Dataset:
+        """
+        Compute contour level(s) (and optionally masks) per time slice so that each
+        mask encloses fraction r of total flux for that time.
+
+        Parameters
+        ----------
+        rs : list of floats in (0,1)
+            Fractions to enclose (e.g., [0.5, 0.8, 0.9]).
+            Defaults to self.rs if not provided.
+        times : xarray DataArray or sequence, optional
+            Subset of times to process. By default, process all times in f_2d_ts.
+        return_masks : bool, default False
+            If True, also return boolean masks (time, r, x, y) alongside levels.
+
+        Returns
+        -------
+        xr.Dataset with:
+            - contour_level_{int(r*100)} : (time,) threshold per time
+            - optionally mask_{int(r*100)}: (time, x, y) boolean mask per time
+        """
+        if getattr(self, "f_2d_ts", None) is None:
+            raise ValueError("f_2d_ts is not available. Run calc_xr_footprint() first.")
+
+        F = self.f_2d  # (time, x, y)
+        if times is not None:
+            F = F.sel(time=times)  # type: ignore
+
+        if rs is None:
+            rs = list(self.rs)
+        rs = [float(r) for r in rs if 0.0 < r < 1.0]
+        if not rs:
+            raise ValueError("rs must contain values in the open interval (0,1).")
+
+        out = {}
+        for r in rs:
+            # compute level per time (vectorised across time with .groupby or loop)
+            levels = []
+            for t in F["time"].values:  # type: ignore
+                lvl = self._contour_level_for_fraction(F.sel(time=t), r)  # type: ignore
+                levels.append(lvl)
+
+            levels_da = xr.DataArray(
+                np.array(levels),
+                dims=("time",),
+                coords={"time": F["time"]},  # type: ignore
+                name=f"contour_level_{int(r*100)}",
+            )
+            out[levels_da.name] = levels_da
+
+            if return_masks:
+                # mask for each time: F(t, x, y) >= level(t)
+                mask_stack = []
+                for i, t in enumerate(F["time"].values):  # type: ignore
+                    m = (F.sel(time=t) >= levels_da.isel(time=i)).astype(bool)  # type: ignore
+                    mask_stack.append(m)
+
+                mask_da = xr.concat(mask_stack, dim="time")
+                mask_da.name = f"mask_{int(r*100)}"
+                out[mask_da.name] = mask_da
+
+        return xr.Dataset(out)
+
+
+# Back‑compat alias
+FFPModel = FootprintModel

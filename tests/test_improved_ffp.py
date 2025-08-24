@@ -21,7 +21,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from fluxfootprints.improved_ffp import FFPModel
+from fluxfootprints.kljun import FFPModel
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +49,7 @@ def minimal_df():
         index=pd.date_range("2025-05-01", periods=2, freq="30min"),
     )
     return df
+
 
 @pytest.fixture
 def valid_df():
@@ -109,6 +110,7 @@ def test_validate_rs_sort_and_bounds(tiny_model):
 # 2. Maths sanity checks
 # ---------------------------------------------------------------------------
 
+
 def test_crosswind_integrated_mask(tiny_model):
     """
     For X* ≤ d (≈ 0.136) the model sets F̂y* = 0.
@@ -135,6 +137,7 @@ def test_run_basic_outputs(tiny_model):
     assert np.all(fclim.values >= 0)
     assert fclim.values.sum() > 0
 
+
 def test_initialization(valid_df):
     model = FFPModel(valid_df)
     assert isinstance(model.df, pd.DataFrame)
@@ -143,12 +146,14 @@ def test_initialization(valid_df):
     assert model.inst_height > model.crop_height
     assert all(col in model.df.columns for col in ["sigmav", "ustar", "ol"])
 
+
 def test_calc_scaled_x(valid_df):
     model = FFPModel(valid_df)
     x = np.array([10.0, 20.0])
     result = model.calc_scaled_x(x)
     assert isinstance(result, np.ndarray)
     assert result.shape == x.shape
+
 
 def test_calc_crosswind_spread(valid_df):
     model = FFPModel(valid_df)
@@ -157,12 +162,14 @@ def test_calc_crosswind_spread(valid_df):
     assert isinstance(sigma_y, np.ndarray)
     assert np.all(sigma_y > 0)
 
+
 def test_calc_crosswind_integrated_footprint(valid_df):
     model = FFPModel(valid_df)
     x_star = xr.DataArray(np.array([1.0, 2.0]))
     result = model.calc_crosswind_integrated_footprint(x_star)
     assert isinstance(result, xr.DataArray)
     assert np.all(result >= 0)
+
 
 def test_calc_xr_footprint(valid_df):
     model = FFPModel(valid_df)

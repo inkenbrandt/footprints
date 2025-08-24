@@ -24,7 +24,7 @@ import geopandas as gpd
 import xarray
 import refet
 
-from .improved_ffp import FFPModel
+from .kljun import FFPModel
 
 
 def load_configs(

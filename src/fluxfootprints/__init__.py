@@ -1,27 +1,18 @@
+# footprints/__init__.py
+from .kljun import FootprintModel  # the only public model
+
+# (Optionally) convenience xr wrapper
+from .adapters.ffp_xr import ffp_xr
+
+__all__ = ["FootprintModel", "ffp_xr"]
+
 from .tools import (
     polar_to_cartesian_dataframe,
     aggregate_to_daily_centroid,
     generate_density_raster,
     concat_fetch_gdf,
 )
-from .compare import (
-    compare_footprints,
-    run_all_and_compare,
-    run_ffp,
-    run_ffp_xr,
-    footprint_metrics,
-    run_km,
-    _mask_80,
-    _peak_distance,
-)
-from .ep_footprint import (
-    Footprint,
-    handle_footprint,
-    hsieh,
-    kljun,
-    kormann_meixner,
-)
-from .ffp_xr import ffp_climatology_new
+
 from .footprint_plotting import FootprintPlotter, add_plotting_to_footprint
 from .volk import (
     _compute_hourly_footprint,
@@ -47,7 +38,7 @@ from .volk import (
     weighted_rasters,
     write_footprint_to_raster,
 )
-from .improved_ffp import *
-from .new_ffp import FFPclim
+from .kljun import *
+
 
 __version__ = "0.1.13"
