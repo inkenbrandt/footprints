@@ -1,6 +1,6 @@
 # Flux-footprints
 
-> **FluxFootprint** is a fast, fully‑featured Python implementation of the
+> **FluxFootprints** is a fast, fully‑featured Python implementation of the
 > Kljun et al. (2015) flux‑footprint parameterisation for eddy‑covariance research.
 > It provides vectorised and xarray‑enabled utilities to compute per‑timestamp
 > footprints, aggregate footprint climatologies, extract source‑area contours,
