@@ -51,7 +51,7 @@ import pandas as pd
 import xarray as xr
 
 # Local module (provided by user)
-from ffp_xr import ffp_climatology_new
+from .ffp_xr import ffp_climatology_new
 
 
 # ------------------------------
@@ -296,7 +296,7 @@ def _make_contour_polygon_from_field_alt(
         return None
     z /= s
 
-    # Determine threshold by sorting descending (as before)
+    # Determine threshold by sorting descending
     flat = z.ravel()
     idx = np.argsort(flat)[::-1]
     cum = np.cumsum(flat[idx])
@@ -304,92 +304,72 @@ def _make_contour_polygon_from_field_alt(
     thr_val = flat[idx[thr_idx]] if thr_idx < flat.size else flat[idx[-1]]
     mask = (z >= thr_val).astype(np.uint8)
 
-    # Determine if x/y are ascending; create index-to-coordinate maps
+    # Index→coordinate maps
     x = np.asarray(x)
     y = np.asarray(y)
-    nx = x.size
-    ny = y.size
-
-    # Column indices map to x; Row indices map to y
+    nx, ny = x.size, y.size
     col_ix = np.arange(nx, dtype=float)
     row_ix = np.arange(ny, dtype=float)
 
-    # Build linear mappers from index space to coordinates (center of pixels)
     def map_cols_to_x(cols):
-        # cols in [0, nx-1]; interpolate onto x
         return np.interp(cols, col_ix, x)
 
     def map_rows_to_y(rows):
         return np.interp(rows, row_ix, y)
 
-    # 1) Try skimage.measure.find_contours
+    # 1) scikit-image marching squares
     if method in ("auto", "skimage"):
         try:
             from skimage import measure
 
-            # find_contours expects row-major (y) by col-major (x)
-            # level=0.5 finds boundary between 0 and 1 regions
             conts = measure.find_contours(mask, level=0.5)
             if conts:
-                # pick longest
-                arr = max(conts, key=lambda a: a.shape[0])  # (N, 2) -> (row, col)
+                arr = max(conts, key=lambda a: a.shape[0])  # (row, col)
                 rows, cols = arr[:, 0], arr[:, 1]
                 xv = map_cols_to_x(cols)
                 yv = map_rows_to_y(rows)
                 return np.column_stack([xv, yv])
         except Exception:
             if method == "skimage":
-                return None  # explicit request -> don't fallback silently
+                return None
 
-    # 2) Fallback to rasterio.features.shapes
+    # 2) rasterio polygonization
     if method in ("auto", "rasterio"):
         try:
-            import rasterio
             from rasterio import features
             from affine import Affine
 
-            # Build an affine transform from x/y assuming regular spacing
             if nx < 2 or ny < 2:
                 return None
             xres = float(x[1] - x[0])
             yres = float(y[1] - y[0])
-
             left = x.min() - xres / 2.0
             top = y.max() + yres / 2.0
             transform = Affine.translation(left, top) * Affine.scale(xres, -yres)
-
             geoms = list(features.shapes(mask, mask=None, transform=transform))
-            # geoms is list of (geom, value); select value==1 polygons
             polys = [g for g, v in geoms if int(v) == 1]
             if not polys:
                 return None
 
-            # choose the largest polygon by area
             def _poly_area(coords):
-                # coords: GeoJSON with "coordinates" (possibly multi-rings). Just use exterior ring of first polygon.
                 try:
                     exterior = coords[0]
-                    xsum = 0.0
-                    ysum = 0.0
                     A = 0.0
                     for i in range(len(exterior) - 1):
                         x0, y0 = exterior[i]
                         x1, y1 = exterior[i + 1]
-                        cross = x0 * y1 - x1 * y0
-                        A += cross
+                        A += x0 * y1 - x1 * y0
                     return abs(A) * 0.5
                 except Exception:
                     return 0.0
 
             polys.sort(key=lambda g: _poly_area(g["coordinates"]), reverse=True)
-            # Extract exterior ring of the biggest polygon
             ext = polys[0]["coordinates"][0]
             return np.asarray(ext, dtype=float)
         except Exception:
             if method == "rasterio":
                 return None
 
-    # No method succeeded
     return None
 
 
@@ -408,80 +388,73 @@ def export_contours_gpkg(
     h_col: str | None = None,
     le_col: str | None = None,
     g_col: str | None = None,
-    method: str = "auto",
+    contour_method: str = "auto",
 ) -> Path:
     """
-    Export source-area contours (configurable rs levels, e.g., [0.5, 0.8]) for each time slice in the provided summaries to a GeoPackage.
-    Creates layers for each summary and each r level, e.g. daily_mean_r50, daily_mean_r80.
+    Export source-area contours (configurable rs levels, e.g., [0.5, 0.8])
+    for each time slice in the provided summaries to a GeoPackage.
 
-    Coordinates are translated from model x/y (meters) to projected CRS
-    centered at the tower's lon/lat using pyproj.
+    Also writes optional CSV stats with area, perimeter, centroids (in multiple CRS),
+    ET stats (from LE), and energy-balance closure (Rn vs H+LE+G).
+
+    Creates layers like: daily_mean_r50, daily_mean_r80, monthly_etw_r80, ...
     """
     import geopandas as gpd
-    from shapely.geometry import Polygon, mapping
+    from shapely.geometry import Polygon
     from pyproj import CRS, Transformer
 
-    x = clim.x  # 1-D arrays from the model grid (meters relative to tower)
+    x = clim.x  # model grid (relative meters)
     y = clim.y
 
-    # Optional stats collector
-    stats_records = []
-
-    # Transformer for centroid_out
-    try:
-        centroid_crs = CRS.from_user_input(centroid_out)
-    except Exception:
-        centroid_crs = CRS.from_epsg(4326)
-    to_centroid = Transformer.from_crs(dst_crs, centroid_crs, always_xy=True)  # type: ignore
-    to_wgs_cent = Transformer.from_crs(dst_crs, CRS.from_epsg(4326), always_xy=True)  # type: ignore # for lon/lat convenience
-
-    # pick output CRS
+    # ---------------- CRS + transforms ----------------
     if crs_out == "auto":
         epsg = _choose_utm_epsg(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
     else:
         dst_crs = CRS.from_user_input(crs_out)
 
-    # Transformer WGS84 lon/lat -> dst_crs
     wgs84 = CRS.from_epsg(4326)
     to_proj = Transformer.from_crs(wgs84, dst_crs, always_xy=True)
     to_wgs = Transformer.from_crs(dst_crs, wgs84, always_xy=True)
 
-    # --- helpers for energy balance closure ---
+    # For centroid outputs
+    try:
+        centroid_crs = CRS.from_user_input(centroid_out)
+    except Exception:
+        centroid_crs = CRS.from_epsg(4326)
+    to_centroid = Transformer.from_crs(dst_crs, centroid_crs, always_xy=True)
+    to_wgs_cent = Transformer.from_crs(dst_crs, wgs84, always_xy=True)
+
+    # ---------------- EB helpers + column selection ----------------
     def _pick(dfcols, preferred, fallbacks):
         if preferred and preferred in dfcols:
             return preferred
         for f in fallbacks:
-            # allow contains
             for c in dfcols:
                 if f.lower() in c.lower():
                     return c
         return None
 
-    # choose columns
     cols = list(df.columns)
     rn_c = _pick(cols, rn_col, ["NETRAD", "RN", "RNET"])
     h_c = _pick(cols, h_col, ["H"])
     le_c = _pick(cols, le_col, ["LE", "LE_F_MDS", "LE_QC"])
     g_c = _pick(cols, g_col, ["G", "G_1_1_1", "SHF", "SOIL_HEAT"])
 
-    def _eb_stats(slice_df):
+    def _eb_stats(slice_df: pd.DataFrame) -> dict:
         out = {}
         try:
-            rn = slice_df[rn_c].astype(float) if rn_c else None
-            h = slice_df[h_c].astype(float) if h_c else None
-            le = slice_df[le_c].astype(float) if le_c else None
-            g = slice_df[g_c].astype(float) if g_c else None
-            # means (W/m2)
+            rn = pd.to_numeric(slice_df[rn_c], errors="coerce") if rn_c else None
+            h = pd.to_numeric(slice_df[h_c], errors="coerce") if h_c else None
+            le = pd.to_numeric(slice_df[le_c], errors="coerce") if le_c else None
+            g = pd.to_numeric(slice_df[g_c], errors="coerce") if g_c else None
+
             rn_m = float(np.nanmean(rn)) if rn is not None else np.nan
             h_m = float(np.nanmean(h)) if h is not None else np.nan
             le_m = float(np.nanmean(le)) if le is not None else np.nan
             g_m = float(np.nanmean(g)) if g is not None else np.nan
-            resid_m = rn_m - (
-                (h_m if np.isfinite(h_m) else 0.0)
-                + (le_m if np.isfinite(le_m) else 0.0)
-                + (g_m if np.isfinite(g_m) else 0.0)
-            )
+
+            resid_m = rn_m - sum(v for v in (h_m, le_m, g_m) if np.isfinite(v))
             out.update(
                 dict(
                     Rn_mean_Wm2=rn_m,
@@ -491,13 +464,9 @@ def export_contours_gpkg(
                     Residual_mean_Wm2=resid_m,
                 )
             )
-            # closure fraction (H+LE+G)/Rn
             if np.isfinite(rn_m) and rn_m != 0.0:
-                num = 0.0
-                for v in (h_m, le_m, g_m):
-                    if np.isfinite(v):
-                        num += v
-                out["Closure_frac"] = num / rn_m
+                total = sum(v for v in (h_m, le_m, g_m) if np.isfinite(v))
+                out["Closure_frac"] = total / rn_m
                 out["Residual_frac_of_Rn"] = resid_m / rn_m
             else:
                 out["Closure_frac"] = np.nan
@@ -514,101 +483,107 @@ def export_contours_gpkg(
             )
         return out
 
-    # Compute tower origin in projected meters
+    # ---------------- I/O prep ----------------
+    gpkg_path = Path(gpkg_path)
+    if gpkg_path.exists():
+        gpkg_path.unlink()
+
+    stats_records = []
+
     x0, y0 = to_proj.transform(station_lon, station_lat)
 
-    def _to_world_coords(vertices_xy):
+    def _to_world_coords(vertices_xy: np.ndarray | None):
         if vertices_xy is None:
             return None
-        # Offset relative meters to absolute projected meters, then polygon
         vx = vertices_xy[:, 0] + x0
         vy = vertices_xy[:, 1] + y0
         return Polygon(np.column_stack([vx, vy]))
 
-    gpkg_path = Path(gpkg_path)
-    if gpkg_path.exists():
-        gpkg_path.unlink()  # overwrite
-
+    # ---------------- Core layer writer ----------------
     def _collect_layer(da: Optional[xr.DataArray], base_layer: str):
         if da is None:
             return
         for r in levels:
             records = []
             for i in range(da.sizes["time"]):
-                z = da.isel(time=i).values  # 2-D
+                z = da.isel(time=i).values  # 2D array
                 verts = _make_contour_polygon_from_field_alt(
-                    z, x, y, level=float(r), method=method
+                    z, x, y, level=float(r), method=contour_method
                 )
                 poly = _to_world_coords(verts)
                 if poly is None or poly.is_empty:
                     continue
+
                 ts = pd.Timestamp(da["time"].values[i]).isoformat()
-                # Energy balance stats for this period
+
+                # EB stats by period (day or month)
                 if base_layer.startswith("daily"):
-                    sdf = df.loc[ts[:10]] if ts else df
+                    sdf = df.loc[ts[:10]] if ts else df  # YYYY-MM-DD
                 else:
                     sdf = df.loc[ts[:7]] if ts else df  # YYYY-MM
                 eb = _eb_stats(sdf)
+
                 rec = {"time": ts, "r": float(r), **eb, "geometry": poly}
                 records.append(rec)
 
-            if records:
-                lname = f"{base_layer}_r{int(round(float(r)*100))}"
-                gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=dst_crs)
-                # collect stats
-                gdf["area_m2"] = gdf.geometry.area
-                gdf["perimeter_m"] = gdf.geometry.length
-                cx, cy = gdf.geometry.centroid.x.values, gdf.geometry.centroid.y.values
-                # centroids in desired CRS and lon/lat
-                cx_out, cy_out = to_centroid.transform(cx, cy)
-                lon, lat = to_wgs_cent.transform(cx, cy)
-                gdf["centroid_x"] = cx
-                gdf["centroid_y"] = cy
-                gdf["centroid_out_x"] = cx_out
-                gdf["centroid_out_y"] = cy_out
-                gdf["centroid_lon"] = lon
-                gdf["centroid_lat"] = lat
-                gdf["layer"] = lname
+            if not records:
+                continue
 
-                # compute area in hectares and acres
-                gdf["area_ha"] = gdf["area_m2"] / 10000.0
-                gdf["area_acres"] = gdf["area_m2"] / 4046.85642
+            lname = f"{base_layer}_r{int(round(float(r) * 100))}"
+            gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=dst_crs)
 
-                # link back to original ET stats per period if available
-                try:
-                    # Align by time
-                    tstamp = pd.to_datetime(ts)  # type: ignore
-                    if "LE" in df.columns:
-                        # slice by day
-                        if base_layer.startswith("daily"):
-                            et_slice = df.loc[str(tstamp.date()), "LE"]
-                        else:
-                            et_slice = df.loc[tstamp.strftime("%Y-%m"), "LE"]
-                        et_vals = pd.to_numeric(et_slice, errors="coerce").dropna().values / 680.6  # type: ignore
-                        if len(et_vals) > 0:
-                            gdf["ET_mean_mmhr"] = float(np.nanmean(et_vals))
-                            gdf["ET_sum_mm"] = float(
-                                np.nansum(et_vals) * 0.5
-                            )  # half-hour steps → mm
-                except Exception:
-                    pass
+            # Areas, perimeters
+            gdf["area_m2"] = gdf.geometry.area
+            gdf["perimeter_m"] = gdf.geometry.length
+            gdf["area_ha"] = gdf["area_m2"] / 10000.0
+            gdf["area_acres"] = gdf["area_m2"] / 4046.85642
 
-                gdf.to_file(gpkg_path, layer=lname, driver="GPKG")
+            # Centroids in multiple CRSs
+            cx = gdf.geometry.centroid.x.values
+            cy = gdf.geometry.centroid.y.values
+            cx_out, cy_out = to_centroid.transform(cx, cy)
+            lon, lat = to_wgs_cent.transform(cx, cy)
+            gdf["centroid_x"] = cx
+            gdf["centroid_y"] = cy
+            gdf["centroid_out_x"] = cx_out
+            gdf["centroid_out_y"] = cy_out
+            gdf["centroid_lon"] = lon
+            gdf["centroid_lat"] = lat
+            gdf["layer"] = lname
 
-                # Append to global stats
-                stats_records.extend(
-                    gdf.drop(columns="geometry").to_dict(orient="records")
-                )
+            # ET stats from LE (mm/hr and mm per period) if available
+            try:
+                if le_c and le_c in df.columns:
+                    # Daily vs monthly slice
+                    if base_layer.startswith("daily"):
+                        tstamp = pd.to_datetime(gdf["time"].iloc[0])
+                        et_slice = df.loc[str(tstamp.date()), le_c]
+                    else:
+                        tstamp = pd.to_datetime(gdf["time"].iloc[0])
+                        et_slice = df.loc[tstamp.strftime("%Y-%m"), le_c]
 
+                    et_vals = (
+                        pd.to_numeric(et_slice, errors="coerce").dropna().values / 680.6
+                    )
+                    if et_vals.size > 0:
+                        gdf["ET_mean_mmhr"] = float(np.nanmean(et_vals))
+                        # If half-hourly data: convert mm/hr to mm depth per step (0.5 hr) and sum
+                        gdf["ET_sum_mm"] = float(np.nansum(et_vals * 0.5))
+            except Exception:
+                pass
+
+            # Write layer and collect stats rows
+            gdf.to_file(gpkg_path, layer=lname, driver="GPKG")
+            stats_records.extend(gdf.drop(columns="geometry").to_dict(orient="records"))
+
+    # ---------------- Write all layers ----------------
     _collect_layer(summaries.f_daily_mean, "daily_mean")
     _collect_layer(summaries.f_monthly_mean, "monthly_mean")
     _collect_layer(summaries.f_daily_et_weighted, "daily_etw")
     _collect_layer(summaries.f_monthly_et_weighted, "monthly_etw")
 
-    # Write stats CSV if requested
+    # Optional stats CSV
     if stats_csv and stats_records:
-        import pandas as pd
-
         stats_df = pd.DataFrame(stats_records)
         stats_df.to_csv(stats_csv, index=False)
 

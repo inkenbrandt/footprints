@@ -197,7 +197,7 @@ class ffp_climatology_new:
 
         self.f_2d = None
 
-        self.logger = logger
+        self.logger = self._ensure_logger(logger)
 
         if self.verbosity < 2:
             self.logger.setLevel(logging.INFO)
@@ -229,6 +229,15 @@ class ffp_climatology_new:
         )
         self.define_domain()
         self.create_xr_dataset()
+
+    def _ensure_logger(self, logger: Optional[logging.Logger]) -> logging.Logger:
+        if isinstance(logger, logging.Logger):
+            return logger
+        lg = logging.getLogger("footprint_daily_summary")
+        if not lg.handlers:
+            lg.addHandler(logging.StreamHandler())
+        lg.setLevel(logging.WARNING)
+        return lg
 
     def prep_df_fields(
         self,
