@@ -1220,7 +1220,7 @@ def calc_nldas_refet(
     # calculate hourly ea from specific humidity
     pair = ds.get("PRES_110_SFC").data / 1000  # type: ignore # nldas air pres in Pa convert to kPa
     sph = ds.get("SPF_H_110_HTGL").data  # kg/kg # type: ignore
-    ea = refet.calcs._actual_vapor_pressure(
+    ea = refet.calcs._actual_vapor_pressure(  # type: ignore
         q=sph, pair=pair
     )  # ea in kPa # type: ignore
     # calculate hourly wind
