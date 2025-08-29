@@ -21,7 +21,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from fluxfootprints.kljun import FFPModel
+from fluxfootprints.improved_ffp import FFPModel
 
 
 # ---------------------------------------------------------------------------

@@ -25,54 +25,6 @@ import xarray
 import refet
 
 
-def load_configs(
-    station,
-    config_path="../../station_config/",
-    secrets_path="../../secrets/config.ini",
-):
-    """
-    Load station metadata and secrets from configuration files.
-
-    Parameters:
-    -----------
-    station : str
-        Station identifier.
-    config_path : str
-        Path to station configuration file.
-    secrets_path : str
-        Path to secrets configuration file.
-
-    Returns:
-    --------
-    dict
-        A dictionary containing station metadata and database URL.
-    """
-
-    if isinstance(config_path, Path):
-        pass
-    else:
-        config_path = Path(config_path)
-
-    config_path_loc = config_path / f"{station}.ini"
-    config = configparser.ConfigParser()
-    config.read(config_path_loc)
-
-    if isinstance(secrets_path, Path):
-        pass
-    else:
-        secrets_path = Path(secrets_path)
-
-    secrets_config = configparser.ConfigParser()
-    secrets_config.read(secrets_path)
-
-    return {
-        "url": secrets_config["DEFAULT"]["url"],
-        "latitude": float(config["METADATA"]["station_latitude"]),
-        "longitude": float(config["METADATA"]["station_longitude"]),
-        "elevation": float(config["METADATA"]["station_elevation"]),
-    }
-
-
 def fetch_and_preprocess_data(url, station, startdate):
     """
     Retrieve and preprocess AmeriFlux eddy covariance data for a given station.
@@ -308,80 +260,6 @@ def reproject_raster_dir(input_folder, output_folder, target_epsg="EPSG:5070"):
         print(f"Reprojected {input_path} → {output_path}")
 
 
-def write_footprint_to_raster(footprints, output_path, epsg=5070):
-    """
-    Write hourly footprint climatologies to a multi‑band GeoTIFF raster.
-
-    Each band in the output GeoTIFF corresponds to one hourly footprint.  The
-    function encodes the footprint array (``f_2d``) and annotates each band
-    with metadata that includes the hour and the total flux‑footprint sum.
-
-    Parameters
-    ----------
-    footprints : list of tuple
-        List of tuples in the form ``(hour, f_2d, x_2d, y_2d)`` where
-
-        * **hour** (*int*) – Hour of the day (24‑hour clock).
-        * **f_2d** (*numpy.ndarray*) – 2‑D footprint values.
-        * **x_2d** (*numpy.ndarray*) – 2‑D array of *x* coordinates.
-        * **y_2d** (*numpy.ndarray*) – 2‑D array of *y* coordinates.
-    output_path : pathlib.Path or str
-        Destination path for the output GeoTIFF.
-    epsg : int, optional
-        EPSG code for the coordinate reference system.  Default is ``5070``
-        (NAD83 / Conus Albers).
-
-    Returns
-    -------
-    None
-        The function writes a file to disk and returns no value.
-
-    Notes
-    -----
-    * Every band is labeled with the hour (e.g. ``"0800"``) and its total
-      footprint sum.
-    * Uses :func:`find_transform` on ``(y_2d, x_2d)`` to build the affine
-      transform.
-    * Output raster is ``float64`` with a no‑data value of ``0.0``.
-    * If ``footprints`` is empty, no file is written and a log message is
-      emitted.
-    """
-
-    if not footprints:
-        print(f"No footprints to write for {output_path}. Skipping.")
-        return
-
-    try:
-        first_footprint = footprints[0][1]
-        # switched x and y to get correct footprint
-        transform = find_transform(footprints[0][3], footprints[0][2])
-        n_bands = len(footprints)
-
-        with rasterio.open(
-            output_path,
-            "w",
-            driver="GTiff",
-            dtype=rasterio.float64,
-            count=n_bands,
-            height=first_footprint.shape[0],
-            width=first_footprint.shape[1],
-            transform=transform,
-            crs=epsg,  # Ensure this matches the projection used in `pyproj`
-            nodata=0.0,
-        ) as raster:
-
-            for i, (hour, f_2d, _, _) in enumerate(footprints, start=1):
-                raster.write(f_2d, i)
-                raster.update_tags(
-                    i, hour=f"{hour:02}00", total_footprint=np.nansum(f_2d)
-                )
-
-        print(f"Footprint raster saved: {output_path}")
-
-    except Exception as e:
-        print(f"Failed to write raster {output_path}: {e}")
-
-
 def weighted_rasters(
     stationid="US-UTW",
     start_hr=6,
@@ -512,7 +390,7 @@ def weighted_rasters(
             final_footprint = sum(normed_fetch_rasters)
 
             # Only proceed if the daily sum is close to 1.0
-            footprint_sum = final_footprint.sum()
+            footprint_sum = final_footprint.sum()  # type: ignore
             if np.isclose(footprint_sum, 1.0, atol=0.15):
                 # Write output raster
                 print(f"Writing weighted footprint to {final_outf}")
@@ -522,8 +400,8 @@ def weighted_rasters(
                     driver="GTiff",
                     dtype=rasterio.float64,
                     count=1,
-                    height=final_footprint.shape[0],
-                    width=final_footprint.shape[1],
+                    height=final_footprint.shape[0],  # type: ignore
+                    width=final_footprint.shape[1],  # type: ignore
                     transform=src.transform,
                     crs=src.crs,
                     nodata=0.0,
@@ -620,198 +498,6 @@ def clip_to_utah_merge(file_dir="./NLDAS_data/", years=None, output_dir="./"):
 
         # Provide download links
         print(netcdf_output_path, parquet_output_path)
-
-
-def calc_hourly_ffp_xr(
-    input_data_dir=None,
-    years=None,
-    output_dir=None,
-):
-    """
-    Compute hourly ASCE reference evapotranspiration (ETo/ETr) for a set of
-    **gridded** meteorological NetCDF files and append the results to each file.
-
-    For every year in *years* the routine
-
-    1. Opens ``"<year>_utah_merged.nc"`` from *input_data_dir* as an
-       :class:`xarray.Dataset`.
-    2. Derives meteorological fields required by **RefET** (air temperature in
-       °C, actual vapor pressure *kPa*, wind speed m s⁻¹, short‑wave radiation
-       W m⁻²).
-    3. Calculates hourly ETo and ETr with :pyclass:`refet.Hourly` for an
-       elevation range of 1 100 – 1 975 m (25 m steps).
-    4. Stores the resulting 4‑D arrays in the dataset as ``ETo`` and ``ETr``
-       (dimensions ``elevation, time, lat, lon``).
-    5. Writes the augmented dataset to
-       ``"<year>_with_eto.nc"`` in *output_dir*.
-
-    Parameters
-    ----------
-    input_data_dir : str or pathlib.Path, optional
-        Directory that contains the yearly NetCDF files
-        ``"<year>_utah_merged.nc"``.  Defaults to the current working
-        directory.
-    years : list of int, optional
-        Years to process.  If *None* the default list
-        ``[2021, 2022, 2023, 2024]`` is used.
-    output_dir : str or pathlib.Path, optional
-        Destination directory for the ``*_with_eto.nc`` files.  If *None*,
-        the original *input_data_dir* is used.
-
-    Returns
-    -------
-    None
-        The function writes one NetCDF file per year and does not return a
-        Python object.
-
-    Notes
-    -----
-    * Elevations span **1 100 m to 1 975 m a.s.l.** in 25 m increments,
-      producing 36 elevation layers.
-    * Meteorological variable names in the input files must be
-
-      - ``Tair``  [K] – air temperature
-      - ``PSurf`` [Pa] – surface pressure
-      - ``Qair`` – specific humidity (kg kg⁻¹)
-      - ``Wind_E`` / ``Wind_N`` – east‐ and north‑component wind (m s⁻¹)
-      - ``SWdown`` [W m⁻²] – incident short‑wave radiation
-
-    * **Units**: output ETo/ETr are in millimetres per hour (``mm/hour``).
-    * The function prints each year to stdout as a simple progress indicator.
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> calc_hourly_ffp_xr(
-    ...     input_data_dir=Path("/data/met/"),
-    ...     years=[2022, 2023],
-    ...     output_dir=Path("/data/met/eto/")
-    ... )
-    """
-
-    if years is None:
-        years = [2021, 2022, 2023, 2024]
-    else:
-        years = years
-
-    if input_data_dir is None:
-        input_data_dir = Path(".")
-    elif isinstance(input_data_dir, Path):
-        input_data_dir = input_data_dir
-    else:
-        input_data_dir = Path(input_data_dir)
-
-    if output_dir is None:
-        output_dir = input_data_dir
-    elif isinstance(output_dir, Path):
-        output_dir = output_dir
-    else:
-        output_dir = Path(output_dir)
-
-    for year in years:
-        print(year)
-
-        ds = xarray.open_dataset(
-            input_data_dir / f"{year}_utah_merged.nc",
-        )
-
-        # Convert temperature to Celsius
-        temp = ds["Tair"].values - 273.15
-
-        # Compute actual vapor pressure (ea)
-        pair = ds["PSurf"].values / 1000  # Convert pressure from Pa to kPa
-        sph = ds["Qair"].values  # Specific humidity (kg/kg)
-        ea = refet.calcs._actual_vapor_pressure(
-            q=sph, pair=pair
-        )  # Vapor pressure (kPa)
-
-        # Compute wind speed from u and v components
-        wind_u = ds["Wind_E"].values
-        wind_v = ds["Wind_N"].values
-        uz = np.sqrt(wind_u**2 + wind_v**2)  # Wind speed (m/s)
-
-        # Extract shortwave radiation
-        rs = ds["SWdown"].values  # Solar radiation (W/m²)
-
-        # Extract time variables
-        time_vals = ds["time"].values  # Convert to numpy datetime64
-        dt_index = pd.to_datetime(time_vals)  # Convert to Pandas datetime index
-        DOY = dt_index.dayofyear.values  # Day of year
-        HH = dt_index.hour.values  # Hour of day
-        # Expand DOY and HH to match (time, lat, lon) shape
-        doy_expanded = np.broadcast_to(DOY[:, np.newaxis, np.newaxis], temp.shape)
-        hh_expanded = np.broadcast_to(HH[:, np.newaxis, np.newaxis], temp.shape)
-
-        # Define measurement height (assumed)
-        zw = 2.0  # Wind measurement height in meters
-
-        # Define elevation range (664m to 4125m, step 100m)
-        elevation_range = np.arange(1100, 2000, 25)
-
-        # Create an empty array to store ETo values
-        eto_results = np.zeros(
-            (len(elevation_range),) + temp.shape
-        )  # Shape (elevations, time, lat, lon)
-        etr_results = np.zeros((len(elevation_range),) + temp.shape)
-
-        # Loop over elevations and compute ETo
-        for i, elev in enumerate(elevation_range):
-            refet_obj = refet.Hourly(
-                tmean=temp,
-                ea=ea,
-                rs=rs,
-                uz=uz,
-                zw=2,
-                elev=elev,
-                lat=ds["lat"].values,
-                lon=ds["lon"].values,
-                doy=doy_expanded,
-                time=hh_expanded,
-                method="asce",
-                input_units={"rs": "w/m2"},
-            )
-            eto_results[i] = refet_obj.eto()  # Store ETo results for each elevation
-            etr_results[i] = refet_obj.etr()  # Store ETr results for each elevation
-
-        # Convert ETo results to an xarray DataArray
-        eto_da = xarray.DataArray(
-            data=eto_results,
-            dims=("elevation", "time", "lat", "lon"),
-            coords={
-                "elevation": elevation_range,
-                "time": ds["time"],
-                "lat": ds["lat"],
-                "lon": ds["lon"],
-            },
-            attrs={
-                "units": "mm/hour",
-                "description": "Hourly reference evapotranspiration (ASCE) at different elevations",
-            },
-        )
-
-        # Convert ETo results to an xarray DataArray
-        etr_da = xarray.DataArray(
-            data=etr_results,
-            dims=("elevation", "time", "lat", "lon"),
-            coords={
-                "elevation": elevation_range,
-                "time": ds["time"],
-                "lat": ds["lat"],
-                "lon": ds["lon"],
-            },
-            attrs={
-                "units": "mm/hour",
-                "description": "Hourly reference evapotranspiration (ASCE) at different elevations",
-            },
-        )
-
-        # Add ETo to the dataset
-        ds = ds.assign(ETo=eto_da)
-        # Add ETo to the dataset
-        ds = ds.assign(ETr=etr_da)
-
-        # Save the modified dataset (Optional)
-        ds.to_netcdf(output_dir / f"{year}_with_eto.nc")
 
 
 def multiply_geotiffs(input_a, input_b, output_path):
@@ -1123,7 +809,7 @@ def read_compiled_input(path: str | Path) -> tuple | None:
         {"u_mean", "z0", "IGBP_land_classification", "secondary_veg_type"}
     )
     drop_vars = list(set(cols).difference(keep_vars))
-    ret.drop(drop_vars, 1, inplace=True)
+    ret.drop(drop_vars, 1, inplace=True)  # type: ignore
     ret.dropna(
         subset=["wind_dir", "u_star", "sigma_v", "d", "zm", "L", "ET_corr"],
         how="any",
@@ -1192,6 +878,54 @@ def snap_centroid(station_x: float, station_y: float) -> tuple[float, float]:
             station_y += 15
     print("adjusted coordinates:", station_x, station_y)
     return station_x, station_y
+
+
+def load_stat_configs(
+    station,
+    config_path="../../station_config/",
+    secrets_path="../../secrets/config.ini",
+):
+    """
+    Load station metadata and secrets from configuration files.
+
+    Parameters:
+    -----------
+    station : str
+        Station identifier.
+    config_path : str
+        Path to station configuration file.
+    secrets_path : str
+        Path to secrets configuration file.
+
+    Returns:
+    --------
+    dict
+        A dictionary containing station metadata and database URL.
+    """
+
+    if isinstance(config_path, Path):
+        pass
+    else:
+        config_path = Path(config_path)
+
+    config_path_loc = config_path / f"{station}.ini"
+    config = configparser.ConfigParser()
+    config.read(config_path_loc)
+
+    if isinstance(secrets_path, Path):
+        pass
+    else:
+        secrets_path = Path(secrets_path)
+
+    secrets_config = configparser.ConfigParser()
+    secrets_config.read(secrets_path)
+
+    return {
+        "url": secrets_config["DEFAULT"]["url"],
+        "latitude": float(config["METADATA"]["station_latitude"]),
+        "longitude": float(config["METADATA"]["station_longitude"]),
+        "elevation": float(config["METADATA"]["station_elevation"]),
+    }
 
 
 def extract_nldas_xr_to_df(
@@ -1271,8 +1005,8 @@ def extract_nldas_xr_to_df(
         for file in config_path.glob("US*.ini"):
             name = file.stem
             print(name)
-            config = load_configs(
-                name, config_path=config_path, secrets_path=secrets_path
+            config = load_stat_configs(
+                name, config_path=config_path, secrets_path=secrets_path  # type: ignore
             )
 
             # Define the target latitude, longitude, and elevation (adjust as needed)
@@ -1433,7 +1167,9 @@ def normalize_eto_df(eto_df, eto_field="eto"):
     return df_final
 
 
-def calc_nldas_refet(date, hour, nldas_out_dir, latitude, longitude, elevation, zm):
+def calc_nldas_refet(
+    date, hour, nldas_out_dir, latitude, longitude, elevation, zm, station
+):
     """
     Normalize hourly ETo values by day and station using min-max and sum-based scaling.
 
@@ -1482,17 +1218,19 @@ def calc_nldas_refet(date, hour, nldas_out_dir, latitude, longitude, elevation, 
         lat_110=latitude, lon_110=longitude, method="nearest"
     )
     # calculate hourly ea from specific humidity
-    pair = ds.get("PRES_110_SFC").data / 1000  # nldas air pres in Pa convert to kPa
-    sph = ds.get("SPF_H_110_HTGL").data  # kg/kg
-    ea = refet.calcs._actual_vapor_pressure(q=sph, pair=pair)  # ea in kPa
+    pair = ds.get("PRES_110_SFC").data / 1000  # type: ignore # nldas air pres in Pa convert to kPa
+    sph = ds.get("SPF_H_110_HTGL").data  # kg/kg # type: ignore
+    ea = refet.calcs._actual_vapor_pressure(
+        q=sph, pair=pair
+    )  # ea in kPa # type: ignore
     # calculate hourly wind
-    wind_u = ds.get("U_GRD_110_HTGL").data
-    wind_v = ds.get("V_GRD_110_HTGL").data
+    wind_u = ds.get("U_GRD_110_HTGL").data  # type: ignore
+    wind_v = ds.get("V_GRD_110_HTGL").data  # type: ignore
     wind = np.sqrt(wind_u**2 + wind_v**2)
     # get temp convert to C
-    temp = ds.get("TMP_110_HTGL").data - 273.15
+    temp = ds.get("TMP_110_HTGL").data - 273.15  # type: ignore
     # get rs
-    rs = ds.get("DSWRF_110_SFC").data
+    rs = ds.get("DSWRF_110_SFC").data  # type: ignore
     unit_dict = {"rs": "w/m2"}
     # create refet object for calculating
 
@@ -1519,7 +1257,7 @@ def calc_nldas_refet(date, hour, nldas_out_dir, latitude, longitude, elevation, 
     # this one is saved under the site_ID subdir
     nldas_ts_outf = out_dir / f"nldas_ETr.csv"
     # save/append time series of point data
-    dt = pd.datetime(YYYY, MM, DD, HH)
+    dt = pd.to_datetime(f"{YYYY}-{MM}-{DD} {HH}:00")
     ETr_df = pd.DataFrame(
         columns=["ETr", "ETo", "ea", "sph", "wind", "pair", "temp", "rs"]
     )
@@ -1539,7 +1277,7 @@ def calc_nldas_refet(date, hour, nldas_out_dir, latitude, longitude, elevation, 
         nldas_df = ETr_df.round(4)
     else:
         curr_df = pd.read_csv(nldas_ts_outf, index_col="date", parse_dates=True)
-        curr_df.loc[dt] = ETr_df.loc[dt]
+        curr_df.loc[dt] = ETr_df.loc[dt]  # type: ignore
         curr_df.round(4).to_csv(nldas_ts_outf)
         nldas_df = curr_df.round(4)
 

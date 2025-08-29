@@ -521,7 +521,7 @@ def export_contours_gpkg(
                     sdf = df.loc[ts[:10]] if ts else df  # YYYY-MM-DD
                 else:
                     sdf = df.loc[ts[:7]] if ts else df  # YYYY-MM
-                eb = _eb_stats(sdf)
+                eb = _eb_stats(sdf)  # type: ignore
 
                 rec = {"time": ts, "r": float(r), **eb, "geometry": poly}
                 records.append(rec)
@@ -563,7 +563,7 @@ def export_contours_gpkg(
                         et_slice = df.loc[tstamp.strftime("%Y-%m"), le_c]
 
                     et_vals = (
-                        pd.to_numeric(et_slice, errors="coerce").dropna().values / 680.6
+                        pd.to_numeric(et_slice, errors="coerce").dropna().values / 680.6  # type: ignore
                     )
                     if et_vals.size > 0:
                         gdf["ET_mean_mmhr"] = float(np.nanmean(et_vals))
