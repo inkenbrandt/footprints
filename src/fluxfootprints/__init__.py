@@ -1,10 +1,16 @@
 # footprints/__init__.py
 
-from .core import FPP
+from .ffp_xr import ffp_climatology_new  # type: ignore[import]
+from .footprint_daily_summary import daily_source_area_summary
+from .weighted_summaries import et_weighted_summaries
 
-from .Footprint import Footprint
-
-from .kljun import FootprintModel, to_utm_polys  # the only public model
+from ffp_daily_monthly_helper import (
+    load_config,
+    load_amf_df,
+    build_climatology,
+    summarize_periods,
+    export_contours_gpkg,
+)
 
 from .tools import (
     polar_to_cartesian_dataframe,

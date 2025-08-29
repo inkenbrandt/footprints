@@ -24,8 +24,6 @@ import geopandas as gpd
 import xarray
 import refet
 
-from .kljun import FFPModel
-
 
 def load_configs(
     station,
@@ -308,98 +306,6 @@ def reproject_raster_dir(input_folder, output_folder, target_epsg="EPSG:5070"):
                     )
 
         print(f"Reprojected {input_path} → {output_path}")
-
-
-def _compute_hourly_footprint(temp_df, station_x, station_y, zm, h_s, z0, dx, origin_d):
-    """
-    Compute hourly footprint climatology for a given day and location.
-
-    Iterates through each hour (6:00 to 18:00 inclusive) and calculates the
-    footprint climatology using the FFP model, based on provided meteorological
-    inputs and station metadata. Only hours with available data are processed.
-
-    Parameters
-    ----------
-    temp_df : pandas.DataFrame
-        Filtered DataFrame containing hourly meteorological variables.
-        Expected columns include:
-        - 'mo_length': Obukhov length [m]
-        - 'v_sigma': Lateral standard deviation of velocity [m/s]
-        - 'ustar': Friction velocity [m/s]
-        - 'ws': Wind speed [m/s]
-        - 'wd': Wind direction [degrees]
-    station_x : float
-        UTM X-coordinate of the station [m].
-    station_y : float
-        UTM Y-coordinate of the station [m].
-    zm : float
-        Measurement height above displacement height [m].
-    h_s : float
-        Boundary layer height [m].
-    z0 : float
-        Surface roughness length [m].
-    dx : float
-        Grid resolution for the model domain [m].
-    origin_d : float
-        Domain half-width in meters (defines domain bounds as [-origin_d, origin_d]).
-
-    Returns
-    -------
-    list of tuple
-        List of tuples in the format `(hour, f_2d, x_2d, y_2d)`, where:
-        - hour : int
-            Hour of the day (24-hour format).
-        - f_2d : numpy.ndarray
-            2D footprint array for the given hour.
-        - x_2d : numpy.ndarray
-            2D array of x-coordinates (shifted by station_x).
-        - y_2d : numpy.ndarray
-            2D array of y-coordinates (shifted by station_y).
-
-    Notes
-    -----
-    - Only daytime hours (6 to 18) are processed.
-    - The footprint is masked with a cutoff filter (`mask_fp_cutoff`) after computation.
-    - If no data is available for a given hour, it is skipped.
-    - Errors during footprint computation are caught and logged, not raised.
-    """
-    footprints = []
-    for hour in range(6, 19):  # From 7 AM to 8 PM
-        temp_line = temp_df[temp_df.index.hour == hour]
-        if temp_line.empty:
-            print(f"No data for {hour}:00, skipping.")
-            continue
-
-        try:
-            ffp = FFPModel(
-                domain=[-origin_d, origin_d, -origin_d, origin_d],
-                dx=dx,
-                dy=dx,
-                zm=zm,
-                h=h_s,
-                rs=None,
-                z0=z0,
-                ol=temp_line["mo_length"].values,
-                sigmav=temp_line["v_sigma"].values,
-                ustar=temp_line["ustar"].values,
-                umean=temp_line["ws"].values,
-                wind_dir=temp_line["wd"].values,
-                crop=0,
-                fig=0,
-                verbosity=0,
-            )
-            ffp_result = ffp.run()
-            f_2d = np.array(ffp_result["fclim_2d"]) * dx**2
-            x_2d = np.array(ffp_result["x_2d"]) + station_x
-            y_2d = np.array(ffp_result["y_2d"]) + station_y
-            f_2d = mask_fp_cutoff(f_2d)
-
-            footprints.append((hour, f_2d, x_2d, y_2d))
-        except Exception as e:
-            print(f"Error computing footprint for hour {hour}: {e}")
-            continue
-
-    return footprints
 
 
 def write_footprint_to_raster(footprints, output_path, epsg=5070):
