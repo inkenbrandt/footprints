@@ -1,0 +1,38 @@
+[input]
+# (Optional) Name of this job. Output names are superseded by this variable.
+# Leave empty (e.g. "") if you'd like to keep the tower data file name as the outputs' name prefix.
+name                    = "UTV"
+
+# Path to input file.
+file                    = "./data/UTV_for_footprints.csv"
+# Latitude and longitude of tower location.
+location                = [40.12644, -109.9547]
+
+# Weight by reference ETo, must be true or false.
+# Multiplies overlap counts by fraction of cummulative ETo for each day.
+weigh_by_eto           = false
+# Reference ET data input. Ignored if `weigh_by_eto` is `false`.
+eto_file                = "./data/UTV_eto.csv"
+
+# Estimated height of the boundary layer in meters.
+boundary_layer_height   = 2000
+# Percentage of source area for which to provide contours, must be between 10% and 90%. 
+# Must be a single value in a list. Multiple values may be provided, but only the first will be used.
+# Expressed either in percentages ("80") or as fractions of 1 ("0.8"). 
+source_contour_ratio    = [90]
+
+[output]
+# Path to output directory.
+output_dir              = "./results/"
+# Meters per pixel for the output image.
+spatial_resolution      = 5
+# Overlap threshold for polygonization.
+overlap_threshold       = 0.2
+# If the output results in disjointed polygons, use best-effort approach to combine them into one.
+merge_disjointed = true
+
+[graphs]
+# Whether to export a heatmap showing accumulated overlaps.
+heatmap = true
+# Whether to export a chart showing the footprint polygon.
+polygon = true

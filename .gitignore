@@ -19,3 +19,14 @@
 /src/fluxfootprints.egg-info
 /footprints
 /.github
+/docs/notebooks/US-UTV_HH_202309271630_202507221300.csv
+/docs/notebooks/download_openet_data.ipynb
+/docs/notebooks/results
+/docs/notebooks/old
+/docs/notebooks/new_method.ipynb
+/docs/notebooks/geojsonTOhtml.ipynb
+/docs/notebooks/app.toml
+/docs/notebooks/US-UTV.html
+/data/eto
+/docs/notebooks/UTV_2023_09_footprint.geojson
+/docs/notebooks/UTV_2023_09_timeseries.gpkg

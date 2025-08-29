@@ -1,10 +1,10 @@
 # footprints/__init__.py
-from .kljun import FootprintModel  # the only public model
 
-# (Optionally) convenience xr wrapper
-from .adapters.ffp_xr import ffp_xr
+from .core import FPP
 
-__all__ = ["FootprintModel", "ffp_xr"]
+from .Footprint import Footprint
+
+from .kljun import FootprintModel, to_utm_polys  # the only public model
 
 from .tools import (
     polar_to_cartesian_dataframe,
@@ -12,33 +12,6 @@ from .tools import (
     generate_density_raster,
     concat_fetch_gdf,
 )
-
-from .footprint_plotting import FootprintPlotter, add_plotting_to_footprint
-from .volk import (
-    _compute_hourly_footprint,
-    calc_hourly_ffp,
-    calc_hourly_ffp_xr,
-    calc_nldas_refet,
-    clip_to_utah_merge,
-    download_nldas,
-    extract_nldas_xr_to_df,
-    fetch_and_preprocess_data,
-    find_transform,
-    load_configs,
-    mask_fp_cutoff,
-    multiply_directories_rast,
-    multiply_geotiffs,
-    norm_dly_et,
-    norm_minmax_dly_et,
-    normalize_eto_df,
-    outline_valid_cells,
-    read_compiled_input,
-    reproject_raster_dir,
-    snap_centroid,
-    weighted_rasters,
-    write_footprint_to_raster,
-)
-from .kljun import *
 
 
 __version__ = "0.1.13"
