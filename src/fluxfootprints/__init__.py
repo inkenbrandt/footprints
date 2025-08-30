@@ -1,8 +1,6 @@
 # footprints/__init__.py
 
 from .ffp_xr import ffp_climatology_new  # type: ignore[import]
-from .footprint_daily_summary import daily_source_area_summary
-from .weighted_summaries import et_weighted_summaries
 
 from .ffp_daily_monthly_helper import (
     load_config,
@@ -11,6 +9,7 @@ from .ffp_daily_monthly_helper import (
     summarize_periods,
     export_contours_gpkg,
     export_rasters_geotiff,
+    export_contour_stats_csv,
 )
 
 from .tools import (
@@ -20,5 +19,7 @@ from .tools import (
     concat_fetch_gdf,
 )
 
+from .footprint_daily_summary import daily_source_area_summary
+from .weighted_summaries import et_weighted_summaries
 
-__version__ = "0.1.13"
+__version__ = "0.2.1"

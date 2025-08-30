@@ -32,3 +32,6 @@
 /docs/notebooks/UTV_2023_09_timeseries.gpkg
 /docs/notebooks/input_data
 /docs/notebooks/ffp_geotiffs
+/docs/notebooks/ffp_outputs
+/docs/notebooks/row_footprint.ipynb
+/docs/notebooks/__pycache__

@@ -4,14 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fluxfootprints"
-version = "0.2.0"
+version = "0.2.1"
 description = "A comprehensive Python package for micrometeorological footprint analysis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GNU General Public License v3.0"}
 authors = [
     {name = "Paul Inkenbrandt", email = "paulinkenbrandt@utah.gov"},
-    {name = "Kathryn Ladig", email = "kladig@utah.gov"},
     {name = "Natascha Kljun", email = "natascha.kljun@cec.lu.se"},
     {name = "John Volk", email = "John.Volk@dri.edu "},
 ]

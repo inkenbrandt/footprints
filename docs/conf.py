@@ -13,10 +13,10 @@ sys.path.insert(0, os.path.abspath("../src"))  # adjust path as needed
 # sys.path.append("../..")  # Adjust this path as needed
 import fluxfootprints  # Import the package to be documented
 
-project = "fluxfootprint"
+project = "fluxfootprints"
 copyright = "2025, Paul Inkenbrandt, Natascha Kljun, John Volk"
 author = "Paul Inkenbrandt, Natascha Kljun, John Volk"
-release = "0.2.0"
+release = "0.2.1"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

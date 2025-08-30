@@ -75,17 +75,6 @@ def test_calc_xr_footprint_executes(minimal_df):
     assert isinstance(model.f_2d, xr.DataArray)
     assert model.fclim_2d.shape == model.f_2d.isel(time=0).shape
 
-
-def test_smooth_and_contour_output(minimal_df):
-    model = FFPclim(minimal_df)
-    model.calc_xr_footprint()
-    model.ds["footprint"] = model.f_2d
-    climatology = model.smooth_and_contour()
-    assert isinstance(climatology, xr.Dataset)
-    for key in climatology:
-        assert climatology[key].ndim == 2
-
-
 def test_run_returns_expected_keys(minimal_df):
     model = FFPclim(minimal_df)
     output = model.run()

@@ -63,7 +63,7 @@ def load_config(ini_path: str | Path) -> Dict[str, Any]:
     """Read a minimal INI for site metadata and column names."""
     import configparser
 
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(interpolation=None)
     cp.read(ini_path)
 
     md = cp["METADATA"]

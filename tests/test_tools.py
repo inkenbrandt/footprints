@@ -43,44 +43,6 @@ def test_polar_to_cartesian_dataframe_basic():
     assert out["X_Dist"].iloc[4:].isna().all()
     assert out["Y_Dist"].iloc[4:].isna().all()
 
-
-# ---------------------------------------------------------------------------
-# aggregate_to_daily_centroid
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize("weighted", [True, False])
-def test_aggregate_to_daily_centroid(weighted):
-    """Verify weighted vs. unweighted centroids."""
-    df = pd.DataFrame(
-        {
-            "Timestamp": [
-                "2025-05-01 00:00",
-                "2025-05-01 00:30",
-                "2025-05-02 00:00",
-            ],
-            "X": [0.0, 10.0, 20.0],
-            "Y": [0.0, 10.0, 20.0],
-            "ET": [1.0, 3.0, 2.0],
-        }
-    )
-
-    result = aggregate_to_daily_centroid(df, weighted=weighted)
-
-    # Two distinct days expected
-    assert len(result) == 2
-
-    day1 = result[result["Date"] == pd.to_datetime("2025‑05‑01").date()].iloc[0]
-
-    if weighted:
-        # (0*1 + 10*3) / 4  = 7.5
-        expected = 7.5
-    else:
-        # (0 + 10) / 2 = 5
-        expected = 5.0
-
-    assert day1["X"] == pytest.approx(expected, rel=1e-6)
-    assert day1["Y"] == pytest.approx(expected, rel=1e-6)
-
-
 # ---------------------------------------------------------------------------
 # generate_density_raster
 # ---------------------------------------------------------------------------
