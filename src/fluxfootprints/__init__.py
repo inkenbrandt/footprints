@@ -22,4 +22,4 @@ from .tools import (
 from .footprint_daily_summary import daily_source_area_summary
 from .weighted_summaries import et_weighted_summaries
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
