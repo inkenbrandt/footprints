@@ -10,31 +10,16 @@
 ---
 
 ### Table of Contents
-
-1. [Key Features](#key-features)
-2. [Installation](#installation)
+ 
+1. [Installation](#installation)
+2. [Documentation](https://fluxfootprints.readthedocs.io/en/latest/)
 3. [Quick‑start Example](#quick-start-example)
-4. [Command‑line Interface](#command-line-interface)
-5. [Documentation](https://fluxfootprints.readthedocs.io/en/latest/)
-6. [Input Requirements](#input-requirements)
+4. [Key Features](#key-features)
+5. [Input Requirements](#input-requirements)
 7. [Citing & Referencing](#citing--referencing)
 8. [Contributing](#contributing)
 9. [Development Road‑map](#development-road-map)
 10. [License](#license)
-
----
-
-### Key Features
-
-| Category                | Highlights                                                                                                                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Core model**          | • Implements Eq. 14 & 17 of Kljun et al. (2015) with stability‑specific coefficients<br>• Optional roughness‑sublayer corrections<br>• Supports per‑footprint filtering based on theoretical validity limits |
-| **Performance**         | • Pure NumPy + xarray for vectorised calculations<br>• Lazy computation and Dask compatibility for large archives                                                                                            |
-| **I/O & preprocessing** | • Pandas helpers to map tower log fields automatically<br>• Quality‑control filters for *u\* ≥ 0.1 m s⁻¹*, finite σᵥ, etc.                                                                                   |
-| **Analysis tools**      | • Aggregate footprint climatologies<br>• Compute *r%* source‑area contours (10–90 %)<br>• Functions to derive transects, footprint peak statistics, and 80 % area coverage                                   |
-| **Visualisation**       | • Matplotlib helpers for heat‑maps & contour overlays<br>• Geospatial export to GeoTIFF / shapefile (EPSG aware)                                                                                             |
-| **Extensibility**       | • Modular class design (`FFPModel`, `FFPClimatology`)<br>• Plug‑in hooks for alternative parameter sets or dispersion schemes                                                                                |
-| **Reproducibility**     | • 100 % test coverage with `pytest`<br>• Pre‑commit hooks (black, ruff, isort, doc8)                                                                                                                         |
 
 ---
 
@@ -48,7 +33,7 @@ pip install fluxfootprints
 pip install git+https://github.com/YourOrg/fluxfootprint.git
 ```
 
-> Minimum Python 3.9.  Core dependencies: `numpy`, `pandas`, `xarray`,
+> Minimum Python 3.10  Core dependencies: `numpy`, `pandas`, `xarray`,
 > `scipy`, `matplotlib`.  Optional: `dask`, `rioxarray`, `pyproj` for advanced
 > geospatial export.
 
@@ -68,6 +53,18 @@ To build locally:
 pip install -r docs/requirements.txt
 sphinx-build -M html docs/ docs/_build
 ```
+
+---
+
+### Key Features
+
+| Category                | Highlights                                                                                                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Core model**          | • Implements Eq. 14 & 17 of Kljun et al. (2015) with stability‑specific coefficients<br>• Optional roughness‑sublayer corrections<br>• Supports per‑footprint filtering based on theoretical validity limits |
+| **Performance**         | • Pure NumPy + xarray for vectorised calculations<br>• Lazy computation and Dask compatibility for large archives                                                                                            |
+| **I/O & preprocessing** | • Pandas helpers to map tower log fields automatically<br>• Quality‑control filters for *u\* ≥ 0.1 m s⁻¹*, finite σᵥ, etc.                                                                                   |
+| **Analysis tools**      | • Aggregate footprint climatologies<br>• Compute *r%* source‑area contours (10–90 %)<br>• Functions to derive transects, footprint peak statistics, and 80 % area coverage                                   |
+| **Visualisation**       | • Matplotlib helpers for heat‑maps & contour overlays<br>• Geospatial export to GeoTIFF / shapefile (EPSG aware)                                                                                             |
 
 ---
 
@@ -113,8 +110,10 @@ All contributions—bug reports, suggestions, or code—are welcome!
 
 ### Development Road‑map
 
+* [ ] Build out tests
+* [ ] Build out documentation
 * [ ] Footprint uncertainty quantification via Monte‑Carlo resampling
-* [ ] GPU acceleration using CuPy
+* [ ] OpenET API and Comparison
 * [ ] Footprint aggregation across different time periods
 * [ ] QGIS plug‑in for in‑map footprint visualisation
 

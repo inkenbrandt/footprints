@@ -12,6 +12,7 @@ import pytest
 
 import sys
 import os
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 # Allow import whether the module is installed as a package or present as a file
 try:
@@ -32,8 +33,10 @@ except Exception:
 # Helper stubs / fixtures
 # ----------------------------
 
+
 class _FakeArray:
     """Minimal xarray.DataArray-like wrapper exposing .values."""
+
     def __init__(self, arr):
         self.values = np.asarray(arr, dtype=float)
 
@@ -43,8 +46,21 @@ class FakeFFPGood:
     Stub FFPClass that produces a uniform 2x2 footprint over centers (-0.5,0.5).
     With dx=1,dy=1 the final polygon should be a 2x2 square (area=4).
     """
-    def __init__(self, df, domain, dx, dy, rs, smooth_data, crop,
-                 inst_height, canopy_height, verbosity, logger):
+
+    def __init__(
+        self,
+        df,
+        domain,
+        dx,
+        dy,
+        rs,
+        smooth_data,
+        crop,
+        inst_height,
+        canopy_height,
+        verbosity,
+        logger,
+    ):
         self.df = df
         self.domain = domain
         self.dx = dx
@@ -63,6 +79,7 @@ class FakeFFPGood:
 
 class FakeFFPZero(FakeFFPGood):
     """Stub that yields all zeros so the day is skipped."""
+
     def run(self):
         self.fclim_2d = _FakeArray(np.zeros((2, 2), dtype=float))
 
@@ -80,24 +97,27 @@ def _make_df(n_per_day=24, start="2025-08-01"):
 # Tests for private helpers
 # ----------------------------
 
+
 def test_level_for_fraction_all_zero_returns_nan():
     arr = np.zeros((3, 3), dtype=float)
     t = fds._level_for_fraction(arr, 0.8)
     assert math.isnan(t)
 
+
 def test_mask_to_polygon_area_and_parts():
     xs = np.array([0.0, 1.0])
     ys = np.array([0.0, 1.0])
-    mask = np.array([[True, True],
-                     [True, True]])
+    mask = np.array([[True, True], [True, True]])
     mp = fds._mask_to_polygon(xs, ys, mask, dx=1.0, dy=1.0)
     # 4 cells of area 1 each -> union area = 4
     assert mp.area == pytest.approx(4.0)
     # merged into a single polygon
     assert len(mp.geoms) == 1
 
+
 def test_major_minor_axes_square():
     from shapely.geometry import box
+
     poly = box(-1, -1, 1, 1)  # square, width=2, height=2
     major, minor, angle = fds._major_minor_axes(poly)
     assert major == pytest.approx(2.0)
@@ -109,6 +129,7 @@ def test_major_minor_axes_square():
 # ----------------------------
 # Tests for daily_source_area_summary
 # ----------------------------
+
 
 def test_daily_summary_basic_one_day_uniform_field():
     df = _make_df(24, "2025-08-01")
@@ -142,6 +163,7 @@ def test_daily_summary_basic_one_day_uniform_field():
     assert isinstance(row["orientation_deg_from_x"], float)
     assert row["poly_parts"] == 1
 
+
 def test_daily_summary_skips_days_with_insufficient_records():
     df = _make_df(10, "2025-08-01")  # fewer than min_records
     domain = np.array([-1, 1, -1, 1], dtype=float)
@@ -159,6 +181,7 @@ def test_daily_summary_skips_days_with_insufficient_records():
 
     assert summary.empty
 
+
 def test_daily_summary_skips_zero_footprint_days():
     # 24 records but model sum = 0 -> skipped
     df = _make_df(24, "2025-08-01")
@@ -175,6 +198,7 @@ def test_daily_summary_skips_zero_footprint_days():
         save_gpkg=None,
     )
     assert summary.empty
+
 
 def test_daily_summary_multiple_days_mixed_outcomes():
     # Day 1: good; Day 2: zero footprint -> skipped
@@ -214,6 +238,7 @@ def test_daily_summary_multiple_days_mixed_outcomes():
     assert len(summary) == 1
     assert summary.iloc[0]["date"] == "2025-08-01"
 
+
 def test_daily_summary_writes_geopackage_via_monkeypatch(monkeypatch):
     df = _make_df(24, "2025-08-01")
     domain = np.array([-1, 1, -1, 1], dtype=float)
@@ -223,8 +248,10 @@ def test_daily_summary_writes_geopackage_via_monkeypatch(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.records = []
             self.closed = False
+
         def write(self, rec):
             self.records.append(rec)
+
         def close(self):
             self.closed = True
 
@@ -255,6 +282,7 @@ def test_daily_summary_writes_geopackage_via_monkeypatch(monkeypatch):
 # ----------------------------
 # Validation / error handling
 # ----------------------------
+
 
 def test_daily_summary_requires_datetime_index():
     df = pd.DataFrame({"dummy": [1, 2, 3]}, index=[1, 2, 3])  # not DatetimeIndex

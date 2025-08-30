@@ -3,7 +3,6 @@ import configparser
 import pandas as pd
 import numpy as np
 import pathlib
-import pyproj
 import rasterio
 
 from rasterio.warp import calculate_default_transform, reproject, Resampling
