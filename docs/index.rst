@@ -17,5 +17,10 @@ fluxfootprint documentation
    modeltypes
    Quick-start notebook 1 <notebooks/ffp_getting_started.ipynb>
    Quick-start notebook 2 <notebooks/footprint_package_calc.ipynb>
+   LS Footprint Example <notebooks/Getting_Started_LS_Footprint_Model.ipynb>
+   Wang Footprint Example <notebooks/Getting_Started_Wang_Footprint.ipynb>
+   Alternative Kljun Formulation Example <notebooks/new_ffp_getting_started.ipynb>
+   NLDAS Download <notebooks/NLDAS_Download_and_Summarize.ipynb>
+
 
 

@@ -35,3 +35,5 @@
 /docs/notebooks/ffp_outputs
 /docs/notebooks/row_footprint.ipynb
 /docs/notebooks/__pycache__
+/docs/notebooks/wang2006_2d_example.npz
+/docs/notebooks/wang2006_fy_example.csv

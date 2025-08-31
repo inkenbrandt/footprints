@@ -574,19 +574,40 @@ class FFPModel:
             T = ps1 * self.ds["zm"] / self.ds["ustar"]
             sigma_y0 = self.ds["sigmav"] * T
 
-            # First calculate the basic crosswind spread
-            sigma_y = self.calc_crosswind_spread(self.xv)
+            # Base crosswind spread as a function of x → expand over y to (x, y)
+            sigma_y_1d = xr.DataArray(
+                self.calc_crosswind_spread(self.x),
+                dims=("x",),
+                coords={"x": self.x},
+            )
+            sigma_y_grid = sigma_y_1d.expand_dims(y=self.y)  # (x, y)
 
-            # Then combine with near-source dispersion term where needed
-            self.sigma_y = xr.where(in_rsl, np.sqrt(sigma_y0**2 + sigma_y**2), sigma_y)
+            # Broadcast to (time, x, y)
+            sigma_y_grid_3d = sigma_y_grid.expand_dims(time=self.ds.time)
+            sigma_y0_3d = sigma_y0.broadcast_like(sigma_y_grid_3d)
+            in_rsl_3d = in_rsl.broadcast_like(sigma_y_grid_3d)
 
-            # Calculate blind zone correction
+            # Combine near-source and far-field terms where in RSL
+            self.sigma_y = xr.where(
+                in_rsl_3d,
+                np.sqrt(sigma_y0_3d ** 2 + sigma_y_grid_3d ** 2),
+                sigma_y_grid_3d,
+            )
+
+            # Blind-zone correction (time-only)
             self.x_min = self.ds["ustar"] * T
 
-            # Log RSL corrections
-            self.logger.info(
-                f"Applied RSL corrections to {in_rsl.sum().values} measurements"
+        else:
+            # Outside RSL: keep base spread and shape it to (time, x, y)
+            sigma_y_1d = xr.DataArray(
+                self.calc_crosswind_spread(self.x),
+                dims=("x",),
+                coords={"x": self.x},
             )
+            self.sigma_y = sigma_y_1d.expand_dims(y=self.y).expand_dims(time=self.ds.time)
+            # No blind-zone correction needed; keep as NaN series
+            self.x_min = xr.full_like(self.ds["ustar"], np.nan)
+
 
     def prep_df_fields(
         self, crop_height: float, inst_height: float, atm_bound_height: float
@@ -1843,27 +1864,26 @@ class FFPModel:
         Args:
             filename: Path where the results should be saved
         """
+        if getattr(self, "f_2d", None) is None or getattr(self, "fclim_2d", None) is None:
+            raise RuntimeError("No results to save. Did you call run() first?")
+
         results = xr.Dataset(
             {
-                "footprint_2d": self.f_2d,
-                "footprint_climatology": self.fclim_2d,
+                "footprint_2d": self.f_2d,  # expect dims (time, x, y) or similar
+                "footprint_climatology": self.fclim_2d,  # dims (x, y)
                 "domain_x": xr.DataArray(self.x, dims=["x"]),
                 "domain_y": xr.DataArray(self.y, dims=["y"]),
-                "parameters": xr.DataArray(
-                    {
-                        "crop_height": float(self.df["h_c"].iloc[0]),
-                        "inst_height": float(self.df["zm"].iloc[0])
-                        + float(self.df["h_c"].iloc[0]),
-                        "atm_bound_height": float(self.df["h"].iloc[0]),
-                    }
-                ),
             }
         )
 
-        # Add source areas as individual variables
-        if hasattr(self, "source_areas"):
-            for key, value in self.source_areas.items():
-                results[key] = value
+        # Store parameters as attributes (NetCDF-safe)
+        results.attrs.update(
+            {
+                "crop_height": float(self.df["h_c"].iloc[0]),
+                "inst_height": float(self.df["zm"].iloc[0]) + float(self.df["h_c"].iloc[0]),
+                "atm_bound_height": float(self.df["h"].iloc[0]),
+            }
+        )
 
         results.to_netcdf(filename)
         self.logger.info(f"Results saved to {filename}")
