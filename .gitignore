@@ -37,3 +37,8 @@
 /docs/notebooks/__pycache__
 /docs/notebooks/wang2006_2d_example.npz
 /docs/notebooks/wang2006_fy_example.csv
+/data/reformatter_vars.yml
+/docs/notebooks/2025_utah_merged.parquet
+/docs/notebooks/2024_utah_merged.nc
+/docs/notebooks/2024_utah_merged.parquet
+/docs/notebooks/2025_utah_merged.nc

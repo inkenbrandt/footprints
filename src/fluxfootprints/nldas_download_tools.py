@@ -176,7 +176,6 @@ def multiply_directories_rast(dir1=None, dir2=None, out_dir=None, model="ensembl
     return tsum
 
 
-
 def clip_to_utah_merge(file_dir="./NLDAS_data/", years=None, output_dir="./"):
     """
     Clip NLDAS NetCDF files to Utah boundaries and merge them by year.
@@ -238,13 +237,15 @@ def clip_to_utah_merge(file_dir="./NLDAS_data/", years=None, output_dir="./"):
         # Extract Utah-specific data from each file and store datasets
         utah_datasets = []
         for file in netcdf_files.glob(f"{year}*.nc"):
-            print(file)
-            ds_temp = xarray.open_dataset(file)
-            ds_utah_temp = ds_temp.sel(
-                lat=slice(utah_lat_min, utah_lat_max),
-                lon=slice(utah_lon_min, utah_lon_max),
-            )
-            utah_datasets.append(ds_utah_temp)
+
+            if file.stat().st_size > 10000:
+                print(file)
+                ds_temp = xarray.open_dataset(file)
+                ds_utah_temp = ds_temp.sel(
+                    lat=slice(utah_lat_min, utah_lat_max),
+                    lon=slice(utah_lon_min, utah_lon_max),
+                )
+                utah_datasets.append(ds_utah_temp)
 
         # Merge all extracted datasets along the time dimension
         ds_merged = xarray.concat(utah_datasets, dim="time")
