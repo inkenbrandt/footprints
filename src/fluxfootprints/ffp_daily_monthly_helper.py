@@ -1,48 +1,16 @@
 """
-ffp_daily_monthly_helper.py
+ffp_daily_monthly_helper.py (Refactored for FFPModel)
 
-Summarize flux footprints from `ffp_xr.ffp_climatology_new` to daily/monthly
+Summarize flux footprints from `improved_ffp.FFPModel` to daily/monthly
 periods and (optionally) export 80% source-area contours to a GeoPackage.
 
-Requirements (imported lazily when possible):
-- numpy, pandas, xarray
-- geopandas, shapely, pyproj, matplotlib (for optional GPKG export)
-
-Usage (example):
-    from ffp_daily_monthly_helper import (
-        load_config, load_amf_df, build_climatology,
-        summarize_periods, export_80pct_contours_gpkg
-    )
-
-    cfg = load_config("/mnt/data/US-CRT_config.ini")
-    df  = load_amf_df("/mnt/data/AMF_US-CRT_BASE_HH_3-5_abb.csv", cfg)
-
-    clim = build_climatology(df)        # computes clim.f_2d (time, x, y)
-
-    # Daily/monthly means (normalized per time) and ET-weighted footprints
-    out = summarize_periods(
-        clim,
-        df,
-        et_source="LE",    # compute ET from LE (W/m2) -> mm/hr
-        daily=True,
-        monthly=True,
-        normalize_each_time=True,
-    )
-
-    # Optional: export 80% contours (daily + monthly) to a GeoPackage
-    export_80pct_contours_gpkg(
-        clim,
-        out,
-        station_lat=cfg["station_latitude"],
-        station_lon=cfg["station_longitude"],
-        gpkg_path="US-CRT_footprints_80pct.gpkg",
-        crs_out="auto"  # "auto" chooses an appropriate UTM
-    )
+Updated to use FFPModel as the canonical implementation.
 """
 
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List, Union, Any
 from pathlib import Path
@@ -50,8 +18,16 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-# Local module (provided by user)
-from .ffp_xr import ffp_climatology_new
+# Use FFPModel as canonical implementation
+from .improved_ffp import FFPModel
+
+# Keep backward compatibility option
+_LEGACY_MODE = False
+try:
+    from .ffp_xr import ffp_climatology_new as LegacyFFP
+except ImportError:
+    LegacyFFP = None
+    _LEGACY_MODE = False
 
 
 # ------------------------------
@@ -65,9 +41,6 @@ def load_config(ini_path: str | Path) -> Dict[str, Any]:
 
     cp = configparser.ConfigParser(interpolation=None)
     cp.read(ini_path)
-
-    md = cp["METADATA"]
-    data = cp["DATA"]
 
     def _getfloat(section, key, fallback=None):
         try:
@@ -99,6 +72,7 @@ def load_amf_df(csv_path: str | Path, cfg: Dict[str, Any]) -> pd.DataFrame:
         raise FileNotFoundError(f"CSV not found: {csv_path}")
 
     df = pd.read_csv(csv_path, skiprows=cfg.get("skiprows", 0))
+
     # Parse timestamps
     ts_col = cfg.get("ts_col", "TIMESTAMP_START")
     date_fmt = cfg.get("date_parser", "%Y%m%d%H%M")
@@ -127,33 +101,51 @@ def build_climatology(
     dx: float = 10.0,
     dy: float = 10.0,
     domain: Tuple[float, float, float, float] = (-1000.0, 1000.0, -1000.0, 1000.0),
-) -> ffp_climatology_new:
+    rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    smooth_data: bool = True,
+    verbosity: int = 2,
+    use_legacy: bool = False,
+    logger: Optional[logging.Logger] = None,
+) -> Union[FFPModel, Any]:
     """
-    Prepare required columns and run the xarray-based footprint solver.
+    Prepare required columns and run the footprint model.
 
-    Expected columns in df (typical AMF names shown in brackets):
-      - wind_dir  [WD]       degrees
-      - umean     [WS]       m/s
-      - ustar     [USTAR]    m/s
-      - ol        [MO_LENGTH] m
-      - sigmav    [V_SIGMA]  m/s
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with required columns (WD, WS, USTAR, MO_LENGTH, V_SIGMA)
+    crop_height : float
+        Vegetation/canopy height (m)
+    atm_bound_height : float
+        Atmospheric boundary layer height (m)
+    inst_height : float
+        Instrument measurement height (m)
+    dx, dy : float
+        Grid resolution (m)
+    domain : tuple
+        (xmin, xmax, ymin, ymax) in meters
+    rs : list
+        Source area fractions to compute (0-1)
+    smooth_data : bool
+        Apply Gaussian smoothing
+    verbosity : int
+        Logging verbosity (0=silent, 2=debug)
+    use_legacy : bool
+        Use legacy ffp_xr implementation (for comparison)
+    logger : logging.Logger
+        Optional logger instance
+
+    Returns
+    -------
+    FFPModel or LegacyFFP
+        Footprint model instance with computed results
     """
-    # Map user columns to standardized names
-    rename_map = {}
-    for logical, ini_key in [
-        ("wind_dir", "wind_dir_col"),
-        ("umean", "wind_spd_col"),
-        ("ustar", "ustar_col"),
-        ("ol", "mo_length_col"),
-        ("sigmav", "v_sigma_col"),
-    ]:
-        src = ini_key  # keep consistent with cfg keys
-        # tolerate both upper/lower-case spellings
-        # (we'll pass the actual names through cfg in summarize_periods)
-        rename_map[src] = logical
 
-    # Instead of relying on cfg here, accept typical AMF names directly:
-    df2 = df.rename(
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    # Map column names to FFPModel expectations
+    df_mapped = df.rename(
         columns={
             "WD": "wind_dir",
             "WS": "umean",
@@ -163,25 +155,78 @@ def build_climatology(
         }
     ).copy()
 
-    # Filter minimal data presence
-    needed = ["wind_dir", "umean", "ustar", "ol", "sigmav"]
-    missing_cols = [c for c in needed if c not in df2.columns]
+    # Check for required columns
+    required = ["wind_dir", "umean", "ustar", "ol", "sigmav"]
+    missing_cols = [c for c in required if c not in df_mapped.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Build and run the climatology object
-    clim = ffp_climatology_new(
-        df=df2,
-        domain=np.array(domain, dtype=float),
-        dx=float(dx),  # type: ignore
-        dy=float(dy),  # type: ignore
-        rs=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-        crop_height=float(crop_height),
-        atm_bound_height=float(atm_bound_height),
-        inst_height=float(inst_height),
-    )
-    clim.run()  # populates clim.f_2d (time, x, y) and clim.fclim_2d
-    return clim
+    # Use legacy implementation if requested and available
+    if use_legacy and LegacyFFP is not None:
+        logger.warning(
+            "Using legacy FFP implementation - consider migrating to FFPModel"
+        )
+        model = LegacyFFP(
+            df=df_mapped,
+            domain=np.array(domain, dtype=float),
+            dx=float(dx),
+            dy=float(dy),
+            rs=rs,
+            crop_height=float(crop_height),
+            atm_bound_height=float(atm_bound_height),
+            inst_height=float(inst_height),
+            smooth_data=smooth_data,
+            verbosity=verbosity,
+            logger=logger,
+        )
+        model.run()
+        return model
+
+    # Use FFPModel (canonical implementation)
+    try:
+        model = FFPModel(
+            df=df_mapped,
+            domain=list(domain),
+            dx=float(dx),
+            dy=float(dy),
+            rs=rs,
+            crop_height=float(crop_height),
+            atm_bound_height=float(atm_bound_height),
+            inst_height=float(inst_height),
+            smooth_data=smooth_data,
+            verbosity=verbosity,
+            logger=logger,
+        )
+
+        # Run the model
+        results = model.run(return_result=True)
+
+        # Store results in model for backward compatibility
+        if results is not None:
+            model.results = results
+
+        logger.info("FFPModel calculation completed successfully")
+        return model
+
+    except Exception as e:
+        logger.error(f"FFPModel failed: {e}")
+        if use_legacy and LegacyFFP is not None:
+            logger.warning("Falling back to legacy implementation")
+            return build_climatology(
+                df,
+                crop_height,
+                atm_bound_height,
+                inst_height,
+                dx,
+                dy,
+                domain,
+                rs,
+                smooth_data,
+                verbosity,
+                use_legacy=True,
+                logger=logger,
+            )
+        raise
 
 
 # ------------------------------
@@ -201,7 +246,6 @@ def _et_from_le(df: pd.DataFrame, le_col: str = "LE") -> pd.Series:
     """
     if le_col not in df.columns:
         raise ValueError(f"LE column '{le_col}' not found in DataFrame")
-    # mm/hr = W/m^2 ÷ 680.6
     return df[le_col] / 680.6
 
 
@@ -214,39 +258,69 @@ class SummaryResult:
 
 
 def summarize_periods(
-    clim: ffp_climatology_new,
+    model: FFPModel,
     df: pd.DataFrame,
-    et_source: str = "LE",  # compute ET from LE
+    et_source: str = "LE",
     daily: bool = True,
     monthly: bool = True,
     normalize_each_time: bool = True,
 ) -> SummaryResult:
     """
-    Build daily/monthly summaries from clim.f_2d (time,x,y).
+    Build daily/monthly summaries from model.f_2d (time,x,y).
 
-    - Mean footprints: per-period average of per-time normalized slices.
-    - ET-weighted: per-time normalized slices weighted by ET (mm/hr), then
-      aggregated within each period and normalized by the sum of weights.
+    Parameters
+    ----------
+    model : FFPModel
+        Fitted footprint model with f_2d attribute
+    df : pd.DataFrame
+        Original input DataFrame (for ET data)
+    et_source : str
+        Column name for latent energy flux (W/m²)
+    daily : bool
+        Compute daily aggregations
+    monthly : bool
+        Compute monthly aggregations
+    normalize_each_time : bool
+        Normalize each time slice before aggregation
+
+    Returns
+    -------
+    SummaryResult
+        Object containing requested daily/monthly footprints
     """
-    f = clim.f_2d
+
+    # Get f_2d from model
+    if not hasattr(model, "f_2d") or model.f_2d is None:
+        raise ValueError(
+            "Model must have f_2d attribute computed (call model.run() first)"
+        )
+
+    f = model.f_2d
+
     if normalize_each_time:
-        f = _ensure_time_normalized(f)  # type: ignore
+        f = _ensure_time_normalized(f)
 
     res = SummaryResult()
+
+    # Mean footprints
     if daily:
-        res.f_daily_mean = f.resample(time="1D").mean()  # type: ignore
+        res.f_daily_mean = f.resample(time="1D").mean()
     if monthly:
-        res.f_monthly_mean = f.resample(time="MS").mean()  # type: ignore
+        res.f_monthly_mean = f.resample(time="MS").mean()
 
     # ET-weighted aggregation
-    et_mmhr = _et_from_le(df, le_col=et_source).reindex(f["time"].to_index(), method=None)  # type: ignore
-    et_da = xr.DataArray(et_mmhr.values, coords={"time": f["time"]}, dims=("time",))  # type: ignore
+    et_mmhr = _et_from_le(df, le_col=et_source).reindex(
+        f["time"].to_index(), method=None
+    )
+    et_da = xr.DataArray(et_mmhr.values, coords={"time": f["time"]}, dims=("time",))
 
-    weighted = f * et_da  # type: ignore
+    weighted = f * et_da
+
     if daily:
         num = weighted.resample(time="1D").sum()
         den = et_da.resample(time="1D").sum()
         res.f_daily_et_weighted = num / den
+
     if monthly:
         num = weighted.resample(time="MS").sum()
         den = et_da.resample(time="MS").sum()
@@ -256,15 +330,14 @@ def summarize_periods(
 
 
 # ------------------------------
-# Export 80% contours
+# Export utilities
 # ------------------------------
 
 
 def _choose_utm_epsg(lon: float, lat: float) -> int:
-    """Pick a UTM EPSG (NAD83 / WGS84 UTM) from lon/lat (northern hemisphere only)."""
+    """Pick a UTM EPSG (NAD83 / WGS84 UTM) from lon/lat."""
     zone = int(math.floor((lon + 180.0) / 6.0) + 1)
-    # Use WGS84 UTM north as a default
-    return int(f"326{zone:02d}")  # EPSG:326##
+    return int(f"326{zone:02d}")
 
 
 def _make_contour_polygon_from_field_alt(
@@ -275,19 +348,8 @@ def _make_contour_polygon_from_field_alt(
     method: str = "auto",
 ):
     """
-    Alternative to plt.contour for extracting a single polygon boundary
-    for a cumulative-source threshold.
-
-    Strategy:
-      1) Normalize z2d so sum = 1, compute mask where cumulative >= level.
-      2) Try scikit-image marching squares (find_contours) on the binary mask.
-      3) Fallback: rasterio.features.shapes vectorization on the mask.
-
-    Returns
-    -------
-    vertices : np.ndarray | None
-        (N, 2) array of [x, y] in the same units as x,y inputs,
-        or None if no contour found.
+    Extract polygon boundary for cumulative-source threshold using
+    scikit-image or rasterio vectorization.
     """
     z = np.array(z2d, dtype=float, copy=True)
     z[z < 0] = 0.0
@@ -304,7 +366,6 @@ def _make_contour_polygon_from_field_alt(
     thr_val = flat[idx[thr_idx]] if thr_idx < flat.size else flat[idx[-1]]
     mask = (z >= thr_val).astype(np.uint8)
 
-    # Index→coordinate maps
     x = np.asarray(x)
     y = np.asarray(y)
     nx, ny = x.size, y.size
@@ -317,14 +378,14 @@ def _make_contour_polygon_from_field_alt(
     def map_rows_to_y(rows):
         return np.interp(rows, row_ix, y)
 
-    # 1) scikit-image marching squares
+    # Try scikit-image first
     if method in ("auto", "skimage"):
         try:
             from skimage import measure
 
             conts = measure.find_contours(mask, level=0.5)
             if conts:
-                arr = max(conts, key=lambda a: a.shape[0])  # (row, col)
+                arr = max(conts, key=lambda a: a.shape[0])
                 rows, cols = arr[:, 0], arr[:, 1]
                 xv = map_cols_to_x(cols)
                 yv = map_rows_to_y(rows)
@@ -333,7 +394,7 @@ def _make_contour_polygon_from_field_alt(
             if method == "skimage":
                 return None
 
-    # 2) rasterio polygonization
+    # Fallback to rasterio
     if method in ("auto", "rasterio"):
         try:
             from rasterio import features
@@ -374,14 +435,14 @@ def _make_contour_polygon_from_field_alt(
 
 
 def export_contours_gpkg(
-    clim: ffp_climatology_new,
+    model: FFPModel,
     summaries: SummaryResult,
     df: pd.DataFrame,
     station_lat: float,
     station_lon: float,
     gpkg_path: str | Path,
     crs_out: str | int = "auto",
-    levels=(0.8,),
+    levels: tuple = (0.8,),
     stats_csv: str | Path | None = None,
     centroid_out: str | int = 4326,
     rn_col: str | None = None,
@@ -391,22 +452,19 @@ def export_contours_gpkg(
     contour_method: str = "auto",
 ) -> Path:
     """
-    Export source-area contours (configurable rs levels, e.g., [0.5, 0.8])
-    for each time slice in the provided summaries to a GeoPackage.
+    Export source-area contours to GeoPackage with energy balance stats.
 
-    Also writes optional CSV stats with area, perimeter, centroids (in multiple CRS),
-    ET stats (from LE), and energy-balance closure (Rn vs H+LE+G).
-
-    Creates layers like: daily_mean_r50, daily_mean_r80, monthly_etw_r80, ...
+    Adapted to work with FFPModel output structure.
     """
     import geopandas as gpd
     from shapely.geometry import Polygon
     from pyproj import CRS, Transformer
 
-    x = clim.x  # model grid (relative meters)
-    y = clim.y
+    # Get grid coordinates from model
+    x = model.x
+    y = model.y
 
-    # ---------------- CRS + transforms ----------------
+    # CRS setup
     if crs_out == "auto":
         epsg = _choose_utm_epsg(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
@@ -417,7 +475,6 @@ def export_contours_gpkg(
     to_proj = Transformer.from_crs(wgs84, dst_crs, always_xy=True)
     to_wgs = Transformer.from_crs(dst_crs, wgs84, always_xy=True)
 
-    # For centroid outputs
     try:
         centroid_crs = CRS.from_user_input(centroid_out)
     except Exception:
@@ -425,7 +482,7 @@ def export_contours_gpkg(
     to_centroid = Transformer.from_crs(dst_crs, centroid_crs, always_xy=True)
     to_wgs_cent = Transformer.from_crs(dst_crs, wgs84, always_xy=True)
 
-    # ---------------- EB helpers + column selection ----------------
+    # Energy balance helpers
     def _pick(dfcols, preferred, fallbacks):
         if preferred and preferred in dfcols:
             return preferred
@@ -483,13 +540,12 @@ def export_contours_gpkg(
             )
         return out
 
-    # ---------------- I/O prep ----------------
+    # Prepare output
     gpkg_path = Path(gpkg_path)
     if gpkg_path.exists():
         gpkg_path.unlink()
 
     stats_records = []
-
     x0, y0 = to_proj.transform(station_lon, station_lat)
 
     def _to_world_coords(vertices_xy: np.ndarray | None):
@@ -499,14 +555,14 @@ def export_contours_gpkg(
         vy = vertices_xy[:, 1] + y0
         return Polygon(np.column_stack([vx, vy]))
 
-    # ---------------- Core layer writer ----------------
+    # Layer collection helper
     def _collect_layer(da: Optional[xr.DataArray], base_layer: str):
         if da is None:
             return
         for r in levels:
             records = []
             for i in range(da.sizes["time"]):
-                z = da.isel(time=i).values  # 2D array
+                z = da.isel(time=i).values
                 verts = _make_contour_polygon_from_field_alt(
                     z, x, y, level=float(r), method=contour_method
                 )
@@ -516,12 +572,12 @@ def export_contours_gpkg(
 
                 ts = pd.Timestamp(da["time"].values[i]).isoformat()
 
-                # EB stats by period (day or month)
+                # EB stats
                 if base_layer.startswith("daily"):
-                    sdf = df.loc[ts[:10]] if ts else df  # YYYY-MM-DD
+                    sdf = df.loc[ts[:10]] if ts else df
                 else:
-                    sdf = df.loc[ts[:7]] if ts else df  # YYYY-MM
-                eb = _eb_stats(sdf)  # type: ignore
+                    sdf = df.loc[ts[:7]] if ts else df
+                eb = _eb_stats(sdf)
 
                 rec = {"time": ts, "r": float(r), **eb, "geometry": poly}
                 records.append(rec)
@@ -532,13 +588,13 @@ def export_contours_gpkg(
             lname = f"{base_layer}_r{int(round(float(r) * 100))}"
             gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=dst_crs)
 
-            # Areas, perimeters
+            # Metrics
             gdf["area_m2"] = gdf.geometry.area
             gdf["perimeter_m"] = gdf.geometry.length
             gdf["area_ha"] = gdf["area_m2"] / 10000.0
             gdf["area_acres"] = gdf["area_m2"] / 4046.85642
 
-            # Centroids in multiple CRSs
+            # Centroids
             cx = gdf.geometry.centroid.x.values
             cy = gdf.geometry.centroid.y.values
             cx_out, cy_out = to_centroid.transform(cx, cy)
@@ -551,10 +607,9 @@ def export_contours_gpkg(
             gdf["centroid_lat"] = lat
             gdf["layer"] = lname
 
-            # ET stats from LE (mm/hr and mm per period) if available
+            # ET stats
             try:
                 if le_c and le_c in df.columns:
-                    # Daily vs monthly slice
                     if base_layer.startswith("daily"):
                         tstamp = pd.to_datetime(gdf["time"].iloc[0])
                         et_slice = df.loc[str(tstamp.date()), le_c]
@@ -563,20 +618,18 @@ def export_contours_gpkg(
                         et_slice = df.loc[tstamp.strftime("%Y-%m"), le_c]
 
                     et_vals = (
-                        pd.to_numeric(et_slice, errors="coerce").dropna().values / 680.6  # type: ignore
+                        pd.to_numeric(et_slice, errors="coerce").dropna().values / 680.6
                     )
                     if et_vals.size > 0:
                         gdf["ET_mean_mmhr"] = float(np.nanmean(et_vals))
-                        # If half-hourly data: convert mm/hr to mm depth per step (0.5 hr) and sum
                         gdf["ET_sum_mm"] = float(np.nansum(et_vals * 0.5))
             except Exception:
                 pass
 
-            # Write layer and collect stats rows
             gdf.to_file(gpkg_path, layer=lname, driver="GPKG")
             stats_records.extend(gdf.drop(columns="geometry").to_dict(orient="records"))
 
-    # ---------------- Write all layers ----------------
+    # Write layers
     _collect_layer(summaries.f_daily_mean, "daily_mean")
     _collect_layer(summaries.f_monthly_mean, "monthly_mean")
     _collect_layer(summaries.f_daily_et_weighted, "daily_etw")
@@ -590,13 +643,12 @@ def export_contours_gpkg(
     return gpkg_path
 
 
-# ------------------------------
-# GeoTIFF raster export
-# ------------------------------
+# Remaining functions (export_rasters_geotiff, export_contour_stats_csv) remain the same
+# but should use model.x, model.y instead of clim.x, clim.y
 
 
 def export_rasters_geotiff(
-    clim: ffp_climatology_new,
+    model: FFPModel,
     summaries: SummaryResult,
     station_lat: float,
     station_lon: float,
@@ -607,17 +659,7 @@ def export_rasters_geotiff(
     dtype="float32",
     nodata=0.0,
 ) -> Path:
-    """
-    Export each time slice of the requested summaries as a GeoTIFF.
-
-    File naming pattern: {prefix}_{layer}_{YYYYMMDD}.tif for daily layers,
-    and {prefix}_{layer}_{YYYYMM}.tif for monthly layers.
-
-    Layers names in 'which' must be among:
-        'daily_mean', 'monthly_mean', 'daily_etw', 'monthly_etw'
-    """
-    import numpy as np
-    from pathlib import Path
+    """Export each time slice as GeoTIFF (adapted for FFPModel)."""
     import rasterio
     from rasterio.transform import from_origin
     from pyproj import CRS, Transformer
@@ -625,11 +667,9 @@ def export_rasters_geotiff(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Grid and CRS transforms
-    x = np.asarray(clim.x)
-    y = np.asarray(clim.y)
+    x = np.asarray(model.x)
+    y = np.asarray(model.y)
 
-    # Resolution (assume regular grid)
     if x.size < 2 or y.size < 2:
         raise ValueError("x/y grid must have at least 2 points each")
 
@@ -646,13 +686,10 @@ def export_rasters_geotiff(
     to_proj = Transformer.from_crs(wgs84, dst_crs, always_xy=True)
     x0, y0 = to_proj.transform(station_lon, station_lat)
 
-    # Compute top-left corner for from_origin
     left = (x.min() + x0) - xres / 2.0
     top = (y.max() + y0) + yres / 2.0
-
     transform = from_origin(left, top, xres, yres)
 
-    # Helper to write a stack of 2-D arrays, one per time slice
     def _write_series(da, layername):
         if da is None:
             return
@@ -660,12 +697,9 @@ def export_rasters_geotiff(
 
         for i, ts in enumerate(times):
             arr = da.isel(time=i).values.astype(dtype)
-            # rasterio expects (rows, cols) with row 0 at top; our y asc may be bottom->top
-            # Flip in Y if needed so higher y is at top of image
-            if y[1] > y[0]:  # ascending
+            if y[1] > y[0]:
                 arr = np.flipud(arr)
 
-            # Build filename by granularity
             if layername.startswith("daily"):
                 suf = ts.strftime("%Y%m%d")
             else:
@@ -691,7 +725,6 @@ def export_rasters_geotiff(
             ) as dst:
                 dst.write(arr, 1)
 
-    # Route each requested layer
     layer_map = {
         "daily_mean": summaries.f_daily_mean,
         "monthly_mean": summaries.f_monthly_mean,
@@ -706,14 +739,9 @@ def export_rasters_geotiff(
     return Path(out_dir)
 
 
-# ------------------------------
-# CSV Stats Export
-# ------------------------------
-
-
 def export_contour_stats_csv(
     df: pd.DataFrame,
-    clim: ffp_climatology_new,
+    model: FFPModel,
     summaries: SummaryResult,
     station_lat: float,
     station_lon: float,
@@ -726,19 +754,14 @@ def export_contour_stats_csv(
     crs_out: str | int = "auto",
     levels=(0.8,),
 ) -> Path:
-    """
-    Export simple statistics (area in hectares, centroid lat/lon) for each contour
-    and each time slice to a CSV file.
-    """
+    """Export contour stats to CSV (adapted for FFPModel)."""
     import csv
-    import geopandas as gpd
     from shapely.geometry import Polygon
     from pyproj import CRS, Transformer
 
-    x = clim.x
-    y = clim.y
+    x = model.x
+    y = model.y
 
-    # pick output CRS
     if crs_out == "auto":
         epsg = _choose_utm_epsg(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
@@ -749,74 +772,6 @@ def export_contour_stats_csv(
     to_proj = Transformer.from_crs(wgs84, dst_crs, always_xy=True)
     to_wgs = Transformer.from_crs(dst_crs, wgs84, always_xy=True)
 
-    # --- helpers for energy balance closure ---
-    def _pick(dfcols, preferred, fallbacks):
-        if preferred and preferred in dfcols:
-            return preferred
-        for f in fallbacks:
-            # allow contains
-            for c in dfcols:
-                if f.lower() in c.lower():
-                    return c
-        return None
-
-    # choose columns
-    cols = list(df.columns)
-    rn_c = _pick(cols, rn_col, ["NETRAD", "RN", "RNET"])
-    h_c = _pick(cols, h_col, ["H"])
-    le_c = _pick(cols, le_col, ["LE", "LE_F_MDS", "LE_QC"])
-    g_c = _pick(cols, g_col, ["G", "G_1_1_1", "SHF", "SOIL_HEAT"])
-
-    def _eb_stats(slice_df):
-        out = {}
-        try:
-            rn = slice_df[rn_c].astype(float) if rn_c else None
-            h = slice_df[h_c].astype(float) if h_c else None
-            le = slice_df[le_c].astype(float) if le_c else None
-            g = slice_df[g_c].astype(float) if g_c else None
-            # means (W/m2)
-            rn_m = float(np.nanmean(rn)) if rn is not None else np.nan
-            h_m = float(np.nanmean(h)) if h is not None else np.nan
-            le_m = float(np.nanmean(le)) if le is not None else np.nan
-            g_m = float(np.nanmean(g)) if g is not None else np.nan
-            resid_m = rn_m - (
-                (h_m if np.isfinite(h_m) else 0.0)
-                + (le_m if np.isfinite(le_m) else 0.0)
-                + (g_m if np.isfinite(g_m) else 0.0)
-            )
-            out.update(
-                dict(
-                    Rn_mean_Wm2=rn_m,
-                    H_mean_Wm2=h_m,
-                    LE_mean_Wm2=le_m,
-                    G_mean_Wm2=g_m,
-                    Residual_mean_Wm2=resid_m,
-                )
-            )
-            # closure fraction (H+LE+G)/Rn
-            if np.isfinite(rn_m) and rn_m != 0.0:
-                num = 0.0
-                for v in (h_m, le_m, g_m):
-                    if np.isfinite(v):
-                        num += v
-                out["Closure_frac"] = num / rn_m
-                out["Residual_frac_of_Rn"] = resid_m / rn_m
-            else:
-                out["Closure_frac"] = np.nan
-                out["Residual_frac_of_Rn"] = np.nan
-        except Exception:
-            out = dict(
-                Rn_mean_Wm2=np.nan,
-                H_mean_Wm2=np.nan,
-                LE_mean_Wm2=np.nan,
-                G_mean_Wm2=np.nan,
-                Residual_mean_Wm2=np.nan,
-                Closure_frac=np.nan,
-                Residual_frac_of_Rn=np.nan,
-            )
-        return out
-
-    # Compute tower origin in projected meters
     x0, y0 = to_proj.transform(station_lon, station_lat)
 
     def _to_world_coords(vertices_xy):
@@ -826,7 +781,6 @@ def export_contour_stats_csv(
         vy = vertices_xy[:, 1] + y0
         return Polygon(np.column_stack([vx, vy]))
 
-    # Open CSV writer
     csv_path = Path(csv_path)
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -847,7 +801,6 @@ def export_contour_stats_csv(
                     if poly is None or poly.is_empty:
                         continue
                     ts = pd.Timestamp(da["time"].values[i]).isoformat()
-                    # area in m2 -> ha
                     area_ha = poly.area / 10000.0
                     cx, cy = poly.centroid.x, poly.centroid.y
                     clon, clat = to_wgs.transform(cx, cy)
