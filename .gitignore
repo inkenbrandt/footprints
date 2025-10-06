@@ -42,3 +42,7 @@
 /docs/notebooks/2024_utah_merged.nc
 /docs/notebooks/2024_utah_merged.parquet
 /docs/notebooks/2025_utah_merged.nc
+
+docs/notebooks/.DS_Store
+.gitignore
+.DS_Store

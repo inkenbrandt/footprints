@@ -699,7 +699,7 @@ class FFPModel:
             )
 
             self.theta = xr.DataArray(
-                np.arctan2(self.yv, self.xv),
+                np.arctan2(self.xv, self.yv),
                 dims=("x", "y"),
                 coords={"x": self.x, "y": self.y},
             )
