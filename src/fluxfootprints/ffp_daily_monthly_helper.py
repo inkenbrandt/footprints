@@ -17,9 +17,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+from rasterio import features
+from affine import Affine
+import rasterio
+from rasterio.transform import from_origin
+import csv
+
+import geopandas as gpd
+from shapely.geometry import Polygon
+from pyproj import CRS, Transformer
 
 # Use FFPModel as canonical implementation
 from .improved_ffp import FFPModel
+    # Import models
+from .kormannmeixner_adapter import KormannMeixnerModel
+from .ls_footprint_adapter import LSFootprintModelAdapter
+from .wang_footprint_adapter import WangFootprintModel
+from .base_footprint_model import BaseFootprintModel
 
 # Keep backward compatibility option
 _LEGACY_MODE = False
@@ -95,6 +109,7 @@ def load_amf_df(csv_path: str | Path, cfg: Dict[str, Any]) -> pd.DataFrame:
 
 def build_climatology(
     df: pd.DataFrame,
+    model_type: str = "ffp",
     crop_height: float = 0.2,
     atm_bound_height: float = 2000.0,
     inst_height: float = 2.5,
@@ -106,7 +121,8 @@ def build_climatology(
     verbosity: int = 2,
     use_legacy: bool = False,
     logger: Optional[logging.Logger] = None,
-) -> Union[FFPModel, Any]:
+    **model_kwargs,
+) -> BaseFootprintModel:
     """
     Prepare required columns and run the footprint model.
 
@@ -143,6 +159,46 @@ def build_climatology(
 
     if logger is None:
         logger = logging.getLogger(__name__)
+
+    # Model registry
+    models = {
+        "ffp": FFPModel,
+        "kormann-meixner": KormannMeixnerModel,
+        "km": KormannMeixnerModel,
+        "lagrangian": LSFootprintModelAdapter,
+        "ls": LSFootprintModelAdapter,
+        "wang": WangFootprintModel,
+        "wang2006": WangFootprintModel,
+    }
+    
+    model_type = model_type.lower()
+    if model_type not in models:
+        raise ValueError(
+            f"Unknown model type '{model_type}'. "
+            f"Choose from: {list(models.keys())}"
+        )
+    
+    ModelClass = models[model_type]
+    
+    # Common parameters
+    common_params = dict(
+        df=df,
+        domain=list(domain),
+        dx=float(dx),
+        dy=float(dy),
+        rs=rs,
+        crop_height=float(crop_height),
+        atm_bound_height=float(atm_bound_height),
+        inst_height=float(inst_height),
+        smooth_data=smooth_data,
+        verbosity=verbosity,
+        logger=logger,
+    )
+    
+    # Add model-specific parameters
+    common_params.update(model_kwargs)
+    
+
 
     # Map column names to FFPModel expectations
     df_mapped = df.rename(
@@ -182,50 +238,19 @@ def build_climatology(
         model.run()
         return model
 
-    # Use FFPModel (canonical implementation)
+    # Create and run model
     try:
-        model = FFPModel(
-            df=df_mapped,
-            domain=list(domain),
-            dx=float(dx),
-            dy=float(dy),
-            rs=rs,
-            crop_height=float(crop_height),
-            atm_bound_height=float(atm_bound_height),
-            inst_height=float(inst_height),
-            smooth_data=smooth_data,
-            verbosity=verbosity,
-            logger=logger,
-        )
-
-        # Run the model
-        results = model.run(return_result=True)
-
-        # Store results in model for backward compatibility
-        if results is not None:
-            model.results = results
-
-        logger.info("FFPModel calculation completed successfully")
+        logger.info(f"Initializing {model_type} model...")
+        model = ModelClass(**common_params)
+        
+        logger.info("Running footprint calculation...")
+        model.run(return_result=True)
+        
+        logger.info("Footprint calculation completed successfully")
         return model
-
+        
     except Exception as e:
-        logger.error(f"FFPModel failed: {e}")
-        if use_legacy and LegacyFFP is not None:
-            logger.warning("Falling back to legacy implementation")
-            return build_climatology(
-                df,
-                crop_height,
-                atm_bound_height,
-                inst_height,
-                dx,
-                dy,
-                domain,
-                rs,
-                smooth_data,
-                verbosity,
-                use_legacy=True,
-                logger=logger,
-            )
+        logger.error(f"Model {model_type} failed: {e}")
         raise
 
 
@@ -258,7 +283,7 @@ class SummaryResult:
 
 
 def summarize_periods(
-    model: FFPModel,
+    model: BaseFootprintModel,
     df: pd.DataFrame,
     et_source: str = "LE",
     daily: bool = True,
@@ -295,7 +320,17 @@ def summarize_periods(
             "Model must have f_2d attribute computed (call model.run() first)"
         )
 
-    f = model.f_2d
+    # Get f_2d from model using standard interface
+    f_2d = model.get_footprint_timeseries()
+    
+    if f_2d is None:
+        raise ValueError(
+            "Model does not support time-resolved footprints. "
+            "Only climatology available."
+        )
+
+    f = f_2d
+    #f = model.f_2d
 
     if normalize_each_time:
         f = _ensure_time_normalized(f)
@@ -397,8 +432,7 @@ def _make_contour_polygon_from_field_alt(
     # Fallback to rasterio
     if method in ("auto", "rasterio"):
         try:
-            from rasterio import features
-            from affine import Affine
+
 
             if nx < 2 or ny < 2:
                 return None
@@ -456,9 +490,7 @@ def export_contours_gpkg(
 
     Adapted to work with FFPModel output structure.
     """
-    import geopandas as gpd
-    from shapely.geometry import Polygon
-    from pyproj import CRS, Transformer
+
 
     # Get grid coordinates from model
     x = model.x
@@ -660,9 +692,6 @@ def export_rasters_geotiff(
     nodata=0.0,
 ) -> Path:
     """Export each time slice as GeoTIFF (adapted for FFPModel)."""
-    import rasterio
-    from rasterio.transform import from_origin
-    from pyproj import CRS, Transformer
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -755,9 +784,7 @@ def export_contour_stats_csv(
     levels=(0.8,),
 ) -> Path:
     """Export contour stats to CSV (adapted for FFPModel)."""
-    import csv
-    from shapely.geometry import Polygon
-    from pyproj import CRS, Transformer
+
 
     x = model.x
     y = model.y

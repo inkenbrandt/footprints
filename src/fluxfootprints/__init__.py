@@ -1,4 +1,10 @@
 # footprints/__init__.py
+from .base_footprint_model import BaseFootprintModel
+from .improved_ffp import FFPModel
+from .kormannmeixner_adapter import KormannMeixnerModel
+from .ls_footprint_adapter import LSFootprintModelAdapter
+from .wang_footprint_adapter import WangFootprintModel
+
 
 from .ffp_xr import ffp_climatology_new  # type: ignore[import]
 
@@ -59,5 +65,20 @@ from .nldas_download_tools import (
     outline_valid_cells,
     fetch_and_preprocess_data,
 )
+
+__all__ = [
+    # Base interface
+    "BaseFootprintModel",
+    
+    # Model implementations
+    "FFPModel",
+    "KormannMeixnerModel", 
+    "LSFootprintModelAdapter",
+    "WangFootprintModel",
+    
+    # Helper functions
+    "build_climatology",
+    # ... rest ...
+]
 
 __version__ = "0.2.4"
