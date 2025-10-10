@@ -5,8 +5,9 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 import xarray as xr
 
+from .base_footprint_model import BaseFootprintModel
 
-class ffp_climatology_new:
+class ffp_climatology_new(BaseFootprintModel):
     r"""
     Create a footprint‑climatology from a series of individual flux‑footprint
     estimates using the simple 2‑D parameterisation of Kljun et al. (2015).
@@ -149,6 +150,20 @@ class ffp_climatology_new:
         station_y: float = None,
         **kwargs,
     ):
+        super().__init__(
+            df=df,
+            domain=domain,
+            dx=dx,
+            dy=dy,
+            rs=rs,
+            crop_height=crop_height,
+            atm_bound_height=atm_bound_height,
+            inst_height=inst_height,
+            smooth_data=smooth_data,
+            verbosity=verbosity,
+            logger=logger,
+        )
+
 
         self.fclim_2d = None
         self.df = df
@@ -238,6 +253,51 @@ class ffp_climatology_new:
             lg.addHandler(logging.StreamHandler())
         lg.setLevel(logging.WARNING)
         return lg
+
+    def _validate_input_df(self,df, config=None, required_vars=None):
+        """
+        Validate input DataFrame for FFP climatology calculations.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Input DataFrame containing flux tower measurements
+        config : dict, optional
+            Configuration dictionary mapping standard variable names to column names
+            Expected keys: 'zm', 'u_mean', 'ustar', 'L', 'sigma_v', 'h', 'z0', 'wind_dir'
+        required_vars : list, optional
+            List of required variables. If None, uses default set.
+            
+        Returns
+        -------
+        pd.DataFrame
+            Validated DataFrame with standardized column names
+            
+        Raises
+        ------
+        ValueError
+            If required columns are missing or data is invalid
+        """
+        import pandas as pd
+        import numpy as np
+        
+        # Default configuration mapping
+        default_config = {
+            'zm': 'zm',              # Measurement height [m]
+            'u_mean': 'WS',          # Mean wind speed [m/s]
+            'ustar': 'USTAR',        # Friction velocity [m/s]
+            'L': 'MO_LENGTH',        # Obukhov length [m]
+            'sigma_v': 'V_SIGMA',    # Std dev of lateral velocity [m/s]
+            'h': 'PBLH_F',           # Boundary layer height [m]
+            'z0': 'z0',              # Roughness length [m]
+            'wind_dir': 'WD'         # Wind direction [degrees]
+        }
+        
+        # Check if DataFrame is empty
+        if df.empty:
+            raise ValueError("Input DataFrame is empty")
+        
+        return df
 
     def prep_df_fields(
         self,
@@ -523,6 +583,17 @@ class ffp_climatology_new:
 
         return climatology
 
-    def run(self):
+    def run(self, return_result: bool = True):
+
         self.calc_xr_footprint()
+
+        if return_result:
+            results = xr.Dataset(
+                        {
+                            "footprint_climatology": self.fclim_2d,  # Use DataArray directly
+                            "domain_x": ("x", self.x),
+                            "domain_y": ("y", self.y),
+                        }
+                    )
+            return results
         # self.smooth_and_contour()

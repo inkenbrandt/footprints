@@ -18,9 +18,9 @@ from scipy import signal
 from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
 import traceback
+from .base_footprint_model import BaseFootprintModel
 
-
-class FFPModel:
+class FFPModel(BaseFootprintModel):
     """
     Flux Footprint Prediction (FFP) model based on Kljun et al. (2015).
 
@@ -136,11 +136,22 @@ class FFPModel:
         ValueError
             If any input parameters are invalid or inconsistent.
         """
-        self.verbosity = int(verbosity)
+        super().__init__(
+            df=df,
+            domain=domain,
+            dx=dx,
+            dy=dy,
+            rs=rs,
+            crop_height=crop_height,
+            atm_bound_height=atm_bound_height,
+            inst_height=inst_height,
+            smooth_data=smooth_data,
+            verbosity=verbosity,
+            logger=logger,
+        )
 
         # Set up logger
-        self.logger = logger or self._setup_logger()
-        self.logger.setLevel(logging.DEBUG if verbosity > 1 else logging.WARNING)
+        self.logger.setLevel(logging.DEBUG if self.verbosity > 1 else logging.WARNING)
 
         # Model constants
         self.k = 0.4  # von Karman constant
@@ -154,13 +165,13 @@ class FFPModel:
         }
 
         # Validate input DataFrame
-        self.df = self._validate_input_df(df)
+        self.df = self._validate_input_df(self.df)
 
         # Process input data
         self.prep_df_fields(
-            crop_height=crop_height,
+            crop_height=self.crop_height,
             inst_height=inst_height,
-            atm_bound_height=atm_bound_height,
+            atm_bound_height=self.atm_bound_height,
         )
 
         # Initialize basic attributes
@@ -360,44 +371,77 @@ class FFPModel:
         xarray.DataArray
             The scaled crosswind-integrated footprint.
         """
+
         self.logger.debug("Calculating crosswind-integrated footprint...")
 
         try:
-            # Get scalar parameters
-            a_scalar = self.get_scalar_value(self.a)
-            b_scalar = self.get_scalar_value(self.b)
-            c_scalar = self.get_scalar_value(self.c)
-            d_scalar = self.get_scalar_value(self.d)
+            # Parameters may be scalars OR time-varying DataArrays
+            # Keep them as-is for broadcasting
+            a = self.a
+            b = self.b
+            c = self.c
+            d = self.d
+            
+            # If they're DataArrays, ensure they broadcast correctly with x_star
+            # x_star shape: (time, x, y)
+            # a, b, c, d might be: (time,) or scalar
+            
+            self.logger.debug(f"Parameter shapes: a={getattr(a, 'shape', 'scalar')}, "
+                            f"b={getattr(b, 'shape', 'scalar')}, "
+                            f"c={getattr(c, 'shape', 'scalar')}, "
+                            f"d={getattr(d, 'shape', 'scalar')}")
 
-            # Calculate modified x_star
-            x_star_modified = x_star - d_scalar
+            # Calculate x_star - d (broadcasting handles dimensions)
+            x_star_modified = x_star - d
+            
+            # Mask for valid values
+            mask = x_star_modified > 0.01
 
-            # Create mask for valid values
-            mask = x_star_modified > 0
-
-            # Calculate footprint using xarray's where operation
+            # Calculate exponent with overflow protection
+            # Use xr.where to handle the division safely
+            safe_denominator = xr.where(
+                x_star_modified > 0.01, 
+                x_star_modified, 
+                1.0
+            )
+            
+            exp_arg = -c / safe_denominator
+            exp_arg = xr.where(mask, exp_arg, -700)
+            
+            # Clip to safe range
+            exp_arg = xr.where(exp_arg > -700, exp_arg, -700)
+            exp_arg = xr.where(exp_arg < 100, exp_arg, 100)
+            
+            # Calculate power term
+            power_term = xr.where(
+                mask,
+                x_star_modified ** b,
+                0.0
+            )
+            
+            # Combine terms
             f_star = xr.where(
                 mask,
-                a_scalar
-                * (x_star_modified**b_scalar)
-                * np.exp(-c_scalar / x_star_modified),
+                a * power_term * np.exp(exp_arg),
                 0.0,
             )
 
-            # Log statistics
-            self.logger.debug(f"x_star_modified shape: {x_star_modified.shape}")
+            # Safety checks
+            f_star = xr.where(np.isfinite(f_star), f_star, 0.0)
+            f_star = xr.where(f_star < 1e10, f_star, 0.0)
+            f_star = xr.where(f_star > 0, f_star, 0.0)
+
             self.logger.debug(
-                f"x_star_modified range: {float(x_star_modified.min())} to {float(x_star_modified.max())}"
-            )
-            self.logger.debug(f"f_star shape: {f_star.shape}")
-            self.logger.debug(
-                f"f_star range: {float(f_star.min())} to {float(f_star.max())}"
+                f"f_star shape: {f_star.shape}, "
+                f"range: {float(f_star.min()):.2e} to {float(f_star.max()):.2e}"
             )
 
             return f_star
 
         except Exception as e:
             self.logger.error(f"Error in crosswind integration: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             raise
 
     def get_source_area_contour(self, r, x_ru, x_rd, y_r):
@@ -507,20 +551,19 @@ class FFPModel:
         Ensures scalar values are assigned.
         """
 
-        # Convert all parameters to scalar values
-        def ensure_scalar(val):
-            return self.get_scalar_value(val)
-
-        # Base parameters
-        self.a = ensure_scalar(1.4524)
-        self.b = ensure_scalar(-1.9914)
-        self.c = ensure_scalar(1.4622)
-        self.d = ensure_scalar(0.1359)
+        # Start with universal parameters as scalars
+        self.a = 1.4524
+        self.b = -1.9914
+        self.c = 1.4622
+        self.d = 0.1359
 
         # Crosswind dispersion parameters
-        self.ac = ensure_scalar(2.17)
-        self.bc = ensure_scalar(1.66)
-        self.cc = ensure_scalar(20.0)
+        self.ac = 2.17
+        self.bc = 1.66
+        self.cc = 20.0
+        
+        self.logger.debug("Initialized with universal parameters")
+
 
     def check_rsl_validity(self):
         """
@@ -730,68 +773,63 @@ class FFPModel:
         xarray.Dataset
             Dataset with regime-specific masks.
         """
-        # Calculate stability parameter zm/L
+
+        # Calculate stability parameter
         stability_param = self.ds["zm"] / self.ds["ol"]
 
-        # Define regime boundaries per paper
+        # Define regime boundaries
         regimes = xr.Dataset()
-
-        # Convective regimes
         regimes["strongly_unstable"] = stability_param <= -15.5
         regimes["unstable"] = (stability_param > -15.5) & (stability_param < -0.1)
-
-        # Near-neutral regime
         regimes["neutral"] = (stability_param >= -0.1) & (stability_param <= 0.1)
-
-        # Stable regimes
         regimes["stable"] = (stability_param > 0.1) & (
             stability_param < self.oln / self.ds["zm"]
         )
         regimes["strongly_stable"] = stability_param >= self.oln / self.ds["zm"]
 
-        # Calculate regime-specific parameters
+        # Regime-specific parameters from Appendix A
         params = {
             "unstable": {"a": 2.930, "b": -2.285, "c": 2.127, "d": -0.107},
             "neutral": {"a": 1.472, "b": -1.996, "c": 1.480, "d": 0.169},
             "stable": {"a": 1.472, "b": -1.996, "c": 1.480, "d": 0.169},
         }
 
-        # Implement smooth transitions between regimes
+        # Smooth transitions
         transition_zone = 0.1
 
         def transition_weight(param, center, width):
             """Calculate smooth transition weight."""
             return 0.5 * (1 + np.tanh((param - center) / width))
 
-        # Calculate regime weights
         neutral_to_unstable = transition_weight(stability_param, -0.1, transition_zone)
         neutral_to_stable = transition_weight(stability_param, 0.1, transition_zone)
 
-        # Apply smooth parameter transitions
+        # Apply smooth parameter transitions - results have shape (time,)
         for param in ["a", "b", "c", "d"]:
-            self.__dict__[param] = (
+            time_varying = (
                 neutral_to_unstable * params["unstable"][param]
-                + (1 - neutral_to_unstable)
-                * (1 - neutral_to_stable)
-                * params["neutral"][param]
+                + (1 - neutral_to_unstable) * (1 - neutral_to_stable) * params["neutral"][param]
                 + neutral_to_stable * params["stable"][param]
             )
+            
+            # Store as DataArray with time dimension
+            setattr(self, param, time_varying)
+            
+            self.logger.debug(f"Parameter {param}: shape={time_varying.shape}, "
+                            f"range=[{float(time_varying.min()):.3f}, {float(time_varying.max()):.3f}]")
 
         # Log regime statistics
         for regime in regimes:
-            count = regimes[regime].sum().values
+            count = int(regimes[regime].sum())
             percentage = (count / self.ts_len) * 100
             self.logger.info(f"{regime}: {count} points ({percentage:.1f}%)")
 
-        # Add stability flags to output dataset
+        # Add stability flags to dataset
         self.ds["stability_regime"] = xr.where(
-            regimes["strongly_unstable"],
-            -2,
-            xr.where(
-                regimes["unstable"],
-                -1,
-                xr.where(regimes["neutral"], 0, xr.where(regimes["stable"], 1, 2)),
-            ),
+            regimes["strongly_unstable"], -2,
+            xr.where(regimes["unstable"], -1,
+            xr.where(regimes["neutral"], 0,
+            xr.where(regimes["stable"], 1, 2)))
         )
 
         return regimes
@@ -912,54 +950,84 @@ class FFPModel:
 
     def apply_paper_smoothing(self):
         """
-        Apply 3x3 smoothing kernel from the Kljun et al. paper.
-
-        Returns
-        -------
-        xarray.DataArray
-            Smoothed footprint climatology.
+        Apply enhanced 3x3 smoothing from Kljun et al. paper with mass conservation.
         """
         self.logger.debug("Starting paper smoothing...")
 
         try:
-            # Define smoothing kernel
-            skernel = np.array([[0.05, 0.1, 0.05], [0.1, 0.4, 0.1], [0.05, 0.1, 0.05]])
+            # Define smoothing kernel from paper
+            skernel = np.array([
+                [0.05, 0.1, 0.05],
+                [0.1, 0.4, 0.1],
+                [0.05, 0.1, 0.05]
+            ])
 
-            # Apply convolution twice as specified in paper
-            smoothed = self.fclim_2d.copy()
-
-            # Track original stats
+            # Store original for validation
+            original = self.fclim_2d.copy()
+            original_sum = float(original.sum())
+            
             self.logger.debug(
-                f"Pre-smoothing stats - Min: {float(smoothed.min()):.2e}, Max: {float(smoothed.max()):.2e}"
+                f"Pre-smoothing stats - Min: {float(original.min()):.2e}, "
+                f"Max: {float(original.max()):.2e}, Sum: {original_sum:.2e}"
             )
 
+            # Apply convolution twice as specified in paper
+            smoothed = original.copy()
             for i in range(2):
-                smoothed = xr.apply_ufunc(
-                    lambda x: signal.convolve2d(
-                        x, skernel, mode="same", boundary="fill", fillvalue=0
-                    ),
-                    smoothed,
-                    input_core_dims=[["x", "y"]],
-                    output_core_dims=[["x", "y"]],
-                    dask="allowed",
+                smoothed_values = signal.convolve2d(
+                    smoothed.values, 
+                    skernel, 
+                    mode='same', 
+                    boundary='wrap'  # Changed from 'fill' to 'wrap' for better edges
                 )
-
+                smoothed = xr.DataArray(
+                    smoothed_values,
+                    dims=smoothed.dims,
+                    coords=smoothed.coords
+                )
                 self.logger.debug(f"Smoothing iteration {i + 1} complete")
+
+            # Additional Gaussian smoothing for visual quality (optional, scales with resolution)
+            if self.dx <= 5.0:  # Only for fine grids
+                sigma = 0.5  # Very light additional smoothing
+                smoothed_values = gaussian_filter(
+                    smoothed.values,
+                    sigma=sigma,
+                    mode='constant',
+                    cval=0
+                )
+                smoothed = xr.DataArray(
+                    smoothed_values,
+                    dims=smoothed.dims,
+                    coords=smoothed.coords
+                )
+                self.logger.debug(f"Applied additional Gaussian smoothing (sigma={sigma})")
+
+            # CRITICAL: Preserve total mass
+            smoothed_sum = float(smoothed.sum())
+            if smoothed_sum > 1e-10:
+                smoothed = smoothed * (original_sum / smoothed_sum)
                 self.logger.debug(
-                    f"Post-iteration stats - Min: {float(smoothed.min()):.2e}, Max: {float(smoothed.max()):.2e}"
+                    f"Mass conservation: {original_sum:.6e} -> {float(smoothed.sum()):.6e}"
                 )
 
+            # Validation
             if np.isnan(smoothed).any() or not np.any(smoothed):
                 self.logger.warning(
-                    "Smoothing produced invalid results, reverting to unsmoothed data"
+                    "Smoothing produced invalid results, reverting to original"
                 )
-                return self.fclim_2d
+                return original
+
+            self.logger.debug(
+                f"Post-smoothing stats - Min: {float(smoothed.min()):.2e}, "
+                f"Max: {float(smoothed.max()):.2e}"
+            )
 
             return smoothed
 
         except Exception as e:
             self.logger.error(f"Error in smoothing: {str(e)}")
-            self.logger.debug("Returning unsmoothed data")
+            self.logger.debug("Returning original unsmoothed data")
             return self.fclim_2d
 
     def verify_results(self, data, name="data"):
@@ -1055,71 +1123,95 @@ class FFPModel:
         """
         self.logger.info("Starting footprint calculation...")
 
+
         try:
-            # Calculate wind direction rotation using numpy functions
-            self.rotated_theta = self.theta - (self.ds["wind_dir"] * np.pi / 180.0)
-            self.logger.debug(f"Rotated theta shape: {self.rotated_theta.shape}")
+            # Step 1: Ensure spatial grids have correct dims
+            if not hasattr(self, 'rho') or self.rho is None:
+                self.logger.error("Domain not initialized")
+                raise ValueError("Call define_domain() first")
 
-            # Calculate stability parameter and Monin-Obukhov stability function
+            self.logger.debug(f"rho dims: {self.rho.dims}, shape: {self.rho.shape}")
+            self.logger.debug(f"theta dims: {self.theta.dims}, shape: {self.theta.shape}")
+            
+            # Step 2: Calculate rotated theta - EXPLICIT dimension order
+            # theta: (x, y), wind_dir: (time) -> result should be (time, x, y)
+            wind_dir_rad = self.ds["wind_dir"] * np.pi / 180.0
+            
+            # Expand spatial grids to include time dimension FIRST
+            rho_3d = self.rho.expand_dims(time=self.ds.time, axis=0)
+            theta_3d = self.theta.expand_dims(time=self.ds.time, axis=0)
+            
+            # Now broadcast works correctly: (time, x, y) - (time,) -> (time, x, y)
+            self.rotated_theta = theta_3d - wind_dir_rad
+            
+            self.logger.debug(f"rotated_theta dims: {self.rotated_theta.dims}, shape: {self.rotated_theta.shape}")
+
+            # Step 3: Calculate stability function
             psi_f = self.calc_pi_4()
+            self.logger.debug(f"psi_f dims: {psi_f.dims}, shape: {psi_f.shape}")
 
-            # Initialize arrays
-            self.logger.debug(
-                f"Initializing arrays with shape: x={len(self.x)}, y={len(self.y)}"
-            )
-
-            # Calculate scaled distance using numpy functions with xarray
-            xstar_ci_dummy = (
-                self.rho
-                * np.cos(self.rotated_theta)
+            # Step 4: Calculate scaled distance - all should be (time, x, y)
+            xstar_ci = (
+                rho_3d * np.cos(self.rotated_theta)
                 / self.ds["zm"]
                 * (1.0 - self.ds["zm"] / self.ds["h"])
                 / (np.log(self.ds["zm"] / self.ds["z0"]) - psi_f)
             )
-
-            self.logger.debug(f"xstar_ci_dummy shape: {xstar_ci_dummy.shape}")
+            
+            self.logger.debug(f"xstar_ci dims: {xstar_ci.dims}, shape: {xstar_ci.shape}")
             self.logger.debug(
-                f"xstar_ci_dummy range: {float(xstar_ci_dummy.min())} to {float(xstar_ci_dummy.max())}"
+                f"xstar_ci range: {float(xstar_ci.min()):.2e} to {float(xstar_ci.max()):.2e}"
             )
 
-            # Calculate footprint components
-            f_ci = self.calc_crosswind_integrated_footprint(xstar_ci_dummy)
+            # Step 5: Calculate footprint components
+            f_ci = self.calc_crosswind_integrated_footprint(xstar_ci)
+            self.logger.debug(f"f_ci dims: {f_ci.dims}, shape: {f_ci.shape}")
             self._log_array_stats("crosswind_integrated_footprint", f_ci)
 
-            # Handle crosswind dispersion
-            sigy = self.calc_crosswind_spread_xr(xstar_ci_dummy)
+            sigy = self.calc_crosswind_spread_xr(xstar_ci)
+            self.logger.debug(f"sigy dims: {sigy.dims}, shape: {sigy.shape}")
             self._log_array_stats("crosswind_dispersion", sigy)
 
-            # Calculate 2D footprint using numpy functions
+            # Step 6: Calculate 2D footprint - all inputs are (time, x, y)
             self.f_2d = xr.where(
                 sigy > 0,
-                f_ci
-                / (np.sqrt(2 * np.pi) * sigy)
+                f_ci / (np.sqrt(2 * np.pi) * sigy)
                 * np.exp(
-                    -((self.rho * np.sin(self.rotated_theta)) ** 2) / (2.0 * sigy**2)
+                    -((rho_3d * np.sin(self.rotated_theta))**2) / (2.0 * sigy**2)
                 ),
                 0.0,
             )
-
+            
+            self.logger.debug(f"f_2d dims: {self.f_2d.dims}, shape: {self.f_2d.shape}")
             self._log_array_stats("2d_footprint", self.f_2d)
 
-            # Calculate footprint climatology
+            # Step 7: Calculate climatology - sum over TIME dimension
             footprint_sum = self.f_2d.sum(dim="time")
+            self.logger.debug(f"footprint_sum dims: {footprint_sum.dims}, shape: {footprint_sum.shape}")
+            
             total_sum = float(footprint_sum.sum())
+            self.logger.debug(f"Total sum before normalization: {total_sum:.2e}")
 
             if total_sum < 1e-10:
-                self.logger.warning(
-                    "Near-zero sum in footprint climatology, initializing with uniform distribution"
-                )
-                self.fclim_2d = xr.ones_like(footprint_sum) / (
-                    len(self.x) * len(self.y)
-                )
+                self.logger.warning("Near-zero sum, using uniform distribution")
+                self.fclim_2d = xr.ones_like(self.rho) / (len(self.x) * len(self.y))
             else:
+                # Normalize: divide by number of timesteps
                 self.fclim_2d = footprint_sum / self.ts_len
+                
+                # CRITICAL: Verify normalization
+                integrated_flux = float(self.fclim_2d.sum() * self.dx * self.dy)
+                self.logger.info(f"Integrated flux: {integrated_flux:.3f} (should be ~1.0)")
+                
+                if integrated_flux < 0.8:
+                    self.logger.warning(
+                        f"Only captured {integrated_flux*100:.1f}% of flux - "
+                        f"consider increasing domain size"
+                    )
 
             self._log_array_stats("climatology", self.fclim_2d)
 
-            # Apply smoothing if requested
+            # Step 8: Apply smoothing
             if self.smooth_data:
                 self.fclim_2d = self.apply_paper_smoothing()
 
@@ -1128,8 +1220,25 @@ class FFPModel:
 
         except Exception as e:
             self.logger.error(f"Error in footprint calculation: {str(e)}")
+            import traceback
             self.logger.debug(f"Traceback:\n{traceback.format_exc()}")
             raise
+
+    def normalize_footprint(self):
+        """
+        Ensure footprint integrates to 1.0 after calculation.
+        """
+        current_flux = float(self.fclim_2d.sum() * self.dx * self.dy)
+        
+        if current_flux > 1e-10:
+            self.logger.info(f"Normalizing footprint: {current_flux:.3f} -> 1.000")
+            self.fclim_2d = self.fclim_2d / current_flux
+            
+            # Verify
+            new_flux = float(self.fclim_2d.sum() * self.dx * self.dy)
+            self.logger.info(f"After normalization: {new_flux:.6f}")
+        else:
+            self.logger.error("Cannot normalize: footprint sum is near zero")
 
     def _log_array_stats(self, name, arr):
         """
@@ -1247,6 +1356,7 @@ class FFPModel:
         except Exception as e:
             self.logger.error(f"Error in crosswind dispersion calculation: {str(e)}")
             return xr.zeros_like(xstar_ci_dummy)
+    
 
     def scale_crosswind_dispersion(self, sigystar_dummy):
         """
@@ -1436,6 +1546,7 @@ class FFPModel:
         )
 
         return x_r
+    
 
     def calc_peak_based_limits(self, r: float) -> Tuple[xr.DataArray, xr.DataArray]:
         """

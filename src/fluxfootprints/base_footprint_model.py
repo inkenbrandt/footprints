@@ -92,7 +92,7 @@ class BaseFootprintModel(ABC):
         self.atm_bound_height = atm_bound_height
         self.inst_height = inst_height
         self.smooth_data = smooth_data
-        self.verbosity = verbosity
+        self.verbosity = int(verbosity)
         
         # Initialize logger
         self.logger = logger or self._setup_logger()

@@ -34,6 +34,7 @@ from .kormannmeixner_adapter import KormannMeixnerModel
 from .ls_footprint_adapter import LSFootprintModelAdapter
 from .wang_footprint_adapter import WangFootprintModel
 from .base_footprint_model import BaseFootprintModel
+from .ffp_xr import ffp_climatology_new
 
 # Keep backward compatibility option
 _LEGACY_MODE = False
@@ -163,6 +164,7 @@ def build_climatology(
     # Model registry
     models = {
         "ffp": FFPModel,
+        "ffp_xr": ffp_climatology_new,
         "kormann-meixner": KormannMeixnerModel,
         "km": KormannMeixnerModel,
         "lagrangian": LSFootprintModelAdapter,
@@ -217,27 +219,6 @@ def build_climatology(
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Use legacy implementation if requested and available
-    if use_legacy and LegacyFFP is not None:
-        logger.warning(
-            "Using legacy FFP implementation - consider migrating to FFPModel"
-        )
-        model = LegacyFFP(
-            df=df_mapped,
-            domain=np.array(domain, dtype=float),
-            dx=float(dx),
-            dy=float(dy),
-            rs=rs,
-            crop_height=float(crop_height),
-            atm_bound_height=float(atm_bound_height),
-            inst_height=float(inst_height),
-            smooth_data=smooth_data,
-            verbosity=verbosity,
-            logger=logger,
-        )
-        model.run()
-        return model
-
     # Create and run model
     try:
         logger.info(f"Initializing {model_type} model...")
@@ -245,6 +226,7 @@ def build_climatology(
         
         logger.info("Running footprint calculation...")
         model.run(return_result=True)
+        #model.normalize()
         
         logger.info("Footprint calculation completed successfully")
         return model
