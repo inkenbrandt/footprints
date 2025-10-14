@@ -1,0 +1,12 @@
+{
+  "site_id": "US-UTE",
+  "measurement_period": "2024-06-24 14:30:00 to 2024-08-31 23:30:00",
+  "n_observations": 3245,
+  "measurement_height_m": 1.866,
+  "roughness_length_m": 0.020000000000000004,
+  "peak_distance_m": 10.0,
+  "mean_source_distance_m": 59.37422960964079,
+  "contour_50pct_m": 22.360679774997898,
+  "contour_80pct_m": 72.11102550927978,
+  "contour_90pct_m": 90.55385138137417
+}

@@ -521,6 +521,7 @@ class ffp_climatology_new(BaseFootprintModel):
             ),
         )
 
+        self.f_2d = self.f_2d / self.f_2d.sum(dim=("x", "y"))
         # self.f_2d = xr.where(px, self.f_2d, 0.0)
 
         # Accumulate into footprint climatology raster
