@@ -188,16 +188,54 @@ def test_f_2d_has_time_dimension_after_calc(small_model):
     assert set(["x", "y"]).issubset(small_model.f_2d.dims)
 
 
-def test_pi4_neutral_matches_log_term(small_model):
-    # Given our synthetic MO_LENGTH (mostly > -oln), a large portion is neutral in code logic.
+def test_pi4_stability_dependence(small_model):
+    """Pi4 = ln(zm/z0) - psi_M must respond correctly to stability.
+
+    - Neutral (|L| >= oln): psi_M == 0  -> Pi4 == ln(zm/z0)
+    - Unstable (L < 0):     psi_M > 0   -> Pi4 <  ln(zm/z0)
+    - Stable   (0 < L<oln): psi_M < 0   -> Pi4 >  ln(zm/z0)
+    """
     pi4 = small_model.calc_pi_4()
     assert isinstance(pi4, xr.DataArray)
-    # For neutral conditions in the implementation, psi_m == 0,
-    # so Pi4 == log(zm/z0) - psi_m ≈ log(zm/z0).
-    log_term = np.log(small_model.ds["zm"] / small_model.ds["z0"])
-    # Use a tolerance; different stability rows may deviate slightly
-    diff = (pi4 - log_term).values
-    assert np.nanmedian(np.abs(diff)) < 1e-6
+
+    pi4v = np.asarray(pi4.values)
+    logv = np.broadcast_to(
+        np.asarray(np.log(small_model.ds["zm"] / small_model.ds["z0"]).values),
+        pi4v.shape,
+    )
+    olv = np.asarray(small_model.ds["ol"].values)
+
+    # Unstable rows: Pi4 strictly below the neutral log term.
+    um = olv < 0
+    if um.any():
+        assert np.all(pi4v[um] < logv[um])
+
+    # Stable rows (0 < L < oln): Pi4 strictly above the neutral log term.
+    sm = (olv > 0) & (olv < small_model.oln)
+    if sm.any():
+        assert np.all(pi4v[sm] > logv[sm])
+
+    # A genuinely neutral profile (|L| >= oln) collapses to the bare log term.
+    neutral_model = FFPModel(
+        pd.DataFrame(
+            {
+                "V_SIGMA": [0.5],
+                "USTAR": [0.35],
+                "MO_LENGTH": [1e9],  # effectively neutral
+                "WD": [180.0],
+                "WS": [3.0],
+            },
+            index=pd.date_range("2024-06-24", periods=1, freq="30min"),
+        ),
+        domain=[-50.0, 50.0, -50.0, 50.0],
+        dx=10.0,
+        dy=10.0,
+        smooth_data=False,
+        verbosity=0,
+    )
+    pi4_n = neutral_model.calc_pi_4()
+    log_n = np.log(neutral_model.ds["zm"] / neutral_model.ds["z0"])
+    assert float(np.abs((pi4_n - log_n).values).max()) < 1e-6
 
 
 def test_scaled_peak_reasonable_range(small_model):

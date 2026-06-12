@@ -766,7 +766,17 @@ class FFPModel(BaseFootprintModel):
 
     def handle_stability_regimes(self):
         """
-        Classify stability regimes and assign model parameters based on regime.
+        Classify stability regimes for diagnostics.
+
+        Notes
+        -----
+        Kljun et al. (2015) deliberately use a single, stability-independent
+        parameter set (a, b, c, d) for the scaled crosswind-integrated
+        footprint (Appendix A: a=1.4524, b=-1.9914, c=1.4622, d=0.1359). The
+        stability dependence enters only through the scaled distance X* and the
+        crosswind-spread scaling. Therefore this method no longer overrides the
+        universal coefficients; it only classifies regimes and records a
+        diagnostic flag.
 
         Returns
         -------
@@ -786,37 +796,6 @@ class FFPModel(BaseFootprintModel):
             stability_param < self.oln / self.ds["zm"]
         )
         regimes["strongly_stable"] = stability_param >= self.oln / self.ds["zm"]
-
-        # Regime-specific parameters from Appendix A
-        params = {
-            "unstable": {"a": 2.930, "b": -2.285, "c": 2.127, "d": -0.107},
-            "neutral": {"a": 1.472, "b": -1.996, "c": 1.480, "d": 0.169},
-            "stable": {"a": 1.472, "b": -1.996, "c": 1.480, "d": 0.169},
-        }
-
-        # Smooth transitions
-        transition_zone = 0.1
-
-        def transition_weight(param, center, width):
-            """Calculate smooth transition weight."""
-            return 0.5 * (1 + np.tanh((param - center) / width))
-
-        neutral_to_unstable = transition_weight(stability_param, -0.1, transition_zone)
-        neutral_to_stable = transition_weight(stability_param, 0.1, transition_zone)
-
-        # Apply smooth parameter transitions - results have shape (time,)
-        for param in ["a", "b", "c", "d"]:
-            time_varying = (
-                neutral_to_unstable * params["unstable"][param]
-                + (1 - neutral_to_unstable) * (1 - neutral_to_stable) * params["neutral"][param]
-                + neutral_to_stable * params["stable"][param]
-            )
-            
-            # Store as DataArray with time dimension
-            setattr(self, param, time_varying)
-            
-            self.logger.debug(f"Parameter {param}: shape={time_varying.shape}, "
-                            f"range=[{float(time_varying.min()):.3f}, {float(time_varying.max()):.3f}]")
 
         # Log regime statistics
         for regime in regimes:
@@ -888,22 +867,31 @@ class FFPModel(BaseFootprintModel):
 
     def calc_pi_4(self):
         """
-        Calculate Π4 with comprehensive stability function implementation including neutral conditions.
+        Calculate the dimensionless wind-speed group
+        Π4 = u(zm)/(u* k) = ln(zm/z0) - ψM, following Kljun et al. (2015).
+
+        Π4 is the scaled<->real conversion factor for the along-wind distance
+        (Eq. 6/7) and must be positive. Callers use the return value of this
+        method *directly* as Π4 (do **not** subtract it from ``ln(zm/z0)``
+        again).
 
         Returns
         -------
         xr.DataArray
-        Calculated Π4 values with proper neutral condition handling
+            Π4 = ln(zm/z0) - ψM. In neutral conditions ψM = 0 so
+            Π4 = ln(zm/z0).
         """
         stability_param = self.ds["zm"] / self.ds["ol"]
 
         # Initialize psi_m array
         psi_m = xr.zeros_like(stability_param)
 
-        # Determine stability regimes
-        stable_mask = self.ds["ol"] > 0
-        unstable_mask = self.ds["ol"] < -self.oln
-        neutral_mask = (self.ds["ol"] <= 0) & (self.ds["ol"] >= -self.oln)
+        # Determine stability regimes.
+        # Stable: 0 < L < oln. Unstable: L < 0.
+        # Near-neutral (|L| >= oln) keeps psi_m = 0.
+        stable_mask = (self.ds["ol"] > 0) & (self.ds["ol"] < self.oln)
+        unstable_mask = self.ds["ol"] < 0
+        neutral_mask = ~(stable_mask | unstable_mask)
 
         # Calculate psi_m for each stability regime
         # Stable conditions
@@ -1146,25 +1134,36 @@ class FFPModel(BaseFootprintModel):
             
             self.logger.debug(f"rotated_theta dims: {self.rotated_theta.dims}, shape: {self.rotated_theta.shape}")
 
-            # Step 3: Calculate stability function
-            psi_f = self.calc_pi_4()
-            self.logger.debug(f"psi_f dims: {psi_f.dims}, shape: {psi_f.shape}")
+            # Step 3: Dimensionless wind-speed group Pi_4 = ln(zm/z0) - psi_M
+            # (Eq. 6/7). This is the scaled->real conversion factor and must be
+            # > 0. calc_pi_4() already returns the full Pi_4.
+            pi4 = self.calc_pi_4()
+            self.logger.debug(f"pi4 dims: {pi4.dims}, shape: {pi4.shape}")
+            valid_profile = pi4 > 0
 
             # Step 4: Calculate scaled distance - all should be (time, x, y)
-            xstar_ci = (
+            xstar_ci = xr.where(
+                valid_profile,
                 rho_3d * np.cos(self.rotated_theta)
                 / self.ds["zm"]
                 * (1.0 - self.ds["zm"] / self.ds["h"])
-                / (np.log(self.ds["zm"] / self.ds["z0"]) - psi_f)
+                / pi4,
+                0.0,
             )
-            
+
             self.logger.debug(f"xstar_ci dims: {xstar_ci.dims}, shape: {xstar_ci.shape}")
             self.logger.debug(
                 f"xstar_ci range: {float(xstar_ci.min()):.2e} to {float(xstar_ci.max()):.2e}"
             )
 
-            # Step 5: Calculate footprint components
-            f_ci = self.calc_crosswind_integrated_footprint(xstar_ci)
+            # Step 5: Calculate footprint components.
+            # calc_crosswind_integrated_footprint returns the *scaled* Fy_hat*;
+            # convert it to the real-scale crosswind-integrated footprint Fy
+            # via the Jacobian (1/zm)(1 - zm/h)/Pi_4 (Eq. 6/7). Without this
+            # factor the 2D footprint carries the wrong units and does not
+            # integrate to unity.
+            f_ci_star = self.calc_crosswind_integrated_footprint(xstar_ci)
+            f_ci = f_ci_star / self.ds["zm"] * (1.0 - self.ds["zm"] / self.ds["h"]) / pi4
             self.logger.debug(f"f_ci dims: {f_ci.dims}, shape: {f_ci.shape}")
             self._log_array_stats("crosswind_integrated_footprint", f_ci)
 
@@ -1268,13 +1267,13 @@ class FFPModel(BaseFootprintModel):
             Corrected scaled distance.
         """
 
-        # Basic scaled distance calculation
+        # Basic scaled distance calculation (calc_pi_4 returns Pi_4 directly)
         xstar_base = (
             self.rho
             * np.cos(self.rotated_theta)
             / self.ds["zm"]
             * (1.0 - self.ds["zm"] / self.ds["h"])
-            / (np.log(self.ds["zm"] / self.ds["z0"]) - self.calc_pi_4())
+            / self.calc_pi_4()
         )
 
         # Apply RSL correction where needed
@@ -1314,7 +1313,7 @@ class FFPModel(BaseFootprintModel):
         # Π3 = (h - zm)/h = 1 - zm/h
         pi_3 = 1 - self.ds["zm"] / self.ds["h"]
 
-        # Π4 = u(zm)/(u*k) = ln(zm/z0) - ψM
+        # Π4 = u(zm)/(u*k) = ln(zm/z0) - ψM   (calc_pi_4 already returns Π4)
         pi_4 = self.calc_pi_4()
 
         return pi_1, pi_2, pi_3, pi_4
@@ -1537,12 +1536,12 @@ class FFPModel(BaseFootprintModel):
         # Calculate scaled extent from Eq. 24
         x_star_r = -c / np.log(r) + d
 
-        # Convert to real scale using Eq. 25
+        # Convert to real scale using Eq. 25 (calc_pi_4 returns Pi_4 directly)
         x_r = (
             x_star_r
             * self.ds["zm"]
             * (1 - self.ds["zm"] / self.ds["h"]) ** -1
-            * (np.log(self.ds["zm"] / self.ds["z0"]) - self.calc_pi_4())
+            * self.calc_pi_4()
         )
 
         return x_r
@@ -1619,9 +1618,10 @@ class FFPModel(BaseFootprintModel):
             x_max = x_star_max * zm * (1 - zm / h) ** -1 * u_zm / (ustar * k)
 
         elif z0 is not None:
-            # Use Eq. 22 with roughness length and stability correction
-            psi_m = self.calc_pi_4()
-            x_max = x_star_max * zm * (1 - zm / h) ** -1 * (np.log(zm / z0) - psi_m)
+            # Use Eq. 22 with roughness length and stability correction.
+            # calc_pi_4() already returns Pi_4 = ln(zm/z0) - psi_M.
+            pi4 = self.calc_pi_4()
+            x_max = x_star_max * zm * (1 - zm / h) ** -1 * pi4
 
         else:
             raise ValueError("Must provide either (u_zm, ustar) or z0")
@@ -1660,7 +1660,7 @@ class FFPModel(BaseFootprintModel):
             x_star
             * self.ds["zm"]
             * (1 - self.ds["zm"] / self.ds["h"]) ** -1
-            * (np.log(self.ds["zm"] / self.ds["z0"]) - self.calc_pi_4())
+            * self.calc_pi_4()  # calc_pi_4 returns Pi_4 directly
         )
 
     def calc_crosswind_extent(
@@ -1716,12 +1716,20 @@ class FFPModel(BaseFootprintModel):
         try:
             # Calculate scaled crosswind spread σy* using Eq. 18
             sigma_y_star = self.ac * np.sqrt(
-                (self.bc * x_star**2) / (1 + self.cc * x_star)
+                (self.bc * np.abs(x_star) ** 2) / (1 + self.cc * np.abs(x_star))
             )
 
-            scale_const = self.scale_crosswind_dispersion(sigma_y_star)
+            # Stability-dependent scale constant (Eq. 13). Note: this is the
+            # *dimensionless* scaling factor, not the real-scale sigma_y.
+            stability = self.ds["zm"] / self.ds["ol"]
+            scale_const = xr.where(
+                self.ds["ol"] <= 0,
+                1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.80,
+                1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.55,
+            )
+            scale_const = xr.where(scale_const > 1.0, 1.0, scale_const)
 
-            # Convert to real scale
+            # Convert to real scale (Eq. 18)
             sigma_y = (
                 sigma_y_star
                 / scale_const
@@ -1739,7 +1747,7 @@ class FFPModel(BaseFootprintModel):
     def calc_crosswind_spread(
         self, x: Union[float, np.ndarray]
     ) -> Union[float, np.ndarray]:
-        """
+        r"""
         Calculate the standard deviation of cross-wind spread :math:`\sigma_y`.
 
         Implements Eqs. 18-19 from *Kljun et al., 2015*:
@@ -1786,7 +1794,12 @@ class FFPModel(BaseFootprintModel):
 
         # Calculate scaled crosswind spread σy* using Eq. 18
         # Parameters from Eq. 19: ac = 2.17, bc = 1.66, cc = 20.0
-        sigma_y_star = self.ac * np.sqrt((self.bc * x_star**2) / (1 + self.cc * x_star))
+        # Use |X*| so that points behind the receptor (X* < 0) do not drive the
+        # denominator (1 + cc*X*) negative and produce sqrt-of-negative NaNs.
+        x_star_abs = np.abs(x_star)
+        sigma_y_star = self.ac * np.sqrt(
+            (self.bc * x_star_abs**2) / (1 + self.cc * x_star_abs)
+        )
 
         # Calculate stability-dependent scaling constant
         if stability_param_mean <= 0:  # Convective
