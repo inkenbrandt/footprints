@@ -552,14 +552,39 @@ class ffp_climatology_new(BaseFootprintModel):
             ),
         )
 
+        # Apply Kljun et al. (2015) Eq. 27 validity bounds — zero out timesteps
+        # outside the parameterisation's stated applicability range so they do not
+        # contribute weight to the climatology.
+        stability_valid = (self.ds["zm"] / self.ds["ol"]) >= -15.5
+        height_valid = (
+            (self.ds["zm"] > 20.0 * self.ds["z0"])
+            & (self.ds["zm"] < 0.8 * self.ds["h"])
+        )
+        valid_mask = stability_valid & height_valid
+        if not self.rslayer:
+            # Exclude in-RSL timesteps (zm ≤ n_rsl·h_rs ≈ 27.5·z0) when not in
+            # RSL mode; the parameterisation is formally invalid below this height.
+            valid_mask = valid_mask & (self.ds["zm"] > 27.5 * self.ds["z0"])
+
+        n_invalid = int((~valid_mask).sum())
+        if n_invalid > 0:
+            self.logger.warning(
+                f"{n_invalid}/{self.ts_len} timesteps excluded: outside "
+                "Kljun et al. (2015) validity bounds (Eq. 27)"
+            )
+
+        self.f_2d = xr.where(valid_mask, self.f_2d, 0.0)
+
         # Count valid timesteps (non-zero sum) before per-timestep normalization.
         # Invalid timesteps produce all-zero f_2d; dividing by their count would
         # underestimate the climatology.
         fp_sums = self.f_2d.sum(dim=("x", "y"))
         valid_count = int((fp_sums > 0).sum())
 
-        self.f_2d = self.f_2d / fp_sums
-        # self.f_2d = xr.where(px, self.f_2d, 0.0)
+        # Normalize each valid timestep's footprint to unit integral; guard against
+        # 0/0 for zeroed-out (invalid) timesteps.
+        safe_fp_sums = xr.where(fp_sums > 0, fp_sums, 1.0)
+        self.f_2d = xr.where(fp_sums > 0, self.f_2d / safe_fp_sums, 0.0)
 
         # Accumulate into footprint climatology raster
         self.fclim_2d = self.f_2d.sum(dim="time") / max(valid_count, 1)

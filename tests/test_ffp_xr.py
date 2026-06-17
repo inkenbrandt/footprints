@@ -282,3 +282,102 @@ def test_smooth_and_contour_produces_expected_vars(model_smoothed):
         assert da.shape == (len(m.x), len(m.y))
         # At least some non-zero cells exist
         assert bool((da.values > 0).any())
+
+
+# --- Tests: Kljun validity filtering (issue #8) --------------------------------
+
+def _base_df(n=6, ol=-100.0, wind_dir=180.0):
+    """Helper: small DataFrame with all physically valid values."""
+    times = pd.date_range("2025-01-01", periods=n, freq="h")
+    return pd.DataFrame(
+        {
+            "V_SIGMA": [0.5] * n,
+            "USTAR": [0.35] * n,
+            "wd": [wind_dir] * n,
+            "MO_LENGTH": [ol] * n,
+            "ws": [3.0] * n,
+        },
+        index=times,
+    )
+
+
+_FFP_KW = dict(
+    domain=[-200.0, 200.0, -200.0, 200.0],
+    dx=20.0,
+    dy=20.0,
+    smooth_data=False,
+    verbosity=0,
+    zm=2.0,
+    z0=0.05,
+    atm_bound_height=800.0,
+)
+
+
+def test_no_nans_in_climatology_after_validity_masking():
+    """fclim_2d must be finite (no NaN/Inf) even when some timesteps are zeroed out."""
+    df = _base_df(n=4, ol=-0.05)  # zm/L = 2/-0.05 = -40 << -15.5 → all excluded
+    m = FFP(df=df, **_FFP_KW)
+    m.calc_xr_footprint()
+    assert np.isfinite(m.fclim_2d.values).all(), "fclim_2d must not contain NaN/Inf"
+
+
+def test_extreme_instability_excluded_from_climatology():
+    """
+    A timestep with zm/L < -15.5 (violates Kljun Eq. 27 stability bound) must
+    be excluded so the climatology equals the result without that timestep.
+    """
+    df_clean = _base_df(n=5, ol=-100.0)
+
+    # Append one extreme-instability row: zm/L = 2.0/-0.05 = -40 << -15.5
+    extra = _base_df(n=1, ol=-0.05)
+    extra.index = pd.date_range(df_clean.index[-1] + pd.Timedelta("1h"), periods=1, freq="h")
+    df_bad = pd.concat([df_clean, extra])
+
+    m_clean = FFP(df=df_clean, **_FFP_KW)
+    m_clean.calc_xr_footprint()
+
+    m_bad = FFP(df=df_bad, **_FFP_KW)
+    m_bad.calc_xr_footprint()
+
+    assert np.allclose(m_clean.fclim_2d.values, m_bad.fclim_2d.values, rtol=0.01), (
+        "Extreme-stability timestep (zm/L << -15.5) should be excluded; "
+        "climatology must match all-valid result"
+    )
+
+
+def test_in_rsl_timesteps_excluded_when_rslayer_false():
+    """
+    When rslayer=False (default), timesteps where zm <= 27.5*z0 must be excluded.
+    zm=1.0, z0=0.04 → 27.5*z0 = 1.1 > zm → sensor in RSL → all rows excluded.
+    """
+    df = _base_df(n=4)
+    rsl_kw = dict(_FFP_KW, zm=1.0, z0=0.04, rslayer=False)
+    m = FFP(df=df, **rsl_kw)
+    m.calc_xr_footprint()
+
+    assert float(m.fclim_2d.sum()) == pytest.approx(0.0), (
+        "All in-RSL timesteps should be excluded when rslayer=False"
+    )
+
+
+def test_in_rsl_timesteps_allowed_when_rslayer_true():
+    """
+    When rslayer=True, the RSL validity check is skipped and in-RSL timesteps
+    still contribute to the climatology.
+    """
+    df = _base_df(n=4)
+    rsl_kw_off = dict(_FFP_KW, zm=1.0, z0=0.04, rslayer=False)
+    rsl_kw_on = dict(_FFP_KW, zm=1.0, z0=0.04, rslayer=True)
+
+    m_off = FFP(df=df, **rsl_kw_off)
+    m_off.calc_xr_footprint()
+
+    m_on = FFP(df=df, **rsl_kw_on)
+    m_on.calc_xr_footprint()
+
+    assert float(m_on.fclim_2d.sum()) > 0.0, (
+        "rslayer=True should allow in-RSL timesteps to contribute to climatology"
+    )
+    assert float(m_off.fclim_2d.sum()) == pytest.approx(0.0), (
+        "rslayer=False should exclude in-RSL timesteps"
+    )
