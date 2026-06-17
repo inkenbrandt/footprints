@@ -1705,7 +1705,7 @@ class FFPModel(BaseFootprintModel):
 
             # Create meshgrid for plotting if needed
             if not hasattr(self, "X") or not hasattr(self, "Y"):
-                self.X, self.Y = np.meshgrid(self.x, self.y)
+                self.X, self.Y = np.meshgrid(self.x, self.y, indexing="ij")
 
             self.logger.debug(f"Domain shapes - x: {len(self.x)}, y: {len(self.y)}")
             self.logger.debug(f"Footprint climatology shape: {self.fclim_2d.shape}")
