@@ -1200,7 +1200,13 @@ class FFPModel(BaseFootprintModel):
             # Step 7: Calculate climatology - sum over TIME dimension
             footprint_sum = self.f_2d.sum(dim="time")
             self.logger.debug(f"footprint_sum dims: {footprint_sum.dims}, shape: {footprint_sum.shape}")
-            
+
+            # Count only timesteps that produced a non-zero footprint.
+            # Invalid timesteps (sigy <= 0) are zeroed out and must not count
+            # in the denominator, otherwise the climatology is underestimated.
+            valid_count = int((self.f_2d.sum(dim=("x", "y")) > 0).sum())
+            self.logger.debug(f"Valid timesteps: {valid_count} / {self.ts_len}")
+
             total_sum = float(footprint_sum.sum())
             self.logger.debug(f"Total sum before normalization: {total_sum:.2e}")
 
@@ -1208,8 +1214,8 @@ class FFPModel(BaseFootprintModel):
                 self.logger.warning("Near-zero sum, using uniform distribution")
                 self.fclim_2d = xr.ones_like(self.rho) / (len(self.x) * len(self.y))
             else:
-                # Normalize: divide by number of timesteps
-                self.fclim_2d = footprint_sum / self.ts_len
+                # Normalize: divide by number of valid timesteps only
+                self.fclim_2d = footprint_sum / max(valid_count, 1)
                 
                 # CRITICAL: Verify normalization
                 integrated_flux = float(self.fclim_2d.sum() * self.dx * self.dy)
@@ -1929,6 +1935,9 @@ class FFPModel(BaseFootprintModel):
 
             # Perform main calculations
             self.fclim_2d = self.calc_xr_footprint()  # Now returns fclim_2d directly
+
+            # Rescale so the climatology integrates to ~1 over the domain
+            self.normalize_footprint()
 
             # Add validation checks
             if self.fclim_2d is None:

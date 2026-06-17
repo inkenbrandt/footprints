@@ -521,11 +521,17 @@ class ffp_climatology_new(BaseFootprintModel):
             ),
         )
 
-        self.f_2d = self.f_2d / self.f_2d.sum(dim=("x", "y"))
+        # Count valid timesteps (non-zero sum) before per-timestep normalization.
+        # Invalid timesteps produce all-zero f_2d; dividing by their count would
+        # underestimate the climatology.
+        fp_sums = self.f_2d.sum(dim=("x", "y"))
+        valid_count = int((fp_sums > 0).sum())
+
+        self.f_2d = self.f_2d / fp_sums
         # self.f_2d = xr.where(px, self.f_2d, 0.0)
 
         # Accumulate into footprint climatology raster
-        self.fclim_2d = self.f_2d.sum(dim="time") / self.ts_len
+        self.fclim_2d = self.f_2d.sum(dim="time") / max(valid_count, 1)
 
         # Apply smoothing if requested
         if self.smooth_data:
