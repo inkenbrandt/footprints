@@ -285,7 +285,7 @@ class FFPModel(BaseFootprintModel):
         missing_cols = [
             col
             for col in self.REQUIRED_COLUMNS
-            if col not in map(str.lower, df1.columns)
+            if col not in df1.columns
         ]
         if missing_cols:
             raise ValueError(
@@ -443,10 +443,7 @@ class FFPModel(BaseFootprintModel):
             
             exp_arg = -c / safe_denominator
             exp_arg = xr.where(mask, exp_arg, -700)
-            
-            # Clip to safe range
             exp_arg = xr.where(exp_arg > -700, exp_arg, -700)
-            exp_arg = xr.where(exp_arg < 100, exp_arg, 100)
             
             # Calculate power term
             power_term = xr.where(
@@ -1204,7 +1201,7 @@ class FFPModel(BaseFootprintModel):
                 # Use RSL-corrected crosswind spread from apply_rsl_corrections()
                 sigy = self.sigma_y
             else:
-                sigy = self.calc_crosswind_spread_xr(xstar_ci)
+                sigy = self.calc_crosswind_spread(xstar_ci)
             self.logger.debug(f"sigy dims: {sigy.dims}, shape: {sigy.shape}")
             self._log_array_stats("crosswind_dispersion", sigy)
 
@@ -1364,144 +1361,6 @@ class FFPModel(BaseFootprintModel):
         pi_4 = self.calc_pi_4()
 
         return pi_1, pi_2, pi_3, pi_4
-
-    def calc_crosswind_dispersion(self, xstar_ci_dummy, px):
-        """
-        Compute dimensionless crosswind dispersion with safety checks.
-
-        Parameters
-        ----------
-        xstar_ci_dummy : xarray.DataArray
-            Scaled distance.
-        px : bool
-            Condition flag.
-
-        Returns
-        -------
-        xarray.DataArray
-            Dimensionless crosswind dispersion.
-        """
-        try:
-            # Ensure positive input for sqrt
-            x_abs = np.abs(xstar_ci_dummy)
-            denom = np.maximum(1.0 + self.cc * x_abs, 1e-10)
-
-            sqrt_term = np.clip(
-                self.bc * x_abs**2 / denom,
-                0.0,  # Ensure non-negative input to sqrt
-                1e6,  # Upper limit to prevent overflow
-            )
-
-            result = xr.where(px, self.ac * np.sqrt(sqrt_term), 0.0)
-
-            # Safety check for invalid values
-            result = xr.where(np.isfinite(result), result, 0.0)
-
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Error in crosswind dispersion calculation: {str(e)}")
-            return xr.zeros_like(xstar_ci_dummy)
-    
-
-    def scale_crosswind_dispersion(self, sigystar_dummy):
-        """
-        Scale the dimensionless crosswind dispersion σy* to real-scale σy.
-
-        Implements the real-scale conversion described in Equations 12-13 and surrounding text
-        of Kljun et al. (2015):
-
-        σy = σy*/(scale_const) * zm * σv/u*
-
-        where:
-        - σy* is dimensionless crosswind dispersion
-        - scale_const is stability-dependent scaling factor:
-            For L ≤ 0 (convective): scale_const = min(1, 10⁻⁵|zm/L|⁻¹ + 0.80)
-            For L > 0 (stable): scale_const = min(1, 10⁻⁵|zm/L|⁻¹ + 0.55)
-        - zm is measurement height
-        - σv is standard deviation of lateral velocity fluctuations
-        - u* is friction velocity
-
-        Args:
-            sigystar_dummy (xarray.DataArray): Dimensionless crosswind dispersion σy*
-
-        Returns:
-            xarray.DataArray: Real-scale crosswind dispersion σy [m]
-
-        Note:
-            Includes numerical safety checks to prevent division by zero and handle
-            potential non-finite values in intermediate calculations.
-        """
-        try:
-            self.logger.debug("Starting crosswind dispersion scaling...")
-            self.logger.debug(f"Input σy* shape: {sigystar_dummy.shape}")
-            self.logger.debug(
-                f"σy* range: [{float(sigystar_dummy.min()):.2e}, {float(sigystar_dummy.max()):.2e}]"
-            )
-
-            # Calculate stability parameter
-            stability_param = self.ds["zm"] / self.ds["ol"]
-            self.logger.debug(
-                f"Stability parameter range: [{float(stability_param.min()):.2e}, {float(stability_param.max()):.2e}]"
-            )
-
-            # Calculate stability-dependent scaling constant with safety
-            scale_const = xr.where(
-                self.ds["ol"] <= 0,
-                1e-5 * np.maximum(np.abs(stability_param), 1e-10) ** (-1)
-                + 0.80,  # Convective
-                1e-5 * np.maximum(np.abs(stability_param), 1e-10) ** (-1)
-                + 0.55,  # Stable
-            )
-
-            self.logger.debug(
-                f"Scale constant range: [{float(scale_const.min()):.2e}, {float(scale_const.max()):.2e}]"
-            )
-
-            # Limit scaling constant
-            scale_const = xr.where(
-                np.isfinite(scale_const), np.minimum(scale_const, 1.0), 1.0
-            )
-
-            self.logger.debug("Applied upper limit of 1.0 to scale constant")
-            self.logger.debug(
-                f"Final scale constant range: [{float(scale_const.min()):.2e}, {float(scale_const.max()):.2e}]"
-            )
-
-            # Calculate scaled dispersion with safety checks
-            result = (
-                sigystar_dummy
-                / np.maximum(scale_const, 1e-10)
-                * self.ds["zm"]
-                * np.maximum(self.ds["sigmav"], 1e-10)
-                / np.maximum(self.ds["ustar"], 1e-10)
-            )
-
-            # Log intermediate values
-            self.logger.debug(
-                f"zm range: [{float(self.ds['zm'].min()):.2e}, {float(self.ds['zm'].max()):.2e}]"
-            )
-            self.logger.debug(
-                f"sigmav range: [{float(self.ds['sigmav'].min()):.2e}, {float(self.ds['sigmav'].max()):.2e}]"
-            )
-            self.logger.debug(
-                f"ustar range: [{float(self.ds['ustar'].min()):.2e}, {float(self.ds['ustar'].max()):.2e}]"
-            )
-
-            # Final safety check
-            result = xr.where(np.isfinite(result), result, 0.0)
-
-            self.logger.debug(
-                f"Final σy range: [{float(result.min()):.2e}, {float(result.max()):.2e}]"
-            )
-            self.logger.info("Crosswind dispersion scaling completed successfully")
-
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Error in scaling crosswind dispersion: {str(e)}")
-            self.logger.debug(f"Detailed error trace:", exc_info=True)
-            raise
 
     def calc_2d_footprint(self, f_ci_dummy, sigy_dummy):
         """
@@ -1720,11 +1579,15 @@ class FFPModel(BaseFootprintModel):
         Returns:
             xr.DataArray: Crosswind extent at each distance
         """
-        # Calculate sigma_y at peak location
+        # Calculate sigma_y at peak location using per-timestep parameters
         x_peak = self.calc_real_footprint_peak(
             self.ds["zm"], self.ds["h"], self.ds["umean"], self.ds["ustar"]
         )
-        sigma_y_peak = self.calc_crosswind_spread(x_peak)
+        pi4 = self.calc_pi_4()
+        x_star_peak = (
+            x_peak / self.ds["zm"] * (1.0 - self.ds["zm"] / self.ds["h"]) / pi4
+        )
+        sigma_y_peak = self.calc_crosswind_spread(x_star_peak)
 
         # Scale crosswind extent based on distance from peak
         def scale_sigma(x_dist):
@@ -1734,62 +1597,9 @@ class FFPModel(BaseFootprintModel):
 
         return y_r
 
-    def calc_crosswind_spread_xr(self, x_star):
-        """
-        Calculate the standard deviation of crosswind spread σy.
-
-        Implements Equations 18-19 from Kljun et al. (2015):
-        ``σy* = ac * sqrt((bc * |X*|^2)/(1 + cc|X*|))``
-
-        Where ac=2.17, bc=1.66, cc=20.0 (Equation 19)
-
-        Real-scale σy is then obtained through:
-        ``σy = σy*/(scale_const) * zm * σv/u*``
-
-        Where scale_const depends on stability (Eq. not numbered in paper):
-        - For unstable: 1e-5|zm/L|^(-1) + 0.80
-        - For stable: 1e-5|zm/L|^(-1) + 0.55
-
-        Args:
-            x_star (float or array): Distance from receptor [m]
-
-        Returns:
-            Standard deviation of crosswind spread [m]
-        """
-        try:
-            # Calculate scaled crosswind spread σy* using Eq. 18
-            sigma_y_star = self.ac * np.sqrt(
-                (self.bc * np.abs(x_star) ** 2) / (1 + self.cc * np.abs(x_star))
-            )
-
-            # Stability-dependent scale constant (Eq. 13). Note: this is the
-            # *dimensionless* scaling factor, not the real-scale sigma_y.
-            stability = self.ds["zm"] / self.ds["ol"]
-            scale_const = xr.where(
-                self.ds["ol"] <= 0,
-                1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.80,
-                1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.55,
-            )
-            scale_const = xr.where(scale_const > 1.0, 1.0, scale_const)
-
-            # Convert to real scale (Eq. 18)
-            sigma_y = (
-                sigma_y_star
-                / scale_const
-                * self.ds["zm"]
-                * self.ds["sigmav"]
-                / self.ds["ustar"]
-            )
-
-            return sigma_y
-
-        except Exception as e:
-            self.logger.error(f"Error calculating crosswind spread: {str(e)}")
-            raise
-
     def calc_crosswind_spread(
-        self, x: Union[float, np.ndarray]
-    ) -> Union[float, np.ndarray]:
+        self, x: Union[float, np.ndarray, "xr.DataArray"]
+    ) -> Union[float, np.ndarray, "xr.DataArray"]:
         r"""
         Calculate the standard deviation of cross-wind spread :math:`\sigma_y`.
 
@@ -1803,60 +1613,76 @@ class FFPModel(BaseFootprintModel):
             \sigma_y   = \frac{\sigma_y^*}{\text{scale\_const}}
                         \; z_m \; \sigma_v / u_*
 
-        where
+        where :math:`a_c = 2.17`, :math:`b_c = 1.66`, :math:`c_c = 20.0`, and
+        ``scale_const`` depends on stability (see paper).
 
-        * :math:`a_c = 2.17`
-        * :math:`b_c = 1.66`
-        * :math:`c_c = 20.0`
-        * ``scale_const`` depends on stability (see paper).
+        The method dispatches on the type of *x*:
+
+        * **xarray DataArray** – *x* is treated as the pre-scaled dimensionless
+          distance :math:`X^*`.  Per-timestep stability parameters from
+          ``self.ds`` are used, and an ``xr.DataArray`` is returned.  Use this
+          path for climatology calculations where time-varying parameters matter.
+        * **numpy array / float** – *x* is treated as the raw upwind distance
+          [m].  ``calc_scaled_x`` converts it to :math:`X^*` using time-mean
+          parameters, and a numpy array / float is returned.  Use this path for
+          single-footprint visualisation where a representative spread is needed.
 
         Parameters
         ----------
-        x : float or ndarray
-            Up-wind distance from the receptor [m].
+        x : float, ndarray, or xr.DataArray
+            For numpy/float: raw upwind distance [m].
+            For DataArray: pre-scaled dimensionless distance :math:`X^*`.
 
         Returns
         -------
-        float or ndarray
+        float, ndarray, or xr.DataArray
             Cross-wind spread :math:`\sigma_y` [m].
         """
+        if isinstance(x, xr.DataArray):
+            # xarray path: x is pre-scaled X*, use per-timestep parameters
+            try:
+                sigma_y_star = self.ac * np.sqrt(
+                    (self.bc * np.abs(x) ** 2) / (1 + self.cc * np.abs(x))
+                )
+                stability = self.ds["zm"] / self.ds["ol"]
+                scale_const = xr.where(
+                    self.ds["ol"] <= 0,
+                    1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.80,
+                    1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.55,
+                )
+                scale_const = xr.where(scale_const > 1.0, 1.0, scale_const)
+                return (
+                    sigma_y_star
+                    / scale_const
+                    * self.ds["zm"]
+                    * self.ds["sigmav"]
+                    / self.ds["ustar"]
+                )
+            except Exception as e:
+                self.logger.error(f"Error calculating crosswind spread: {str(e)}")
+                raise
+        else:
+            # Numpy path: x is raw upwind distance, scale with time-mean parameters
+            zm_mean = float(self.ds["zm"].mean())
+            ol_mean = float(self.ds["ol"].mean())
+            ustar_mean = float(self.ds["ustar"].mean())
+            sigmav_mean = float(self.ds["sigmav"].mean())
 
-        # Get mean values of stability parameters for consistent calculation
-        zm_mean = float(self.ds["zm"].mean())
-        h_mean = float(self.ds["h"].mean())
-        u_zm_mean = float(self.ds["umean"].mean())
-        ustar_mean = float(self.ds["ustar"].mean())
-        sigmav_mean = float(self.ds["sigmav"].mean())
-        ol_mean = float(self.ds["ol"].mean())
+            x_star = self.calc_scaled_x(x)
+            # Use |X*| so points behind the receptor don't drive the denominator negative
+            x_star_abs = np.abs(x_star)
+            sigma_y_star = self.ac * np.sqrt(
+                (self.bc * x_star_abs**2) / (1 + self.cc * x_star_abs)
+            )
 
-        # Calculate mean stability parameter
-        stability_param_mean = zm_mean / ol_mean
+            stability_param_mean = zm_mean / ol_mean
+            if stability_param_mean <= 0:
+                scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.80
+            else:
+                scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.55
+            scale_const = min(scale_const, 1.0)
 
-        # Calculate scaled distance X*
-        x_star = self.calc_scaled_x(x)
-
-        # Calculate scaled crosswind spread σy* using Eq. 18
-        # Parameters from Eq. 19: ac = 2.17, bc = 1.66, cc = 20.0
-        # Use |X*| so that points behind the receptor (X* < 0) do not drive the
-        # denominator (1 + cc*X*) negative and produce sqrt-of-negative NaNs.
-        x_star_abs = np.abs(x_star)
-        sigma_y_star = self.ac * np.sqrt(
-            (self.bc * x_star_abs**2) / (1 + self.cc * x_star_abs)
-        )
-
-        # Calculate stability-dependent scaling constant
-        if stability_param_mean <= 0:  # Convective
-            scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.80
-        else:  # Stable
-            scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.55
-
-        # Limit scaling constant to maximum of 1.0
-        scale_const = min(scale_const, 1.0)
-
-        # Convert to real scale (Eq. 18)
-        sigma_y = sigma_y_star / scale_const * zm_mean * sigmav_mean / ustar_mean
-
-        return sigma_y
+            return sigma_y_star / scale_const * zm_mean * sigmav_mean / ustar_mean
 
     def plot_footprint(self, config=None, ax=None, show_contours=True, levels=10):
         """
