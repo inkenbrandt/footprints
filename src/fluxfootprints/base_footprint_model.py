@@ -54,6 +54,7 @@ class BaseFootprintModel(ABC):
         inst_height: float = 2.0,
         zm: Optional[float] = None,
         z0: Optional[float] = None,
+        roughness_fraction: float = 0.123,
         smooth_data: bool = True,
         verbosity: int = 2,
         logger: Optional[logging.Logger] = None,
@@ -79,6 +80,11 @@ class BaseFootprintModel(ABC):
         z0 : float, optional
             Aerodynamic roughness length (m).  Must be supplied together
             with ``zm`` when bypassing the ``crop_height`` derivation.
+        roughness_fraction : float, optional
+            Ratio used to derive z0 from crop_height when z0 is not supplied
+            directly: ``z0 = crop_height * roughness_fraction``.  Typical
+            values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
+            (corn).  Default is 0.123 (a commonly used approximation).
         crop_height : float
             Vegetation/canopy height (m). Used to derive ``zm`` and ``z0``
             when those are not supplied directly.
@@ -106,6 +112,7 @@ class BaseFootprintModel(ABC):
         self.inst_height = inst_height
         self.zm = zm
         self.z0 = z0
+        self.roughness_fraction = float(roughness_fraction)
         self.smooth_data = smooth_data
         self.verbosity = int(verbosity)
         

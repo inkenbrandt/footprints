@@ -140,6 +140,7 @@ class ffp_climatology_new(BaseFootprintModel):
         inst_height: Union[float, "pd.Series"] = 2.0,
         zm: Optional[float] = None,
         z0: Optional[float] = None,
+        roughness_fraction: float = 0.123,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -163,6 +164,7 @@ class ffp_climatology_new(BaseFootprintModel):
             inst_height=inst_height,
             zm=zm,
             z0=z0,
+            roughness_fraction=roughness_fraction,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
@@ -264,6 +266,7 @@ class ffp_climatology_new(BaseFootprintModel):
                 d_h=None,
                 zm_s=zm_s,
                 h_s=h_s_col,
+                roughness_fraction=roughness_fraction,
             )
         self.define_domain()
         self.create_xr_dataset()
@@ -330,6 +333,7 @@ class ffp_climatology_new(BaseFootprintModel):
         h_s=2000.0,
         zm_direct=None,
         z0_direct=None,
+        roughness_fraction=0.123,
     ):
         # h_c Height of canopy [m]
         # d_h Estimated displacement height [m]
@@ -337,6 +341,7 @@ class ffp_climatology_new(BaseFootprintModel):
         # h_s Height of atmos. boundary layer [m] - assumed
         # zm_direct Effective measurement height (zm) supplied directly [m]
         # z0_direct Roughness length supplied directly [m]
+        # roughness_fraction Ratio z0/h_c used when z0 is not supplied directly
 
         if zm_direct is not None and z0_direct is not None:
             self.df["zm"] = zm_direct
@@ -346,7 +351,7 @@ class ffp_climatology_new(BaseFootprintModel):
                 d_h = 10 ** (0.979 * np.log10(h_c) - 0.154)
             self.df["zm"] = zm_s - d_h
             self.df["h_c"] = h_c
-            self.df["z0"] = h_c * 0.123
+            self.df["z0"] = h_c * roughness_fraction
 
         self.df["h"] = h_s
 

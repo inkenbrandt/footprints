@@ -308,6 +308,42 @@ def test_backward_compat_crop_height_still_works(valid_df, quiet_logger):
     assert float(model.df["z0"].iloc[0]) == pytest.approx(0.2 * 0.123)
 
 
+def test_custom_roughness_fraction(valid_df, quiet_logger):
+    """roughness_fraction overrides the default 0.123 multiplier (issue #6)."""
+    custom_fraction = 0.07  # e.g. alfalfa or pinyon-juniper
+    model = FFPModel(
+        valid_df,
+        crop_height=0.5,
+        inst_height=2.0,
+        roughness_fraction=custom_fraction,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.5 * custom_fraction)
+    # Stored on the model for inspection
+    assert model.roughness_fraction == pytest.approx(custom_fraction)
+
+
+def test_roughness_fraction_default_unchanged(valid_df, quiet_logger):
+    """Default roughness_fraction of 0.123 is backward-compatible."""
+    model = FFPModel(
+        valid_df,
+        crop_height=0.3,
+        inst_height=2.0,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.3 * 0.123)
+
+
 # ---------------------------------------------------------------------------
 # Time-varying inst_height (issue #5)
 # ---------------------------------------------------------------------------

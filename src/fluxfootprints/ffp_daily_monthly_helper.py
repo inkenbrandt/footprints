@@ -116,6 +116,7 @@ def build_climatology(
     inst_height: Union[float, "pd.Series"] = 2.5,
     zm: Optional[float] = None,
     z0: Optional[float] = None,
+    roughness_fraction: float = 0.123,
     dx: float = 10.0,
     dy: float = 10.0,
     domain: Tuple[float, float, float, float] = (-1000.0, 1000.0, -1000.0, 1000.0),
@@ -140,6 +141,11 @@ def build_climatology(
         derivation.
     z0 : float, optional
         Aerodynamic roughness length (m). Must be supplied with ``zm``.
+    roughness_fraction : float, optional
+        Ratio used to derive z0 from crop_height when z0 is not supplied
+        directly: ``z0 = crop_height * roughness_fraction``.  Typical
+        values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
+        (corn).  Default is 0.123.
     crop_height : float
         Vegetation/canopy height (m). Used to derive ``zm`` and ``z0`` when
         those are not provided directly.
@@ -214,6 +220,7 @@ def build_climatology(
         common_params["zm"] = float(zm)
     if z0 is not None:
         common_params["z0"] = float(z0)
+    common_params["roughness_fraction"] = float(roughness_fraction)
     
     # Add model-specific parameters
     common_params.update(model_kwargs)

@@ -60,7 +60,7 @@ class LSFootprintModelAdapter(BaseFootprintModel):
         else:
             d = 10 ** (0.979 * np.log10(self.crop_height) - 0.154)
             zm = self.inst_height - d
-            z0 = self.crop_height * 0.123
+            z0 = self.crop_height * self.roughness_fraction
         
         # Setup domain
         xmin, xmax, ymin, ymax = self.domain

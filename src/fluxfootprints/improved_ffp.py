@@ -71,6 +71,7 @@ class FFPModel(BaseFootprintModel):
         inst_height: float = 2.0,
         zm: Optional[float] = None,
         z0: Optional[float] = None,
+        roughness_fraction: float = 0.123,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -114,6 +115,12 @@ class FFPModel(BaseFootprintModel):
         z0 : float, optional
             Aerodynamic roughness length [m].  Must be supplied together with
             ``zm`` when bypassing the ``crop_height`` derivation.
+
+        roughness_fraction : float, optional
+            Ratio used to derive z0 from crop_height when z0 is not supplied
+            directly: ``z0 = crop_height * roughness_fraction``.  Typical
+            values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
+            (corn).  Default is 0.123.
 
         crop_height : float, optional
             Height of vegetation or surface roughness (m). Used to derive ``zm``
@@ -192,7 +199,7 @@ class FFPModel(BaseFootprintModel):
 
             d_h = 10 ** (0.979 * np.log10(max(crop_height, 1e-6)) - 0.154)
             zm_eff = inst_h - d_h  # scalar float or pd.Series
-            z0_eff = crop_height * 0.123
+            z0_eff = crop_height * roughness_fraction
 
         super().__init__(
             df=df,
@@ -205,6 +212,7 @@ class FFPModel(BaseFootprintModel):
             inst_height=inst_height,
             zm=zm,
             z0=z0,
+            roughness_fraction=roughness_fraction,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
