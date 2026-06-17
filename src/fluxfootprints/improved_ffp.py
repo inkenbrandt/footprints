@@ -481,13 +481,13 @@ class FFPModel(BaseFootprintModel):
         # Create grid
         xx, yy = np.meshgrid(x_unique, y_unique)
 
-        # Calculate polar coordinates
+        # Calculate polar coordinates. This helper works in a local
+        # along-wind/crosswind frame (xx = along-wind, yy = crosswind), so no
+        # rotation into the wind direction is applied here; rho is only used as
+        # the along-wind distance fed to the scaled-x and crosswind-spread
+        # parameterisations. The climatology path (calc_xr_footprint) is the one
+        # that rotates compass-bearing winds via theta = arctan2(x, y).
         rho = np.sqrt(xx**2 + yy**2)
-        theta = np.arctan2(yy, xx)
-
-        # Get mean wind direction
-        wind_dir_mean = self.get_scalar_value(self.ds["wind_dir"])
-        rotated_theta = theta - (wind_dir_mean * np.pi / 180.0)
 
         # Calculate footprint components using mean values
         x_star = self.calc_scaled_x(rho)
