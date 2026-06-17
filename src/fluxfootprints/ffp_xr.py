@@ -137,7 +137,7 @@ class ffp_climatology_new(BaseFootprintModel):
         rs: Union[list, np.ndarray] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
         crop_height: float = 0.2,
         atm_bound_height: float = 2000.0,
-        inst_height: float = 2.0,
+        inst_height: Union[float, "pd.Series"] = 2.0,
         zm: Optional[float] = None,
         z0: Optional[float] = None,
         rslayer: bool = False,
@@ -234,7 +234,18 @@ class ffp_climatology_new(BaseFootprintModel):
         else:
             h_c = df["crop_height"] if "crop_height" in df.columns else crop_height
             h_s_col = df["atm_bound_height"] if "atm_bound_height" in df.columns else atm_bound_height
-            zm_s = df["inst_height"] if "inst_height" in df.columns else inst_height
+            # Support time-varying inst_height: DataFrame column takes highest priority,
+            # then a Series/array passed as the parameter, then the scalar default.
+            if "inst_height" in df.columns:
+                zm_s = df["inst_height"]
+            elif isinstance(inst_height, (pd.Series, np.ndarray, list)):
+                zm_s = (
+                    inst_height.reindex(df.index)
+                    if isinstance(inst_height, pd.Series)
+                    else pd.Series(inst_height, index=df.index)
+                )
+            else:
+                zm_s = inst_height  # scalar float
             zm_eff = None   # computed inside prep_df_fields via h_c/zm_s
             z0_eff = None
 

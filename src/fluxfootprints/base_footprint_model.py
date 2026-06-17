@@ -84,9 +84,11 @@ class BaseFootprintModel(ABC):
             when those are not supplied directly.
         atm_bound_height : float
             Atmospheric boundary layer height (m)
-        inst_height : float
+        inst_height : float or pandas.Series
             Instrument measurement height (m). Used to derive ``zm`` when
-            ``zm`` is not supplied directly.
+            ``zm`` is not supplied directly. Pass a ``pd.Series`` with the
+            same DatetimeIndex as ``df`` to support height changes throughout
+            the season (e.g. IRGASON repositioned mid-season).
         smooth_data : bool
             Apply smoothing to output
         verbosity : int

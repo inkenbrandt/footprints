@@ -122,9 +122,12 @@ class FFPModel(BaseFootprintModel):
         atm_bound_height : float, optional
             Height of the atmospheric boundary layer (m). Must be > 10. Default is 2000.0.
 
-        inst_height : float, optional
+        inst_height : float or pandas.Series, optional
             Height of the measurement instrument (m). Used to derive ``zm`` when
             ``zm`` is not provided directly. Must be > crop_height. Default is 2.0.
+            Pass a ``pd.Series`` with the same DatetimeIndex as ``df`` to account
+            for instrument height changes throughout the season (e.g. when the
+            IRGASON is repositioned).
 
         rslayer : bool, optional
             If True, apply roughness sublayer corrections. Default is False.
@@ -168,13 +171,27 @@ class FFPModel(BaseFootprintModel):
                 "Supply neither (use crop_height + inst_height) or both."
             )
         else:
-            # Backward-compatible path: derive from crop_height and inst_height
+            # Backward-compatible path: derive from crop_height and inst_height.
+            # inst_height may be a scalar float or a pd.Series aligned with df.index
+            # to support instrument repositioning throughout the season.
             if crop_height < 0:
                 raise ValueError("crop_height must be positive")
-            if inst_height <= crop_height:
-                raise ValueError("inst_height must be greater than crop_height")
+
+            if isinstance(inst_height, (pd.Series, np.ndarray, list)):
+                inst_h = (
+                    inst_height.reindex(df.index)
+                    if isinstance(inst_height, pd.Series)
+                    else pd.Series(inst_height, index=df.index)
+                )
+                if (inst_h <= crop_height).any():
+                    raise ValueError("inst_height must be greater than crop_height at all time steps")
+            else:
+                inst_h = float(inst_height)
+                if inst_h <= crop_height:
+                    raise ValueError("inst_height must be greater than crop_height")
+
             d_h = 10 ** (0.979 * np.log10(max(crop_height, 1e-6)) - 0.154)
-            zm_eff = inst_height - d_h
+            zm_eff = inst_h - d_h  # scalar float or pd.Series
             z0_eff = crop_height * 0.123
 
         super().__init__(
@@ -677,20 +694,30 @@ class FFPModel(BaseFootprintModel):
             self.x_min = xr.full_like(self.ds["ustar"], np.nan)
 
 
-    def prep_df_fields(self, zm: float, z0: float, atm_bound_height: float):
+    def prep_df_fields(
+        self,
+        zm: Union[float, "pd.Series"],
+        z0: float,
+        atm_bound_height: float,
+    ):
         """
         Prepare and normalize input DataFrame fields for footprint calculation.
 
         Parameters
         ----------
-        zm : float
-            Effective measurement height above displacement height (m).
+        zm : float or pd.Series
+            Effective measurement height above displacement height (m). A Series
+            aligned with the DataFrame index allows per-timestep values, e.g. when
+            the instrument was repositioned during the season.
         z0 : float
             Aerodynamic roughness length (m).
         atm_bound_height : float
             Atmospheric boundary layer height (m).
         """
-        self.df["zm"] = zm
+        if isinstance(zm, pd.Series):
+            self.df["zm"] = zm.reindex(self.df.index)
+        else:
+            self.df["zm"] = zm
         self.df["z0"] = z0
         self.df["h"] = atm_bound_height
 
@@ -712,9 +739,10 @@ class FFPModel(BaseFootprintModel):
 
         # Log RSL statistics
         mean_z_star = self.df["z_star"].mean()
+        mean_zm = self.df["zm"].mean()
         self.logger.info(
             f"Mean RSL height (z*): {mean_z_star:.1f}m, "
-            f"Measurement height (zm): {zm}m"
+            f"Mean measurement height (zm): {mean_zm:.2f}m"
         )
 
     def _apply_validity_masks(self):

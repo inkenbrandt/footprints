@@ -306,3 +306,104 @@ def test_backward_compat_crop_height_still_works(valid_df, quiet_logger):
     assert float(model.df["zm"].iloc[0]) > 0
     # z0 should be crop_height * 0.123
     assert float(model.df["z0"].iloc[0]) == pytest.approx(0.2 * 0.123)
+
+
+# ---------------------------------------------------------------------------
+# Time-varying inst_height (issue #5)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def seasonal_df():
+    """DataFrame spanning two timestamps with differing instrument heights."""
+    index = pd.date_range("2025-04-01", periods=4, freq="30min")
+    return pd.DataFrame(
+        {
+            "V_SIGMA": [0.40, 0.45, 0.38, 0.42],
+            "USTAR": [0.30, 0.32, 0.28, 0.31],
+            "MO_LENGTH": [200.0, 150.0, -100.0, 300.0],
+            "WD": [45.0, 90.0, 135.0, 180.0],
+            "WS": [4.0, 4.5, 3.5, 5.0],
+        },
+        index=index,
+    )
+
+
+def test_series_inst_height_per_timestep_zm(seasonal_df, quiet_logger):
+    """A pd.Series inst_height produces per-timestep zm values in the DataFrame."""
+    heights = pd.Series([2.0, 2.0, 3.0, 3.0], index=seasonal_df.index)
+    crop_h = 0.2
+    d_h = 10 ** (0.979 * np.log10(max(crop_h, 1e-6)) - 0.154)
+
+    model = FFPModel(
+        seasonal_df,
+        crop_height=crop_h,
+        inst_height=heights,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+
+    zm_vals = model.df["zm"]
+    # First two rows used height 2.0, last two used 3.0
+    assert zm_vals.iloc[0] == pytest.approx(2.0 - d_h, rel=1e-6)
+    assert zm_vals.iloc[-1] == pytest.approx(3.0 - d_h, rel=1e-6)
+    # All zm values should be positive
+    assert (zm_vals > 0).all()
+
+
+def test_array_inst_height_accepted(seasonal_df, quiet_logger):
+    """A plain list/array is also accepted as inst_height."""
+    heights = [2.0, 2.0, 3.0, 3.0]
+    model = FFPModel(
+        seasonal_df,
+        crop_height=0.2,
+        inst_height=heights,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    assert (model.df["zm"] > 0).all()
+
+
+def test_series_inst_height_below_crop_raises(seasonal_df, quiet_logger):
+    """Any time step where inst_height <= crop_height must raise ValueError."""
+    crop_h = 0.5
+    heights = pd.Series([2.0, 0.3, 2.0, 2.0], index=seasonal_df.index)  # second row too low
+    with pytest.raises(ValueError, match="inst_height must be greater than crop_height"):
+        FFPModel(
+            seasonal_df,
+            crop_height=crop_h,
+            inst_height=heights,
+            atm_bound_height=1500.0,
+            domain=[-100.0, 100.0, -100.0, 100.0],
+            dx=100.0,
+            smooth_data=False,
+            verbosity=0,
+            logger=quiet_logger,
+        )
+
+
+def test_series_inst_height_end_to_end(seasonal_df, quiet_logger):
+    """End-to-end smoke test: time-varying inst_height produces a valid footprint."""
+    heights = pd.Series([2.0, 2.0, 3.0, 3.0], index=seasonal_df.index)
+    model = FFPModel(
+        seasonal_df,
+        crop_height=0.2,
+        inst_height=heights,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    results = model.run(return_result=True)
+    assert results is not None
+    assert "footprint_climatology" in results
+    assert results["footprint_climatology"].values.sum() > 0

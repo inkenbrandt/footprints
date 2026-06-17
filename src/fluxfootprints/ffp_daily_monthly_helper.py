@@ -113,7 +113,7 @@ def build_climatology(
     model_type: str = "ffp",
     crop_height: float = 0.2,
     atm_bound_height: float = 2000.0,
-    inst_height: float = 2.5,
+    inst_height: Union[float, "pd.Series"] = 2.5,
     zm: Optional[float] = None,
     z0: Optional[float] = None,
     dx: float = 10.0,
@@ -145,9 +145,10 @@ def build_climatology(
         those are not provided directly.
     atm_bound_height : float
         Atmospheric boundary layer height (m)
-    inst_height : float
+    inst_height : float or pd.Series
         Instrument measurement height (m). Used to derive ``zm`` when not
-        provided directly.
+        provided directly. Pass a ``pd.Series`` with the same DatetimeIndex
+        as ``df`` to account for height changes during the season.
     dx, dy : float
         Grid resolution (m)
     domain : tuple
@@ -202,7 +203,7 @@ def build_climatology(
         rs=rs,
         crop_height=float(crop_height),
         atm_bound_height=float(atm_bound_height),
-        inst_height=float(inst_height),
+        inst_height=inst_height if isinstance(inst_height, pd.Series) else float(inst_height),
         smooth_data=smooth_data,
         verbosity=verbosity,
         logger=logger,
