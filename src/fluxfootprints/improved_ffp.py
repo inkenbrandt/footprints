@@ -70,6 +70,8 @@ class FFPModel(BaseFootprintModel):
         crop_height: float = 0.2,
         atm_bound_height: float = 2000.0,
         inst_height: float = 2.0,
+        zm: Optional[float] = None,
+        z0: Optional[float] = None,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -104,14 +106,26 @@ class FFPModel(BaseFootprintModel):
         rs : list of float, optional
             Relative source area contributions to evaluate. Values must be between 0 and 1.
 
+        zm : float, optional
+            Effective measurement height above the zero-plane displacement height
+            (i.e. ``z_instrument - d``) [m].  When provided together with ``z0``,
+            these values are used directly and ``crop_height`` / ``inst_height``
+            are ignored for the height derivation.
+
+        z0 : float, optional
+            Aerodynamic roughness length [m].  Must be supplied together with
+            ``zm`` when bypassing the ``crop_height`` derivation.
+
         crop_height : float, optional
-            Height of vegetation or surface roughness (m). Default is 0.2.
+            Height of vegetation or surface roughness (m). Used to derive ``zm``
+            and ``z0`` when those are not provided directly. Default is 0.2.
 
         atm_bound_height : float, optional
             Height of the atmospheric boundary layer (m). Must be > 10. Default is 2000.0.
 
         inst_height : float, optional
-            Height of the measurement instrument (m). Must be > crop_height. Default is 2.0.
+            Height of the measurement instrument (m). Used to derive ``zm`` when
+            ``zm`` is not provided directly. Must be > crop_height. Default is 2.0.
 
         rslayer : bool, optional
             If True, apply roughness sublayer corrections. Default is False.
@@ -136,13 +150,33 @@ class FFPModel(BaseFootprintModel):
         ValueError
             If any input parameters are invalid or inconsistent.
         """
-        # Validate physical parameters before any data processing
-        if crop_height < 0:
-            raise ValueError("crop_height must be positive")
+        # Validate atmospheric boundary layer height (always required)
         if atm_bound_height <= 10:
             raise ValueError("atm_bound_height must be > 10m")
-        if inst_height <= crop_height:
-            raise ValueError("inst_height must be greater than crop_height")
+
+        # Resolve effective measurement height and roughness length
+        if zm is not None and z0 is not None:
+            # Direct inputs take priority over crop_height / inst_height
+            zm_eff = float(zm)
+            z0_eff = float(z0)
+            if zm_eff <= 0:
+                raise ValueError("zm must be positive")
+            if z0_eff <= 0:
+                raise ValueError("z0 must be positive")
+        elif zm is not None or z0 is not None:
+            raise ValueError(
+                "Both zm and z0 must be provided together. "
+                "Supply neither (use crop_height + inst_height) or both."
+            )
+        else:
+            # Backward-compatible path: derive from crop_height and inst_height
+            if crop_height < 0:
+                raise ValueError("crop_height must be positive")
+            if inst_height <= crop_height:
+                raise ValueError("inst_height must be greater than crop_height")
+            d_h = 10 ** (0.979 * np.log10(max(crop_height, 1e-6)) - 0.154)
+            zm_eff = inst_height - d_h
+            z0_eff = crop_height * 0.123
 
         super().__init__(
             df=df,
@@ -153,10 +187,16 @@ class FFPModel(BaseFootprintModel):
             crop_height=crop_height,
             atm_bound_height=atm_bound_height,
             inst_height=inst_height,
+            zm=zm,
+            z0=z0,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
         )
+
+        # Store resolved values for internal use
+        self.zm_eff = zm_eff
+        self.z0_eff = z0_eff
 
         # Set up logger
         self.logger.setLevel(logging.DEBUG if self.verbosity > 1 else logging.WARNING)
@@ -177,8 +217,8 @@ class FFPModel(BaseFootprintModel):
 
         # Process input data
         self.prep_df_fields(
-            crop_height=self.crop_height,
-            inst_height=self.inst_height,
+            zm=zm_eff,
+            z0=z0_eff,
             atm_bound_height=self.atm_bound_height,
         )
 
@@ -661,28 +701,21 @@ class FFPModel(BaseFootprintModel):
             self.x_min = xr.full_like(self.ds["ustar"], np.nan)
 
 
-    def prep_df_fields(
-        self, crop_height: float, inst_height: float, atm_bound_height: float
-    ):
+    def prep_df_fields(self, zm: float, z0: float, atm_bound_height: float):
         """
         Prepare and normalize input DataFrame fields for footprint calculation.
 
         Parameters
         ----------
-        crop_height : float
-            Vegetation height.
-        inst_height : float
-            Instrument height.
+        zm : float
+            Effective measurement height above displacement height (m).
+        z0 : float
+            Aerodynamic roughness length (m).
         atm_bound_height : float
-            Atmospheric boundary layer height.
+            Atmospheric boundary layer height (m).
         """
-        # Calculate displacement height
-        d_h = 10 ** (0.979 * np.log10(crop_height) - 0.154)
-
-        # Add derived fields
-        self.df["zm"] = inst_height - d_h  # measurement height above displacement
-        self.df["h_c"] = crop_height
-        self.df["z0"] = crop_height * 0.123  # roughness length
+        self.df["zm"] = zm
+        self.df["z0"] = z0
         self.df["h"] = atm_bound_height
 
         # Apply validity checks
@@ -705,7 +738,7 @@ class FFPModel(BaseFootprintModel):
         mean_z_star = self.df["z_star"].mean()
         self.logger.info(
             f"Mean RSL height (z*): {mean_z_star:.1f}m, "
-            f"Measurement height: {inst_height}m"
+            f"Measurement height (zm): {zm}m"
         )
 
     def _apply_validity_masks(self):
@@ -2017,8 +2050,8 @@ class FFPModel(BaseFootprintModel):
         # Store parameters as attributes (NetCDF-safe)
         results.attrs.update(
             {
-                "crop_height": float(self.df["h_c"].iloc[0]),
-                "inst_height": float(self.df["zm"].iloc[0]) + float(self.df["h_c"].iloc[0]),
+                "zm": float(self.df["zm"].iloc[0]),
+                "z0": float(self.df["z0"].iloc[0]),
                 "atm_bound_height": float(self.df["h"].iloc[0]),
             }
         )

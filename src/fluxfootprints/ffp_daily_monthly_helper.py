@@ -114,6 +114,8 @@ def build_climatology(
     crop_height: float = 0.2,
     atm_bound_height: float = 2000.0,
     inst_height: float = 2.5,
+    zm: Optional[float] = None,
+    z0: Optional[float] = None,
     dx: float = 10.0,
     dy: float = 10.0,
     domain: Tuple[float, float, float, float] = (-1000.0, 1000.0, -1000.0, 1000.0),
@@ -131,12 +133,21 @@ def build_climatology(
     ----------
     df : pd.DataFrame
         Input DataFrame with required columns (WD, WS, USTAR, MO_LENGTH, V_SIGMA)
+    zm : float, optional
+        Effective measurement height above the zero-plane displacement (m).
+        When provided together with ``z0``, these are passed directly to the
+        model and ``crop_height`` / ``inst_height`` are not used for height
+        derivation.
+    z0 : float, optional
+        Aerodynamic roughness length (m). Must be supplied with ``zm``.
     crop_height : float
-        Vegetation/canopy height (m)
+        Vegetation/canopy height (m). Used to derive ``zm`` and ``z0`` when
+        those are not provided directly.
     atm_bound_height : float
         Atmospheric boundary layer height (m)
     inst_height : float
-        Instrument measurement height (m)
+        Instrument measurement height (m). Used to derive ``zm`` when not
+        provided directly.
     dx, dy : float
         Grid resolution (m)
     domain : tuple
@@ -196,6 +207,12 @@ def build_climatology(
         verbosity=verbosity,
         logger=logger,
     )
+    # Pass zm/z0 only when explicitly supplied so models fall back to
+    # crop_height/inst_height derivation when the caller omits them.
+    if zm is not None:
+        common_params["zm"] = float(zm)
+    if z0 is not None:
+        common_params["z0"] = float(z0)
     
     # Add model-specific parameters
     common_params.update(model_kwargs)

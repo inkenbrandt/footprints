@@ -52,6 +52,8 @@ class BaseFootprintModel(ABC):
         crop_height: float = 0.2,
         atm_bound_height: float = 2000.0,
         inst_height: float = 2.0,
+        zm: Optional[float] = None,
+        z0: Optional[float] = None,
         smooth_data: bool = True,
         verbosity: int = 2,
         logger: Optional[logging.Logger] = None,
@@ -59,7 +61,7 @@ class BaseFootprintModel(ABC):
     ):
         """
         Initialize base footprint model.
-        
+
         Parameters
         ----------
         df : pandas.DataFrame
@@ -70,12 +72,21 @@ class BaseFootprintModel(ABC):
             Grid spacing in meters
         rs : list
             Source area fractions (0-1) to compute
+        zm : float, optional
+            Effective measurement height above displacement height (m).
+            When provided together with ``z0``, takes priority over
+            ``crop_height`` / ``inst_height``.
+        z0 : float, optional
+            Aerodynamic roughness length (m).  Must be supplied together
+            with ``zm`` when bypassing the ``crop_height`` derivation.
         crop_height : float
-            Vegetation/canopy height (m)
+            Vegetation/canopy height (m). Used to derive ``zm`` and ``z0``
+            when those are not supplied directly.
         atm_bound_height : float
             Atmospheric boundary layer height (m)
         inst_height : float
-            Instrument measurement height (m)
+            Instrument measurement height (m). Used to derive ``zm`` when
+            ``zm`` is not supplied directly.
         smooth_data : bool
             Apply smoothing to output
         verbosity : int
@@ -91,6 +102,8 @@ class BaseFootprintModel(ABC):
         self.crop_height = crop_height
         self.atm_bound_height = atm_bound_height
         self.inst_height = inst_height
+        self.zm = zm
+        self.z0 = z0
         self.smooth_data = smooth_data
         self.verbosity = int(verbosity)
         

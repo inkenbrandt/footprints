@@ -208,3 +208,101 @@ def test_calc_xr_footprint(valid_df):
     assert isinstance(fclim, xr.DataArray)
     assert fclim.shape == (len(model.x), len(model.y))
     assert not np.all(np.isnan(fclim))
+
+
+# ---------------------------------------------------------------------------
+# Direct zm / z0 input (issue #7)
+# ---------------------------------------------------------------------------
+
+def test_direct_zm_z0_accepted(valid_df, quiet_logger):
+    """FFPModel accepts zm and z0 directly without crop_height/inst_height."""
+    model = FFPModel(
+        valid_df,
+        zm=1.8,
+        z0=0.025,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    assert float(model.df["zm"].iloc[0]) == pytest.approx(1.8)
+    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.025)
+
+
+def test_direct_zm_z0_overrides_crop_height(valid_df, quiet_logger):
+    """When zm and z0 are supplied they override crop_height/inst_height."""
+    # Build one model with crop_height path and one with direct zm/z0 set to
+    # different values — the direct parameters must win.
+    model = FFPModel(
+        valid_df,
+        crop_height=0.5,
+        inst_height=3.0,
+        zm=1.0,
+        z0=0.05,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    assert float(model.df["zm"].iloc[0]) == pytest.approx(1.0)
+    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.05)
+
+
+def test_only_one_of_zm_z0_raises(valid_df, quiet_logger):
+    """Supplying only one of zm or z0 must raise a ValueError."""
+    with pytest.raises(ValueError, match="Both zm and z0 must be provided together"):
+        FFPModel(valid_df, zm=1.8, verbosity=0, logger=quiet_logger)
+
+    with pytest.raises(ValueError, match="Both zm and z0 must be provided together"):
+        FFPModel(valid_df, z0=0.025, verbosity=0, logger=quiet_logger)
+
+
+def test_invalid_zm_raises(valid_df, quiet_logger):
+    """Non-positive zm must raise a ValueError."""
+    with pytest.raises(ValueError, match="zm must be positive"):
+        FFPModel(valid_df, zm=0.0, z0=0.025, verbosity=0, logger=quiet_logger)
+
+    with pytest.raises(ValueError, match="zm must be positive"):
+        FFPModel(valid_df, zm=-1.0, z0=0.025, verbosity=0, logger=quiet_logger)
+
+
+def test_direct_zm_z0_run_produces_footprint(valid_df, quiet_logger):
+    """End-to-end smoke test for the zm/z0 direct-input path."""
+    model = FFPModel(
+        valid_df,
+        zm=1.8,
+        z0=0.025,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    results = model.run(return_result=True)
+    assert results is not None
+    assert "footprint_climatology" in results
+    assert results["footprint_climatology"].values.sum() > 0
+
+
+def test_backward_compat_crop_height_still_works(valid_df, quiet_logger):
+    """crop_height + inst_height path still produces a valid zm in the df."""
+    model = FFPModel(
+        valid_df,
+        crop_height=0.2,
+        inst_height=2.0,
+        atm_bound_height=1500.0,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=100.0,
+        smooth_data=False,
+        verbosity=0,
+        logger=quiet_logger,
+    )
+    # zm should be inst_height - displacement_height > 0
+    assert float(model.df["zm"].iloc[0]) > 0
+    # z0 should be crop_height * 0.123
+    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.2 * 0.123)

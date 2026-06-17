@@ -138,6 +138,8 @@ class ffp_climatology_new(BaseFootprintModel):
         crop_height: float = 0.2,
         atm_bound_height: float = 2000.0,
         inst_height: float = 2.0,
+        zm: Optional[float] = None,
+        z0: Optional[float] = None,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -159,6 +161,8 @@ class ffp_climatology_new(BaseFootprintModel):
             crop_height=crop_height,
             atm_bound_height=atm_bound_height,
             inst_height=inst_height,
+            zm=zm,
+            z0=z0,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
@@ -221,27 +225,35 @@ class ffp_climatology_new(BaseFootprintModel):
         else:
             self.logger.setLevel(logging.DEBUG)
 
-        if "crop_height" in df.columns:
-            h_c = df["crop_height"]
+        # Resolve effective measurement height and roughness length.
+        # Direct zm/z0 parameters take priority; otherwise derive from
+        # crop_height and inst_height (checking df columns as fallback).
+        if zm is not None and z0 is not None:
+            zm_eff = float(zm)
+            z0_eff = float(z0)
         else:
-            h_c = crop_height
+            h_c = df["crop_height"] if "crop_height" in df.columns else crop_height
+            h_s_col = df["atm_bound_height"] if "atm_bound_height" in df.columns else atm_bound_height
+            zm_s = df["inst_height"] if "inst_height" in df.columns else inst_height
+            zm_eff = None   # computed inside prep_df_fields via h_c/zm_s
+            z0_eff = None
 
-        if "atm_bound_height" in df.columns:
-            h_s = df["atm_bound_height"]
+        if zm_eff is not None:
+            self.prep_df_fields(
+                h_c=None,
+                d_h=None,
+                zm_s=None,
+                h_s=atm_bound_height,
+                zm_direct=zm_eff,
+                z0_direct=z0_eff,
+            )
         else:
-            h_s = atm_bound_height
-
-        if "inst_height" in df.columns:
-            zm_s = df["inst_height"]
-        else:
-            zm_s = inst_height
-
-        self.prep_df_fields(
-            h_c=h_c,
-            d_h=None,
-            zm_s=zm_s,
-            h_s=h_s,
-        )
+            self.prep_df_fields(
+                h_c=h_c,
+                d_h=None,
+                zm_s=zm_s,
+                h_s=h_s_col,
+            )
         self.define_domain()
         self.create_xr_dataset()
 
@@ -305,18 +317,26 @@ class ffp_climatology_new(BaseFootprintModel):
         d_h=None,
         zm_s=2.0,
         h_s=2000.0,
+        zm_direct=None,
+        z0_direct=None,
     ):
         # h_c Height of canopy [m]
-        # Estimated displacement height [m]
+        # d_h Estimated displacement height [m]
         # zm_s Measurement height [m] from AMF metadata
         # h_s Height of atmos. boundary layer [m] - assumed
+        # zm_direct Effective measurement height (zm) supplied directly [m]
+        # z0_direct Roughness length supplied directly [m]
 
-        if d_h is None:
-            d_h = 10 ** (0.979 * np.log10(h_c) - 0.154)
+        if zm_direct is not None and z0_direct is not None:
+            self.df["zm"] = zm_direct
+            self.df["z0"] = z0_direct
+        else:
+            if d_h is None:
+                d_h = 10 ** (0.979 * np.log10(h_c) - 0.154)
+            self.df["zm"] = zm_s - d_h
+            self.df["h_c"] = h_c
+            self.df["z0"] = h_c * 0.123
 
-        self.df["zm"] = zm_s - d_h
-        self.df["h_c"] = h_c
-        self.df["z0"] = h_c * 0.123
         self.df["h"] = h_s
 
         self.df = self.df.rename(

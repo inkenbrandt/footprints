@@ -53,10 +53,14 @@ class LSFootprintModelAdapter(BaseFootprintModel):
         
         self.df = self._validate_input_df(self.df)
         
-        # Calculate displacement and measurement height
-        d = 10 ** (0.979 * np.log10(self.crop_height) - 0.154)
-        zm = self.inst_height - d
-        z0 = self.crop_height * 0.123
+        # Use directly supplied zm/z0 if available, otherwise derive from crop_height
+        if self.zm is not None and self.z0 is not None:
+            zm = float(self.zm)
+            z0 = float(self.z0)
+        else:
+            d = 10 ** (0.979 * np.log10(self.crop_height) - 0.154)
+            zm = self.inst_height - d
+            z0 = self.crop_height * 0.123
         
         # Setup domain
         xmin, xmax, ymin, ymax = self.domain
