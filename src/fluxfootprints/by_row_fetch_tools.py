@@ -14,9 +14,11 @@ def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
     """
     Convert polar coordinates in a DataFrame to Cartesian coordinates.
 
-    This function adds Cartesian coordinate columns (`X_<dist_column>` and
-    `Y_<dist_column>`) to the input DataFrame based on polar inputs defined
-    by wind direction (in degrees from North) and radial distance.
+    This function computes Cartesian coordinate columns (`X_<dist_column>` and
+    `Y_<dist_column>`) from polar inputs defined by wind direction (in degrees
+    from North) and one or more radial distance columns. Unlike a mutating
+    helper, it does **not** modify the input DataFrame; it returns only the
+    newly computed coordinate columns.
 
     Parameters
     ----------
@@ -25,16 +27,19 @@ def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
     wd_column : str, optional
         Name of the column representing wind direction in degrees from North,
         by default "WD".
-    dist_column : str, optional
-        Name of the column representing distance from origin,
-        by default "Dist".
+    dist_column : str or list of str, optional
+        Name(s) of the column(s) representing distance from origin. A single
+        column name produces one ``X_``/``Y_`` pair; a list of names produces
+        a pair for each distance column. By default "Dist".
 
     Returns
     -------
     pandas.DataFrame
-        Modified DataFrame with two new columns:
-        - `'X_<dist_column>'`: Cartesian X coordinate
-        - `'Y_<dist_column>'`: Cartesian Y coordinate
+        A new DataFrame (indexed like ``df``) containing only the computed
+        coordinate columns. For each distance column ``c`` two columns are
+        returned:
+        - `'X_<c>'`: Cartesian X coordinate
+        - `'Y_<c>'`: Cartesian Y coordinate
 
     Notes
     -----
@@ -42,26 +47,34 @@ def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
     - Wind direction is converted such that 0° = North, 90° = East, etc.
     - Cartesian conversion is performed using:
       `X = dist * cos(θ)` and `Y = dist * sin(θ)` where θ = (90 - WD) in degrees.
+    - The input DataFrame is left unchanged.
     """
-    # Create copies of the input columns to avoid modifying original data
-    wd = df[wd_column].copy()
-    dist = df[dist_column].copy()
+    # Accept either a single column name or a list of column names
+    if isinstance(dist_column, str):
+        dist_columns = [dist_column]
+    else:
+        dist_columns = list(dist_column)
 
-    # Identify invalid values (-9999 or NaN)
-    invalid_mask = (wd == -9999) | (dist == -9999) | wd.isna() | dist.isna()
+    wd = df[wd_column]
 
-    # Convert degrees from north to standard polar angle (radians) where valid
+    # Convert degrees from north to standard polar angle (radians)
     theta_radians = np.radians(90 - wd)
+    cos_theta = np.cos(theta_radians)
+    sin_theta = np.sin(theta_radians)
 
-    # Calculate Cartesian coordinates, setting invalid values to NaN
-    df[f"X_{dist_column}"] = np.where(
-        invalid_mask, np.nan, dist * np.cos(theta_radians)
-    )
-    df[f"Y_{dist_column}"] = np.where(
-        invalid_mask, np.nan, dist * np.sin(theta_radians)
-    )
+    # Build only the new coordinate columns, leaving ``df`` untouched
+    result = {}
+    for col in dist_columns:
+        dist = df[col]
 
-    return df
+        # Identify invalid values (-9999 or NaN) in either input
+        invalid_mask = (wd == -9999) | (dist == -9999) | wd.isna() | dist.isna()
+
+        # Calculate Cartesian coordinates, setting invalid values to NaN
+        result[f"X_{col}"] = np.where(invalid_mask, np.nan, dist * cos_theta)
+        result[f"Y_{col}"] = np.where(invalid_mask, np.nan, dist * sin_theta)
+
+    return pd.DataFrame(result, index=df.index)
 
 
 def aggregate_to_daily_centroid(
