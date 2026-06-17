@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy import signal
-from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
 import traceback
 from .base_footprint_model import BaseFootprintModel
@@ -978,7 +977,7 @@ class FFPModel(BaseFootprintModel):
 
     def apply_paper_smoothing(self):
         """
-        Apply enhanced 3x3 smoothing from Kljun et al. paper with mass conservation.
+        Apply 3x3 smoothing from Kljun et al. paper with mass conservation.
         """
         self.logger.debug("Starting paper smoothing...")
 
@@ -1003,10 +1002,11 @@ class FFPModel(BaseFootprintModel):
             smoothed = original.copy()
             for i in range(2):
                 smoothed_values = signal.convolve2d(
-                    smoothed.values, 
-                    skernel, 
-                    mode='same', 
-                    boundary='wrap'  # Changed from 'fill' to 'wrap' for better edges
+                    smoothed.values,
+                    skernel,
+                    mode='same',
+                    boundary='fill',  # Zero-pad edges; 'wrap' would bleed opposite-edge mass
+                    fillvalue=0
                 )
                 smoothed = xr.DataArray(
                     smoothed_values,
@@ -1014,22 +1014,6 @@ class FFPModel(BaseFootprintModel):
                     coords=smoothed.coords
                 )
                 self.logger.debug(f"Smoothing iteration {i + 1} complete")
-
-            # Additional Gaussian smoothing for visual quality (optional, scales with resolution)
-            if self.dx <= 5.0:  # Only for fine grids
-                sigma = 0.5  # Very light additional smoothing
-                smoothed_values = gaussian_filter(
-                    smoothed.values,
-                    sigma=sigma,
-                    mode='constant',
-                    cval=0
-                )
-                smoothed = xr.DataArray(
-                    smoothed_values,
-                    dims=smoothed.dims,
-                    coords=smoothed.coords
-                )
-                self.logger.debug(f"Applied additional Gaussian smoothing (sigma={sigma})")
 
             # CRITICAL: Preserve total mass
             smoothed_sum = float(smoothed.sum())
