@@ -1542,12 +1542,8 @@ class FFPModel(BaseFootprintModel):
         Returns:
             xr.DataArray: Distance from receptor containing fraction r of footprint
         """
-        # Parameters from Eq. 17
-        c = 1.462
-        d = 0.136
-
         # Calculate scaled extent from Eq. 24
-        x_star_r = -c / np.log(r) + d
+        x_star_r = -self.c / np.log(r) + self.d
 
         # Convert to real scale using Eq. 25 (calc_pi_4 returns Pi_4 directly)
         x_r = (
