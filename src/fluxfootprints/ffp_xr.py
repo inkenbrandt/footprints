@@ -514,14 +514,8 @@ class ffp_climatology_new(BaseFootprintModel):
 
         self.ds["ol"] = xr.where(np.abs(self.ds["ol"]) > self.oln, -1e6, self.ds["ol"])
 
-        # Calculate scale_const in a vectorized way
-        scale_const = xr.where(
-            self.ds["ol"] <= 0,
-            1e-5 * np.abs(self.ds["zm"] / self.ds["ol"]) ** (-1) + 0.80,
-            1e-5 * np.abs(self.ds["zm"] / self.ds["ol"]) ** (-1) + 0.55,
-        )
-
-        scale_const = xr.where(scale_const > 1.0, 1.0, scale_const)
+        # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
+        scale_const = xr.where(self.ds["ol"] <= 0, 0.80, 0.55)
 
         # Calculate sigy_dummy
         sigy_dummy = xr.where(

@@ -1644,13 +1644,8 @@ class FFPModel(BaseFootprintModel):
                 sigma_y_star = self.ac * np.sqrt(
                     (self.bc * np.abs(x) ** 2) / (1 + self.cc * np.abs(x))
                 )
-                stability = self.ds["zm"] / self.ds["ol"]
-                scale_const = xr.where(
-                    self.ds["ol"] <= 0,
-                    1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.80,
-                    1e-5 * np.maximum(np.abs(stability), 1e-10) ** (-1) + 0.55,
-                )
-                scale_const = xr.where(scale_const > 1.0, 1.0, scale_const)
+                # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
+                scale_const = xr.where(self.ds["ol"] <= 0, 0.80, 0.55)
                 return (
                     sigma_y_star
                     / scale_const
@@ -1675,12 +1670,8 @@ class FFPModel(BaseFootprintModel):
                 (self.bc * x_star_abs**2) / (1 + self.cc * x_star_abs)
             )
 
-            stability_param_mean = zm_mean / ol_mean
-            if stability_param_mean <= 0:
-                scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.80
-            else:
-                scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.55
-            scale_const = min(scale_const, 1.0)
+            # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
+            scale_const = 0.80 if ol_mean <= 0 else 0.55
 
             return sigma_y_star / scale_const * zm_mean * sigmav_mean / ustar_mean
 
