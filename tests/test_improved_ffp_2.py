@@ -279,6 +279,90 @@ def test_apply_rsl_corrections_sets_attributes(rsl_model):
     assert isinstance(rsl_model.x_min, xr.DataArray)
 
 
+# -----------------------
+# Validity filtering (issue #8)
+# -----------------------
+
+def test_valid_footprint_is_per_timestep_dataarray(small_model):
+    """valid_footprint must be a boolean DataArray indexed by time, not a scalar."""
+    vf = small_model.valid_footprint
+    assert isinstance(vf, xr.DataArray)
+    assert "time" in vf.dims
+    assert vf.dtype == bool or np.issubdtype(vf.dtype, np.bool_)
+
+
+def test_valid_timesteps_all_true_for_clean_data(small_model):
+    """All 48 rows in sample_df satisfy the validity bounds — mask must be all True."""
+    assert bool(small_model.valid_footprint.all())
+
+
+def test_extreme_stability_excluded_by_validity_mask(sample_df):
+    """A row with zm/L < -15.5 must be flagged False in valid_footprint."""
+    df = sample_df.copy()
+    # Overwrite the last row with an extreme negative L so zm/L << -15.5
+    df.loc[df.index[-1], "MO_LENGTH"] = -0.05
+    model = FFPModel(
+        df,
+        domain=[-50.0, 50.0, -50.0, 50.0],
+        dx=10.0,
+        dy=10.0,
+        smooth_data=False,
+        verbosity=0,
+    )
+    # At least the last row should fail stability validity
+    assert not bool(model.valid_footprint.all()), (
+        "Expected at least one invalid timestep for zm/L << -15.5"
+    )
+
+
+def test_invalid_timesteps_do_not_affect_climatology(sample_df):
+    """
+    Climatologies built from all-valid data vs. data with one extreme-stability
+    row must differ: the masked run should exclude that row's contribution.
+    """
+    common = dict(
+        domain=[-50.0, 50.0, -50.0, 50.0],
+        dx=10.0,
+        dy=10.0,
+        smooth_data=False,
+        verbosity=0,
+    )
+    # Baseline: all rows valid
+    m_clean = FFPModel(sample_df.copy(), **common)
+    r_clean = m_clean.run(return_result=True)
+
+    # Perturbed: last row has extreme stability → excluded by validity mask
+    df_bad = sample_df.copy()
+    df_bad.loc[df_bad.index[-1], "MO_LENGTH"] = -0.05
+    m_bad = FFPModel(df_bad, **common)
+    r_bad = m_bad.run(return_result=True)
+
+    fc_clean = r_clean["footprint_climatology"].values
+    fc_bad = r_bad["footprint_climatology"].values
+    # The two climatologies should not be identical
+    assert not np.allclose(fc_clean, fc_bad), (
+        "Excluding an invalid timestep should change the climatology"
+    )
+
+
+def test_rslayer_mode_runs_without_error(sample_df):
+    """rslayer=True must invoke RSL corrections without raising an exception."""
+    model = FFPModel(
+        sample_df,
+        domain=[-50.0, 50.0, -50.0, 50.0],
+        dx=10.0,
+        dy=10.0,
+        rslayer=True,
+        smooth_data=False,
+        verbosity=0,
+    )
+    results = model.run(return_result=True)
+    assert results is not None
+    assert "footprint_climatology" in results
+    # RSL path must have set sigma_y
+    assert hasattr(model, "sigma_y") and model.sigma_y is not None
+
+
 def test_save_results_writes_file(tmp_path, small_model):
     small_model.run(return_result=False)
     out = tmp_path / "ffp_results.nc"

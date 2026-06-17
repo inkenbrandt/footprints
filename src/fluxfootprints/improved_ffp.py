@@ -237,6 +237,7 @@ class FFPModel(BaseFootprintModel):
 
         self.smooth_data = bool(smooth_data)
         self.crop = bool(crop)
+        self.rslayer = bool(rslayer)
 
         # Initialize model parameters (will be updated based on stability)
         self.initialize_model_parameters()
@@ -869,42 +870,39 @@ class FFPModel(BaseFootprintModel):
 
         Returns
         -------
-        xr.Dataset: Dataset containing boolean masks for:
+        xr.Dataset: Dataset containing per-timestep boolean masks for:
         - height_valid: True where 20z₀ < zm < he
         - stability_valid: True where -15.5 ≤ zm/L
         - turbulence_valid: True where u* > 0.1 and σv > 0
         - rsl_valid: True where measurement height above RSL
-        Combined validity is stored in self.valid_footprint
+        Combined per-timestep validity is stored in self.valid_footprint (dims: time).
         """
-        validity_mask = xr.Dataset()
-
-        # Height validity: 20z₀ < zm < he
-        validity_mask["height_valid"] = xr.where(
-            (self.ds["zm"] > 20 * self.ds["z0"]) & (self.ds["zm"] < 0.8 * self.ds["h"]),
-            True,
-            False,
+        # Per-timestep boolean validity flags (dims: time)
+        height_valid = (
+            (self.ds["zm"] > 20 * self.ds["z0"]) & (self.ds["zm"] < 0.8 * self.ds["h"])
         )
+        stability_valid = self.ds["zm"] / self.ds["ol"] >= -15.5
+        turbulence_valid = (self.ds["ustar"] > 0.1) & (self.ds["sigmav"] > 0)
 
-        # Stability validity: -15.5 ≤ zm/L
-        validity_mask["stability_valid"] = xr.where(
-            self.ds["zm"] / self.ds["ol"] >= -15.5, True, False
-        )
+        # RSL validity was pre-computed in prep_df_fields() and stored in self.ds
+        rsl_valid = self.ds["rsl_valid"].astype(bool)
 
-        # Turbulence validity
-        validity_mask["turbulence_valid"] = xr.where(
-            (self.ds["ustar"] > 0.1) & (self.ds["sigmav"] > 0), True, False
-        )
+        # Combined per-timestep validity mask (dims: time)
+        self.valid_footprint = height_valid & stability_valid & turbulence_valid & rsl_valid
 
-        # Combined validity
-        self.valid_footprint = validity_mask.all()
+        n_invalid = int((~self.valid_footprint).sum())
+        if n_invalid > 0:
+            self.logger.warning(
+                f"{n_invalid}/{self.ts_len} timesteps excluded: outside "
+                f"Kljun et al. (2015) validity bounds (Eq. 27)"
+            )
 
-        # Add RSL-specific checks
-        rsl_valid = self.check_rsl_validity()
-        validity_mask["rsl_valid"] = rsl_valid
-
-        # Update combined validity to include RSL
-        self.valid_footprint = self.valid_footprint & rsl_valid
-
+        validity_mask = xr.Dataset({
+            "height_valid": height_valid,
+            "stability_valid": stability_valid,
+            "turbulence_valid": turbulence_valid,
+            "rsl_valid": rsl_valid,
+        })
         return validity_mask
 
     def calc_pi_4(self):
@@ -1173,8 +1171,13 @@ class FFPModel(BaseFootprintModel):
             
             # Now broadcast works correctly: (time, x, y) - (time,) -> (time, x, y)
             self.rotated_theta = theta_3d - wind_dir_rad
-            
+
             self.logger.debug(f"rotated_theta dims: {self.rotated_theta.dims}, shape: {self.rotated_theta.shape}")
+
+            # Pre-compute RSL corrections (sigma_y, x_min) when rslayer is enabled.
+            # Must happen after rotated_theta is set; calc_scaled_distance_rsl() uses it.
+            if self.rslayer:
+                self.apply_rsl_corrections()
 
             # Step 3: Dimensionless wind-speed group Pi_4 = ln(zm/z0) - psi_M
             # (Eq. 6/7). This is the scaled->real conversion factor and must be
@@ -1184,14 +1187,18 @@ class FFPModel(BaseFootprintModel):
             valid_profile = pi4 > 0
 
             # Step 4: Calculate scaled distance - all should be (time, x, y)
-            xstar_ci = xr.where(
-                valid_profile,
-                rho_3d * np.cos(self.rotated_theta)
-                / self.ds["zm"]
-                * (1.0 - self.ds["zm"] / self.ds["h"])
-                / pi4,
-                0.0,
-            )
+            if self.rslayer:
+                # RSL-corrected path: blind-zone adjustment via self.x_min (set above)
+                xstar_ci = xr.where(valid_profile, self.calc_scaled_distance_rsl(), 0.0)
+            else:
+                xstar_ci = xr.where(
+                    valid_profile,
+                    rho_3d * np.cos(self.rotated_theta)
+                    / self.ds["zm"]
+                    * (1.0 - self.ds["zm"] / self.ds["h"])
+                    / pi4,
+                    0.0,
+                )
 
             self.logger.debug(f"xstar_ci dims: {xstar_ci.dims}, shape: {xstar_ci.shape}")
             self.logger.debug(
@@ -1209,7 +1216,11 @@ class FFPModel(BaseFootprintModel):
             self.logger.debug(f"f_ci dims: {f_ci.dims}, shape: {f_ci.shape}")
             self._log_array_stats("crosswind_integrated_footprint", f_ci)
 
-            sigy = self.calc_crosswind_spread_xr(xstar_ci)
+            if self.rslayer and self.sigma_y is not None:
+                # Use RSL-corrected crosswind spread from apply_rsl_corrections()
+                sigy = self.sigma_y
+            else:
+                sigy = self.calc_crosswind_spread_xr(xstar_ci)
             self.logger.debug(f"sigy dims: {sigy.dims}, shape: {sigy.shape}")
             self._log_array_stats("crosswind_dispersion", sigy)
 
@@ -1225,6 +1236,10 @@ class FFPModel(BaseFootprintModel):
             
             self.logger.debug(f"f_2d dims: {self.f_2d.dims}, shape: {self.f_2d.shape}")
             self._log_array_stats("2d_footprint", self.f_2d)
+
+            # Zero out timesteps outside the Kljun et al. (2015) validity bounds
+            # (Eq. 27) so they do not contribute weight to the climatology.
+            self.f_2d = xr.where(self.valid_footprint, self.f_2d, 0.0)
 
             # Step 7: Calculate climatology - sum over TIME dimension
             footprint_sum = self.f_2d.sum(dim="time")
