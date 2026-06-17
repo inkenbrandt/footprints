@@ -155,6 +155,37 @@ def test_calc_scaled_x(valid_df):
     assert result.shape == x.shape
 
 
+def test_calc_scaled_x_matches_theory(valid_df):
+    """
+    ``calc_scaled_x`` must implement Eq. 7 of Kljun et al. (2015), i.e.
+    ``X* = x/zm * (1 - zm/h) / Pi_4`` with ``Pi_4 = ln(zm/z0) - psi_M``.
+
+    Two consequences are checked:
+
+    1. Evaluating it at the analytic real-scale peak ``xmax`` (Eq. 22) must
+       return the scaled peak ``X*max = -c/b + d = 0.87`` — this guards against
+       the historical von-Karman (factor k**2) and missing-psi_M bug.
+    2. It must be the exact inverse of ``scale_to_real_distance`` (Eq. 6/7),
+       keeping the source-area contour helpers consistent with the main
+       climatology path.
+    """
+    # Build a model and evaluate against its own derived quantities.
+    model = FFPModel(valid_df)
+    zm = float(model.ds["zm"].mean())
+    h = float(model.ds["h"].mean())
+    pi4 = float(model.calc_pi_4().mean())
+
+    x_star_max = -model.c / model.b + model.d  # 0.87
+    xmax = x_star_max * zm * (1 - zm / h) ** -1 * pi4
+
+    # (1) real peak -> scaled peak
+    assert model.calc_scaled_x(xmax) == pytest.approx(x_star_max, rel=1e-6)
+
+    # (2) round-trip inverse of scale_to_real_distance
+    back = float(model.scale_to_real_distance(x_star_max).mean())
+    assert back == pytest.approx(xmax, rel=1e-6)
+
+
 def test_calc_crosswind_spread(valid_df):
     model = FFPModel(valid_df)
     x = np.array([10.0, 20.0])
