@@ -477,72 +477,56 @@ class FFPModel(BaseFootprintModel):
             self.logger.error(traceback.format_exc())
             raise
 
-    def get_source_area_contour(self, r, x_ru, x_rd, y_r):
+    def get_source_area_contour(self, r):
         """
-        Generate a contour dataset for a given source area.
+        Compute the source area contour threshold for fraction r of the climatological
+        footprint, operating directly on the pre-computed fclim_2d grid.
 
         Parameters
         ----------
         r : float
-            Relative contribution (0 < r < 1).
-        x_ru : float
-            Upwind distance.
-        x_rd : float
-            Downwind distance.
-        y_r : float
-            Crosswind extent.
+            Relative contribution (0 < r < 1), e.g. 0.8 for the 80 % footprint.
 
         Returns
         -------
         xarray.Dataset
-            Contour dataset with coordinates and footprint values.
+            Dataset containing:
+            - ``contour_level``: the fclim_2d value that encloses fraction *r*
+              of the total flux (use this as the ``levels`` argument to
+              ``ax.contour``).
+            - ``x``, ``y``: the domain coordinate arrays.
+            - ``f``: the full fclim_2d climatology grid.
+
+        Raises
+        ------
+        RuntimeError
+            If fclim_2d has not been computed yet (call ``run()`` first).
         """
-        # Get scalar values
-        x_rd_val = self.get_scalar_value(x_rd)
-        x_ru_val = self.get_scalar_value(x_ru)
-        y_r_val = self.get_scalar_value(y_r)
+        if self.fclim_2d is None or float(self.fclim_2d.max()) < 1e-10:
+            raise RuntimeError(
+                "fclim_2d is zero or not yet computed — call run() or "
+                "calc_xr_footprint() before get_source_area_contour()."
+            )
 
-        # Create distance arrays with unique, evenly spaced coordinates
-        x = np.linspace(x_rd_val, x_ru_val, self.nx)
-        y = np.linspace(-y_r_val, y_r_val, self.ny)
+        # Flatten and sort grid values in descending order
+        vals = self.fclim_2d.values.flatten()
+        sorted_vals = np.sort(vals)[::-1]
 
-        # Ensure coordinates are unique by adding small offset where needed
-        eps = np.finfo(float).eps  # Smallest possible float value
-        x_unique = x + np.arange(len(x)) * eps
-        y_unique = y + np.arange(len(y)) * eps
+        # Cumulative sum weighted by cell area; should reach ~1 for a normalised grid
+        cumsum = np.cumsum(sorted_vals) * self.dx * self.dy
 
-        # Create grid
-        xx, yy = np.meshgrid(x_unique, y_unique)
+        # Find the threshold value where the cumulative sum first reaches r
+        idx = np.searchsorted(cumsum, r)
+        if idx >= len(sorted_vals):
+            idx = len(sorted_vals) - 1
+        contour_level = float(sorted_vals[idx])
 
-        # The grid is already in the along-wind / crosswind frame:
-        # xx = along-wind distance, yy = crosswind distance.
-        # Pass xx directly so the parameterisations see the correct upwind
-        # distance rather than the radial distance sqrt(xx²+yy²).
-        x_star = self.calc_scaled_x(xx)
-        sigma_y = self.calc_crosswind_spread(xx)
-        f_y = self.calc_crosswind_integrated_footprint(x_star)
-
-        # Calculate 2D footprint
-        f_2d = (
-            f_y / (np.sqrt(2 * np.pi) * sigma_y) * np.exp(-(yy**2) / (2.0 * sigma_y**2))
-        )
-
-        # Calculate contour level
-        total_flux = np.sum(f_2d) * self.dx * self.dy
-        sorted_f = np.sort(f_2d.flatten())[::-1]
-        cumsum_f = np.cumsum(sorted_f) * self.dx * self.dy
-        idx = np.searchsorted(cumsum_f / total_flux, r)
-        if idx >= len(sorted_f):
-            idx = len(sorted_f) - 1
-        contour_level = sorted_f[idx]
-
-        # Create output dataset with unique coordinates
         return xr.Dataset(
             {
                 "contour_level": xr.DataArray(contour_level),
-                "x": xr.DataArray(x_unique, dims=["x"]),
-                "y": xr.DataArray(y_unique, dims=["y"]),
-                "f": xr.DataArray(f_2d, dims=["y", "x"]),
+                "x": xr.DataArray(self.x, dims=["x"]),
+                "y": xr.DataArray(self.y, dims=["y"]),
+                "f": self.fclim_2d,
             }
         )
 
@@ -1388,35 +1372,28 @@ class FFPModel(BaseFootprintModel):
 
     def calculate_source_areas(self):
         """
-        Compute source areas for all specified relative contributions.
+        Compute source area contour datasets for all specified relative contributions,
+        derived directly from the fclim_2d climatology grid.
+
+        Must be called after ``run()`` or ``calc_xr_footprint()``.
 
         Returns
         -------
         dict
-            Dictionary of contour datasets by contribution level.
+            Mapping of contribution label (e.g. ``'r_80'``) to the
+            xarray.Dataset returned by :meth:`get_source_area_contour`.
+
+        Raises
+        ------
+        RuntimeError
+            If fclim_2d has not been computed yet.
         """
         source_areas = {}
-
-        # Calculate for each requested relative contribution
         for r in self.rs:
             if not 0.1 <= r <= 0.9:
                 self.logger.warning(f"Skipping r={r}, outside valid range 0.1-0.9")
                 continue
-
-            # Calculate extents
-            x_r = self.calc_crosswind_integrated_extent(r)
-            x_ru, x_rd = self.calc_peak_based_limits(r)
-            y_r = self.calc_crosswind_extent(r, x_ru, x_rd)
-
-            # Store results as xarray objects
-            source_areas[f"r_{int(r * 100)}"] = {
-                "x_r": xr.DataArray(x_r, name="extent"),
-                "x_ru": xr.DataArray(x_ru, name="upwind_extent"),
-                "x_rd": xr.DataArray(x_rd, name="downwind_extent"),
-                "y_r": xr.DataArray(y_r, name="crosswind_extent"),
-                "contour": self.get_source_area_contour(r, x_ru, x_rd, y_r),
-            }
-
+            source_areas[f"r_{int(r * 100)}"] = self.get_source_area_contour(r)
         return source_areas
 
     def calc_crosswind_integrated_extent(self, r: float) -> xr.DataArray:

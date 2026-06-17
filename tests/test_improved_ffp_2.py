@@ -250,17 +250,35 @@ def test_scaled_peak_reasonable_range(small_model):
 # -----------------------
 
 def test_source_area_contour_structure(small_model):
-    # Exercise the contour builder
+    # Contour must be derived from the actual fclim_2d climatology, not a synthetic footprint.
+    small_model.run(return_result=False)
     r = 0.8
-    x_ru, x_rd = small_model.calc_peak_based_limits(r)
-    y_r = small_model.calc_crosswind_extent(r, x_ru, x_rd)
-    ds_contour = small_model.get_source_area_contour(r, x_ru, x_rd, y_r)
+    ds_contour = small_model.get_source_area_contour(r)
     assert {"x", "y", "f", "contour_level"} <= set(ds_contour.data_vars) | set(ds_contour.coords)
-    assert set(ds_contour["f"].dims) == {"y", "x"}
+    assert set(ds_contour["f"].dims) == {"x", "y"}
     assert float(ds_contour["contour_level"]) >= 0.0
 
 
+def test_source_area_contour_threshold_encloses_r(small_model):
+    """The contour threshold must enclose at least fraction r of the total flux."""
+    small_model.run(return_result=False)
+    r = 0.8
+    ds_contour = small_model.get_source_area_contour(r)
+    threshold = float(ds_contour["contour_level"])
+    fclim = small_model.fclim_2d.values
+    enclosed = np.sum(fclim[fclim >= threshold]) * small_model.dx * small_model.dy
+    total = np.sum(fclim) * small_model.dx * small_model.dy
+    assert enclosed / total >= r - 0.01  # allow 1 % rounding from discretisation
+
+
+def test_get_source_area_contour_raises_before_run(small_model):
+    """Calling get_source_area_contour before run() must raise RuntimeError."""
+    with pytest.raises(RuntimeError):
+        small_model.get_source_area_contour(0.8)
+
+
 def test_calculate_source_areas_keys(small_model):
+    small_model.run(return_result=False)
     small_model.source_areas = small_model.calculate_source_areas()
     keys = set(small_model.source_areas.keys())
     assert keys.issuperset({"r_20", "r_50", "r_80"})
