@@ -26,7 +26,7 @@ def df_valid_and_invalid():
     Required raw columns before renaming in prep_df_fields():
       V_SIGMA, USTAR, wd, MO_LENGTH, ws
     """
-    times = pd.date_range("2025-01-01", periods=8, freq="H")
+    times = pd.date_range("2025-01-01", periods=8, freq="h")
     df = pd.DataFrame(
         {
             # last two rows invalid/filtered: negative V_SIGMA, tiny USTAR, wd > 360, NaN ol
@@ -91,7 +91,7 @@ def test_missing_required_parameters_raise():
     """
     If required inputs are missing, the class should raise via raise_ffp_exception(1).
     """
-    times = pd.date_range("2025-01-01", periods=4, freq="H")
+    times = pd.date_range("2025-01-01", periods=4, freq="h")
     df_missing = pd.DataFrame(
         {
             # 'USTAR' intentionally missing
@@ -152,6 +152,90 @@ def test_calc_xr_footprint_outputs_nonzero_and_finite(model_unsmoothed):
     # rotated_theta should broadcast time -> expect (x,y,time)
     assert set(m.rotated_theta.dims) == {"x", "y", "time"}
     assert m.rotated_theta.shape == (len(m.x), len(m.y), m.ts_len)
+
+
+# --- Tests: wind-direction coordinate convention ------------------------------
+def _single_step_footprint(wind_dir):
+    """
+    Run the climatology for a single time step at a given wind direction and
+    return the footprint DataArray (dims x, y) together with its mass-weighted
+    centroid (cx, cy).
+
+    The grid follows the meteorological convention used throughout the module:
+    ``theta = arctan2(x, y)`` measures clockwise from +y (North), so +x is East
+    and +y is North.
+    """
+    times = pd.date_range("2025-01-01", periods=1, freq="h")
+    df = pd.DataFrame(
+        {
+            "V_SIGMA": [0.5],
+            "USTAR": [0.4],
+            "wd": [wind_dir],
+            "MO_LENGTH": [-100.0],
+            "ws": [3.0],
+        },
+        index=times,
+    )
+    m = FFP(
+        df=df,
+        domain=[-200.0, 200.0, -200.0, 200.0],
+        dx=5.0,
+        dy=5.0,
+        smooth_data=False,
+        verbosity=0,
+    )
+    m.calc_xr_footprint()
+
+    f = m.fclim_2d
+    w = np.nan_to_num(f.values)
+    xv, yv = np.meshgrid(np.asarray(f["x"]), np.asarray(f["y"]), indexing="ij")
+    total = w.sum()
+    cx = float((xv * w).sum() / total)
+    cy = float((yv * w).sum() / total)
+    return f, cx, cy
+
+
+@pytest.mark.parametrize(
+    "wind_dir, axis, sign",
+    [
+        (0.0, "y", +1),    # wind FROM north -> source area upwind to the north (+y)
+        (90.0, "x", +1),   # wind FROM east  -> source area to the east (+x)
+        (180.0, "y", -1),  # wind FROM south -> source area to the south (-y)
+        (270.0, "x", -1),  # wind FROM west  -> source area to the west (-x)
+    ],
+)
+def test_footprint_points_upwind_for_cardinal_winds(wind_dir, axis, sign):
+    """
+    Validate the wind-coordinate convention against a known reference behaviour
+    (Kljun et al., 2015): the source area lies UPWIND of the tower, i.e. in the
+    direction the wind blows *from*. This guards against a 90deg-rotated or
+    mirrored arctan2/rotation convention (see issue #19).
+    """
+    _, cx, cy = _single_step_footprint(wind_dir)
+
+    if axis == "y":
+        # Centroid should sit along the N-S axis with the expected sign...
+        assert np.sign(cy) == sign
+        assert abs(cy) > 10.0
+        # ...and have negligible cross-axis (E-W) displacement.
+        assert abs(cx) < 0.1 * abs(cy)
+    else:
+        assert np.sign(cx) == sign
+        assert abs(cx) > 10.0
+        assert abs(cy) < 0.1 * abs(cx)
+
+
+def test_footprint_not_mirrored_for_intercardinal_wind():
+    """
+    A wind from the north-east (45deg) must place the source area to the
+    north-east (+x, +y) of the tower. A mirrored convention would flip one of
+    the components, so check both signs explicitly.
+    """
+    _, cx, cy = _single_step_footprint(45.0)
+    assert cx > 0.0
+    assert cy > 0.0
+    # By symmetry the diagonal footprint is balanced between the two axes.
+    assert cx == pytest.approx(cy, rel=0.05)
 
 
 def test_smoothing_changes_variability_and_preserves_scale(model_unsmoothed, model_smoothed):
