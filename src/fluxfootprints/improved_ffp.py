@@ -522,6 +522,19 @@ class FFPModel(BaseFootprintModel):
         """
         Calculate the scaled distance X* based on wind and height parameters.
 
+        Implements Eq. 7 of Kljun et al. (2015):
+
+        .. math::
+
+            X^* = \\frac{x}{z_m}\\left(1 - \\frac{z_m}{h}\\right)
+                  \\left[\\ln\\frac{z_m}{z_0} - \\psi_M\\right]^{-1}
+
+        i.e. ``X* = x/zm * (1 - zm/h) / Pi_4`` with
+        ``Pi_4 = ln(zm/z0) - psi_M = u(zm)/(u* k)`` (Eqs. 6/7). This is the
+        same scaled<->real conversion used in :meth:`calc_xr_footprint`, so the
+        auxiliary source-area contour helpers stay consistent with the main
+        climatology path.
+
         Parameters
         ----------
         x : float or ndarray
@@ -535,13 +548,13 @@ class FFPModel(BaseFootprintModel):
         # Get mean values
         zm_mean = float(self.ds["zm"].mean())
         h_mean = float(self.ds["h"].mean())
-        u_zm_mean = float(self.ds["umean"].mean())
-        ustar_mean = float(self.ds["ustar"].mean())
+
+        # Pi_4 = ln(zm/z0) - psi_M (Eq. 7); 1/Pi_4 maps real -> scaled distance.
+        # calc_pi_4() returns the full Pi_4 (including the stability correction).
+        pi4_mean = float(self.calc_pi_4().mean())
 
         # Calculate scaling
-        result = (
-            x / zm_mean * (1 - zm_mean / h_mean) * (ustar_mean / (u_zm_mean * self.k))
-        )
+        result = x / zm_mean * (1 - zm_mean / h_mean) / pi4_mean
 
         return result
 
