@@ -136,6 +136,14 @@ class FFPModel(BaseFootprintModel):
         ValueError
             If any input parameters are invalid or inconsistent.
         """
+        # Validate physical parameters before any data processing
+        if crop_height < 0:
+            raise ValueError("crop_height must be positive")
+        if atm_bound_height <= 10:
+            raise ValueError("atm_bound_height must be > 10m")
+        if inst_height <= crop_height:
+            raise ValueError("inst_height must be greater than crop_height")
+
         super().__init__(
             df=df,
             domain=domain,
@@ -170,7 +178,7 @@ class FFPModel(BaseFootprintModel):
         # Process input data
         self.prep_df_fields(
             crop_height=self.crop_height,
-            inst_height=inst_height,
+            inst_height=self.inst_height,
             atm_bound_height=self.atm_bound_height,
         )
 
@@ -186,18 +194,6 @@ class FFPModel(BaseFootprintModel):
         self.nx = int(nx)
         self.ny = int(ny)
         self.rs = self._validate_rs(rs)
-
-        # Validate physical parameters
-        if crop_height < 0:
-            raise ValueError("crop_height must be positive")
-        if atm_bound_height <= 10:
-            raise ValueError("atm_bound_height must be > 10m")
-        if inst_height <= crop_height:
-            raise ValueError("inst_height must be greater than crop_height")
-
-        self.crop_height = crop_height
-        self.atm_bound_height = atm_bound_height
-        self.inst_height = inst_height
 
         self.smooth_data = bool(smooth_data)
         self.crop = bool(crop)
