@@ -108,7 +108,7 @@ def test_crosswind_integrated_unimodal_and_normalized():
     assert np.all(post < 1e-14)    # non-increasing after peak
 
     # Normalization ~ 1
-    area = np.trapz(f, x)
+    area = np.trapezoid(f, x)
     assert area == pytest.approx(1.0, rel=5e-4, abs=5e-3)
 
     # Scalar input returns scalar
@@ -141,7 +141,7 @@ def test_footprint_2d_symmetry_and_recovers_fx_multiple_points():
     xs_to_check = [x[len(x)//6], x[len(x)//2], x[-2]]
     for xv in xs_to_check:
         ix = np.argmin(np.abs(x - xv))
-        f_num = np.trapz(phi[:, ix], y)
+        f_num = np.trapezoid(phi[:, ix], y)
         f_true = crosswind_integrated_footprint(x[ix], xi, m, n)
         assert f_num == pytest.approx(f_true, rel=2e-2, abs=1e-4)
 

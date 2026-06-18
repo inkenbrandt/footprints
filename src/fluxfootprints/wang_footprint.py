@@ -101,7 +101,7 @@ def wang2006_fy(
     # Normalise so that ∫ fy dx = 1 (ensures exact unity despite numeric approx.)
     # Vector spacing (assume uniform spacing) for integral weight
     dx = np.gradient(x)
-    integral = np.trapz(fy, x) if np.allclose(dx, dx[0]) else np.sum(fy * dx)
+    integral = np.trapezoid(fy, x) if np.allclose(dx, dx[0]) else np.sum(fy * dx)
     fy /= integral
     return fy
 

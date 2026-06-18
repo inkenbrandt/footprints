@@ -34,12 +34,12 @@ def monotone_decreasing(a):
 
 def column_std(Fcol, y):
     """Return std dev of a non-negative column over y (normalized internally)."""
-    area = np.trapz(Fcol, y)
+    area = np.trapezoid(Fcol, y)
     if area == 0 or not np.isfinite(area):
         return np.nan
     w = Fcol / area
-    mu = np.trapz(y * w, y)
-    var = np.trapz((y - mu) ** 2 * w, y)
+    mu = np.trapezoid(y * w, y)
+    var = np.trapezoid((y - mu) ** 2 * w, y)
     return np.sqrt(var)
 
 
@@ -65,7 +65,7 @@ def test_wang2006_fy_normalizes_to_one_uniform_grid(num, span):
     zm, h, L = make_valid_params()
     x = np.linspace(0.0, span, num)
     fy = wang2006_fy(x, zm=zm, h=h, L=L)
-    integ = np.trapz(fy, x)
+    integ = np.trapezoid(fy, x)
     assert np.isfinite(integ)
     assert np.isclose(integ, 1.0, rtol=0, atol=2e-3)
 
@@ -78,7 +78,7 @@ def test_wang2006_fy_normalizes_to_one_nonuniform_grid():
     )
     fy = wang2006_fy(x, zm=zm, h=h, L=L)
     # Use general integral (trapz handles nonuniform axis)
-    integ = np.trapz(fy, x)
+    integ = np.trapezoid(fy, x)
     assert np.isfinite(integ)
     assert np.isclose(integ, 1.0, rtol=0, atol=3e-3)
 
@@ -136,7 +136,7 @@ def test_reconstruct_gaussian_2d_column_integrates_back_to_fy():
 
     y = Y[:, 0]
     # Recover fy by integrating over y for each column
-    fy_recovered = np.trapz(F, y, axis=0)
+    fy_recovered = np.trapezoid(F, y, axis=0)
 
     # Allow a small tolerance on the per-column agreement.
     mask = fy > (0.01 * fy.max())

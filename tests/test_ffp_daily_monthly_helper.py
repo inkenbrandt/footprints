@@ -14,6 +14,7 @@ import xarray as xr
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from fluxfootprints import ffp_daily_monthly_helper as helper
+from fluxfootprints.base_footprint_model import BaseFootprintModel
 from fluxfootprints.ffp_xr import ffp_climatology_new
 
 
@@ -121,7 +122,7 @@ def test_build_climatology_wrapper(amf_like_df):
     clim = helper.build_climatology(
         amf_like_df.copy(), dx=10.0, dy=10.0, domain=(-100.0, 100.0, -100.0, 100.0)
     )
-    assert isinstance(clim, ffp_climatology_new)
+    assert isinstance(clim, BaseFootprintModel)
     assert isinstance(clim.f_2d, xr.DataArray)
     assert clim.f_2d.ndim == 3
 
@@ -222,7 +223,7 @@ def test_export_contours_gpkg_smoke(tmp_path, amf_like_df, monkeypatch):
     monkeypatch.setattr(gpd.GeoDataFrame, "to_file", _fake_to_file, raising=True)
 
     out = helper.export_contours_gpkg(
-        clim=clim,
+        model=clim,
         summaries=res,
         df=amf_like_df,
         station_lat=40.0,
@@ -244,7 +245,7 @@ def test_export_rasters_geotiff_smoke(tmp_path, amf_like_df):
     )
     res = helper.summarize_periods(clim, amf_like_df, daily=True, monthly=False)
     out_dir = helper.export_rasters_geotiff(
-        clim=clim,
+        model=clim,
         summaries=res,
         station_lat=40.0,
         station_lon=-111.9,
@@ -271,7 +272,7 @@ def test_export_contour_stats_csv_smoke(tmp_path, amf_like_df):
     csv_path = tmp_path / "stats.csv"
     out = helper.export_contour_stats_csv(
         df=amf_like_df,
-        clim=clim,
+        model=clim,
         summaries=res,
         station_lat=40.0,
         station_lon=-111.9,

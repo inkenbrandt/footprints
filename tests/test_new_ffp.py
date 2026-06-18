@@ -8,7 +8,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from fluxfootprints.new_ffp import FFPclim
+from fluxfootprints.ffp_xr import ffp_climatology_new
 
 
 @pytest.fixture
@@ -20,62 +20,69 @@ def minimal_df():
             "MO_LENGTH": [50, 60],
             "wd": [180, 190],
             "ws": [2.5, 3.0],
-        }
+        },
+        index=pd.date_range("2025-01-01", periods=2, freq="30min"),
     )
 
 
-def test_init_sets_parameters(minimal_df):
-    model = FFPclim(minimal_df)
-    assert model.df is not None
-    assert model.xv.shape == (1001, 1001)
-    assert isinstance(model.ds, xr.Dataset)
-
-
-def test_prep_df_fields_creates_fields(minimal_df):
-    model = FFPclim(minimal_df)
-    assert "zm" in model.df.columns
-    assert "h" in model.df.columns
-    assert not model.df.isnull().any().any()
-
-
-def test_raise_ffp_exception_fatal():
-    model = FFPclim(
-        pd.DataFrame(
-            {
-                "V_SIGMA": [0.4],
-                "USTAR": [0.3],
-                "MO_LENGTH": [50],
-                "wd": [180],
-                "ws": [2.5],
-            }
-        )
+@pytest.fixture
+def small_model(minimal_df):
+    return ffp_climatology_new(
+        minimal_df,
+        domain=[-100.0, 100.0, -100.0, 100.0],
+        dx=10.0,
+        dy=10.0,
+        smooth_data=False,
+        verbosity=0,
     )
-    with pytest.raises(ValueError):
-        model.raise_ffp_exception(1)
 
 
-def test_define_domain_sets_grids(minimal_df):
-    model = FFPclim(minimal_df)
-    model.define_domain()
-    assert isinstance(model.xv, np.ndarray)
-    assert isinstance(model.rho, xr.DataArray)
-    assert model.rho.shape == model.xv.shape
+def test_init_sets_parameters(small_model):
+    m = small_model
+    assert m.df is not None
+    # domain [-100,100] with dx=10 → 21 points per axis
+    assert m.xv.shape == (21, 21)
+    assert isinstance(m.ds, xr.Dataset)
 
 
-def test_create_xr_dataset_from_dataframe(minimal_df):
-    model = FFPclim(minimal_df)
-    model.create_xr_dataset()
-    assert isinstance(model.ds, xr.Dataset)
-    assert "sigmav" in model.ds.variables
+def test_prep_df_fields_creates_fields(small_model):
+    m = small_model
+    assert "zm" in m.df.columns
+    assert "h" in m.df.columns
+    # Both rows should survive filtering
+    assert len(m.df) == 2
 
 
-def test_calc_xr_footprint_executes(minimal_df):
-    model = FFPclim(minimal_df)
-    model.calc_xr_footprint()
-    assert isinstance(model.f_2d, xr.DataArray)
-    assert model.fclim_2d.shape == model.f_2d.isel(time=0).shape
+def test_raise_ffp_exception_fatal(small_model):
+    with pytest.raises(ValueError, match="FFP Exception 1"):
+        small_model.raise_ffp_exception(1)
 
-def test_run_returns_expected_keys(minimal_df):
-    model = FFPclim(minimal_df)
-    output = model.run()
-    assert set(output.keys()) >= {"x_2d", "y_2d", "fclim_2d", "f_2d", "rs"}
+
+def test_define_domain_sets_grids(small_model):
+    m = small_model
+    m.define_domain()
+    assert isinstance(m.xv, np.ndarray)
+    assert isinstance(m.rho, xr.DataArray)
+    assert m.rho.shape == m.xv.shape
+
+
+def test_create_xr_dataset_from_dataframe(small_model):
+    m = small_model
+    m.create_xr_dataset()
+    assert isinstance(m.ds, xr.Dataset)
+    assert "sigmav" in m.ds.variables
+
+
+def test_calc_xr_footprint_executes(small_model):
+    m = small_model
+    m.calc_xr_footprint()
+    assert isinstance(m.f_2d, xr.DataArray)
+    assert m.fclim_2d.shape == m.f_2d.isel(time=0).shape
+
+
+def test_run_returns_dataset(small_model):
+    result = small_model.run(return_result=True)
+    assert isinstance(result, xr.Dataset)
+    assert "footprint_climatology" in result
+    assert "domain_x" in result
+    assert "domain_y" in result

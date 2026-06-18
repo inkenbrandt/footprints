@@ -133,8 +133,8 @@ def test_grid_creation_and_initial_arrays(model_unsmoothed, small_domain):
     assert m.fclim_2d.shape == (11, 11)
 
     # Dataset created from dataframe with a 'time' dimension
-    assert "time" in m.ds.dims
-    assert m.ds.dims["time"] == m.ts_len
+    assert "time" in m.ds.sizes
+    assert m.ds.sizes["time"] == m.ts_len
 
 
 # --- Tests: footprint calculation ---------------------------------------------
