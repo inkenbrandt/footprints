@@ -378,7 +378,9 @@ class ffp_climatology_new(BaseFootprintModel):
         self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
         self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])
         self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])
-        self.df["ustar"] = np.where(self.df["ustar"] <= 0.05, np.nan, self.df["ustar"])
+        # Match the reference FFP filter (and improved_ffp): u* <= 0.1 m/s is
+        # rejected (reference check_ffp_inputs uses ustar <= 0.1).
+        self.df["ustar"] = np.where(self.df["ustar"] <= 0.1, np.nan, self.df["ustar"])
 
         self.df["wind_dir"] = np.where(
             self.df["wind_dir"] > 360.0, np.nan, self.df["wind_dir"]
@@ -519,8 +521,16 @@ class ffp_climatology_new(BaseFootprintModel):
 
         self.ds["ol"] = xr.where(np.abs(self.ds["ol"]) > self.oln, -1e6, self.ds["ol"])
 
-        # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
-        scale_const = xr.where(self.ds["ol"] <= 0, 0.80, 0.55)
+        # Crosswind-spread scaling factor ps1 (Kljun et al. 2015, Sect. 3.2):
+        #   ps1 = min(1, |zm/L|^-1 * 1e-5 + p),  p = 0.80 (L<=0), 0.55 (L>0)
+        # i.e. p plus a near-neutral ramp (1e-5*|L/zm|) capped at 1. The |L|>oln
+        # remap above sends near-neutral cases to ps1 -> 1. Using a bare 0.80/0.55
+        # step (the previous code) omits the ramp/cap and yields footprints up to
+        # ~1.8x too wide crosswind in near-neutral conditions.
+        p = xr.where(self.ds["ol"] <= 0, 0.80, 0.55)
+        scale_const = np.minimum(
+            1.0, 1e-5 * np.abs(self.ds["ol"] / self.ds["zm"]) + p
+        )
 
         # Calculate sigy_dummy
         sigy_dummy = xr.where(
@@ -574,18 +584,17 @@ class ffp_climatology_new(BaseFootprintModel):
 
         self.f_2d = xr.where(valid_mask, self.f_2d, 0.0)
 
-        # Count valid timesteps (non-zero sum) before per-timestep normalization.
-        # Invalid timesteps produce all-zero f_2d; dividing by their count would
-        # underestimate the climatology.
+        # Reproduce the original Kljun et al. (2015) aggregation: sum the
+        # real-scale footprint densities [m^-2] over time and divide by the
+        # number of valid footprints. The original does NOT renormalise each
+        # footprint, so footprints whose mass partly falls outside the domain
+        # contribute only their captured fraction. (The previous code divided
+        # each timestep by its grid-cell *count* sum, which both dropped the
+        # dx*dy area weighting -- yielding a non-density climatology off by a
+        # factor dx*dy -- and gave every timestep equal weight regardless of
+        # captured mass.)
         fp_sums = self.f_2d.sum(dim=("x", "y"))
         valid_count = int((fp_sums > 0).sum())
-
-        # Normalize each valid timestep's footprint to unit integral; guard against
-        # 0/0 for zeroed-out (invalid) timesteps.
-        safe_fp_sums = xr.where(fp_sums > 0, fp_sums, 1.0)
-        self.f_2d = xr.where(fp_sums > 0, self.f_2d / safe_fp_sums, 0.0)
-
-        # Accumulate into footprint climatology raster
         self.fclim_2d = self.f_2d.sum(dim="time") / max(valid_count, 1)
 
         # Apply smoothing if requested

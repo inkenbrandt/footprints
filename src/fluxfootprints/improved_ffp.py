@@ -1652,8 +1652,16 @@ class FFPModel(BaseFootprintModel):
                 sigma_y_star = self.ac * np.sqrt(
                     (self.bc * np.abs(x) ** 2) / (1 + self.cc * np.abs(x))
                 )
-                # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
-                scale_const = xr.where(self.ds["ol"] <= 0, 0.80, 0.55)
+                # Crosswind-spread scaling factor ps1 (Kljun et al. 2015, Sect. 3.2):
+                #   ps1 = min(1, |zm/L|^-1 * 1e-5 + p), p = 0.80 (L<=0), 0.55 (L>0).
+                # Near-neutral |L|>oln is remapped to L=-1e6 (as in the reference
+                # implementation) so ps1 -> 1 there. A bare 0.80/0.55 step omits the
+                # ramp/cap and overestimates the crosswind width near neutral.
+                ol_eff = xr.where(np.abs(self.ds["ol"]) > self.oln, -1e6, self.ds["ol"])
+                p = xr.where(ol_eff <= 0, 0.80, 0.55)
+                scale_const = np.minimum(
+                    1.0, 1e-5 * np.abs(ol_eff / self.ds["zm"]) + p
+                )
                 return (
                     sigma_y_star
                     / scale_const
@@ -1678,8 +1686,11 @@ class FFPModel(BaseFootprintModel):
                 (self.bc * x_star_abs**2) / (1 + self.cc * x_star_abs)
             )
 
-            # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
-            scale_const = 0.80 if ol_mean <= 0 else 0.55
+            # Crosswind-spread scaling factor ps1 (Kljun et al. 2015, Sect. 3.2):
+            #   ps1 = min(1, |zm/L|^-1 * 1e-5 + p), p = 0.80 (L<=0), 0.55 (L>0).
+            ol_eff = -1e6 if abs(ol_mean) > self.oln else ol_mean
+            p = 0.80 if ol_eff <= 0 else 0.55
+            scale_const = min(1.0, 1e-5 * abs(ol_eff / zm_mean) + p)
 
             return sigma_y_star / scale_const * zm_mean * sigmav_mean / ustar_mean
 
@@ -1789,8 +1800,15 @@ class FFPModel(BaseFootprintModel):
             # Perform main calculations
             self.fclim_2d = self.calc_xr_footprint()  # Now returns fclim_2d directly
 
-            # Rescale so the climatology integrates to ~1 over the domain
-            self.normalize_footprint()
+            # NOTE: deliberately NOT rescaling the climatology to integrate to 1
+            # over the domain. The reference Kljun et al. (2015) routine keeps the
+            # aggregated density (sum of real-scale footprints / n of valid
+            # footprints), which integrates to the mean *captured* fraction (<1
+            # when some footprint mass falls outside the domain). Renormalising to
+            # 1 would redefine the R% source-area contour as R% of captured flux
+            # rather than R% of the full footprint, giving contour areas that
+            # disagree with the reference (and with ffp_xr). See normalize_footprint()
+            # if an explicitly unit-integral climatology is needed downstream.
 
             # Add validation checks
             if self.fclim_2d is None:
