@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy import signal
-from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
 import traceback
 from .base_footprint_model import BaseFootprintModel
@@ -70,6 +69,9 @@ class FFPModel(BaseFootprintModel):
         crop_height: float = 0.2,
         atm_bound_height: float = 2000.0,
         inst_height: float = 2.0,
+        zm: Optional[float] = None,
+        z0: Optional[float] = None,
+        roughness_fraction: float = 0.123,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -104,14 +106,35 @@ class FFPModel(BaseFootprintModel):
         rs : list of float, optional
             Relative source area contributions to evaluate. Values must be between 0 and 1.
 
+        zm : float, optional
+            Effective measurement height above the zero-plane displacement height
+            (i.e. ``z_instrument - d``) [m].  When provided together with ``z0``,
+            these values are used directly and ``crop_height`` / ``inst_height``
+            are ignored for the height derivation.
+
+        z0 : float, optional
+            Aerodynamic roughness length [m].  Must be supplied together with
+            ``zm`` when bypassing the ``crop_height`` derivation.
+
+        roughness_fraction : float, optional
+            Ratio used to derive z0 from crop_height when z0 is not supplied
+            directly: ``z0 = crop_height * roughness_fraction``.  Typical
+            values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
+            (corn).  Default is 0.123.
+
         crop_height : float, optional
-            Height of vegetation or surface roughness (m). Default is 0.2.
+            Height of vegetation or surface roughness (m). Used to derive ``zm``
+            and ``z0`` when those are not provided directly. Default is 0.2.
 
         atm_bound_height : float, optional
             Height of the atmospheric boundary layer (m). Must be > 10. Default is 2000.0.
 
-        inst_height : float, optional
-            Height of the measurement instrument (m). Must be > crop_height. Default is 2.0.
+        inst_height : float or pandas.Series, optional
+            Height of the measurement instrument (m). Used to derive ``zm`` when
+            ``zm`` is not provided directly. Must be > crop_height. Default is 2.0.
+            Pass a ``pd.Series`` with the same DatetimeIndex as ``df`` to account
+            for instrument height changes throughout the season (e.g. when the
+            IRGASON is repositioned).
 
         rslayer : bool, optional
             If True, apply roughness sublayer corrections. Default is False.
@@ -136,6 +159,48 @@ class FFPModel(BaseFootprintModel):
         ValueError
             If any input parameters are invalid or inconsistent.
         """
+        # Validate atmospheric boundary layer height (always required)
+        if atm_bound_height <= 10:
+            raise ValueError("atm_bound_height must be > 10m")
+
+        # Resolve effective measurement height and roughness length
+        if zm is not None and z0 is not None:
+            # Direct inputs take priority over crop_height / inst_height
+            zm_eff = float(zm)
+            z0_eff = float(z0)
+            if zm_eff <= 0:
+                raise ValueError("zm must be positive")
+            if z0_eff <= 0:
+                raise ValueError("z0 must be positive")
+        elif zm is not None or z0 is not None:
+            raise ValueError(
+                "Both zm and z0 must be provided together. "
+                "Supply neither (use crop_height + inst_height) or both."
+            )
+        else:
+            # Backward-compatible path: derive from crop_height and inst_height.
+            # inst_height may be a scalar float or a pd.Series aligned with df.index
+            # to support instrument repositioning throughout the season.
+            if crop_height < 0:
+                raise ValueError("crop_height must be positive")
+
+            if isinstance(inst_height, (pd.Series, np.ndarray, list)):
+                inst_h = (
+                    inst_height.reindex(df.index)
+                    if isinstance(inst_height, pd.Series)
+                    else pd.Series(inst_height, index=df.index)
+                )
+                if (inst_h <= crop_height).any():
+                    raise ValueError("inst_height must be greater than crop_height at all time steps")
+            else:
+                inst_h = float(inst_height)
+                if inst_h <= crop_height:
+                    raise ValueError("inst_height must be greater than crop_height")
+
+            d_h = 10 ** (0.979 * np.log10(max(crop_height, 1e-6)) - 0.154)
+            zm_eff = inst_h - d_h  # scalar float or pd.Series
+            z0_eff = crop_height * roughness_fraction
+
         super().__init__(
             df=df,
             domain=domain,
@@ -145,10 +210,17 @@ class FFPModel(BaseFootprintModel):
             crop_height=crop_height,
             atm_bound_height=atm_bound_height,
             inst_height=inst_height,
+            zm=zm,
+            z0=z0,
+            roughness_fraction=roughness_fraction,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
         )
+
+        # Store resolved values for internal use
+        self.zm_eff = zm_eff
+        self.z0_eff = z0_eff
 
         # Set up logger
         self.logger.setLevel(logging.DEBUG if self.verbosity > 1 else logging.WARNING)
@@ -169,8 +241,8 @@ class FFPModel(BaseFootprintModel):
 
         # Process input data
         self.prep_df_fields(
-            crop_height=self.crop_height,
-            inst_height=inst_height,
+            zm=zm_eff,
+            z0=z0_eff,
             atm_bound_height=self.atm_bound_height,
         )
 
@@ -187,20 +259,9 @@ class FFPModel(BaseFootprintModel):
         self.ny = int(ny)
         self.rs = self._validate_rs(rs)
 
-        # Validate physical parameters
-        if crop_height < 0:
-            raise ValueError("crop_height must be positive")
-        if atm_bound_height <= 10:
-            raise ValueError("atm_bound_height must be > 10m")
-        if inst_height <= crop_height:
-            raise ValueError("inst_height must be greater than crop_height")
-
-        self.crop_height = crop_height
-        self.atm_bound_height = atm_bound_height
-        self.inst_height = inst_height
-
         self.smooth_data = bool(smooth_data)
         self.crop = bool(crop)
+        self.rslayer = bool(rslayer)
 
         # Initialize model parameters (will be updated based on stability)
         self.initialize_model_parameters()
@@ -249,7 +310,7 @@ class FFPModel(BaseFootprintModel):
         missing_cols = [
             col
             for col in self.REQUIRED_COLUMNS
-            if col not in map(str.lower, df1.columns)
+            if col not in df1.columns
         ]
         if missing_cols:
             raise ValueError(
@@ -407,10 +468,7 @@ class FFPModel(BaseFootprintModel):
             
             exp_arg = -c / safe_denominator
             exp_arg = xr.where(mask, exp_arg, -700)
-            
-            # Clip to safe range
             exp_arg = xr.where(exp_arg > -700, exp_arg, -700)
-            exp_arg = xr.where(exp_arg < 100, exp_arg, 100)
             
             # Calculate power term
             power_term = xr.where(
@@ -444,83 +502,75 @@ class FFPModel(BaseFootprintModel):
             self.logger.error(traceback.format_exc())
             raise
 
-    def get_source_area_contour(self, r, x_ru, x_rd, y_r):
+    def get_source_area_contour(self, r):
         """
-        Generate a contour dataset for a given source area.
+        Compute the source area contour threshold for fraction r of the climatological
+        footprint, operating directly on the pre-computed fclim_2d grid.
 
         Parameters
         ----------
         r : float
-            Relative contribution (0 < r < 1).
-        x_ru : float
-            Upwind distance.
-        x_rd : float
-            Downwind distance.
-        y_r : float
-            Crosswind extent.
+            Relative contribution (0 < r < 1), e.g. 0.8 for the 80 % footprint.
 
         Returns
         -------
         xarray.Dataset
-            Contour dataset with coordinates and footprint values.
+            Dataset containing:
+            - ``contour_level``: the fclim_2d value that encloses fraction *r*
+              of the total flux (use this as the ``levels`` argument to
+              ``ax.contour``).
+            - ``x``, ``y``: the domain coordinate arrays.
+            - ``f``: the full fclim_2d climatology grid.
+
+        Raises
+        ------
+        RuntimeError
+            If fclim_2d has not been computed yet (call ``run()`` first).
         """
-        # Get scalar values
-        x_rd_val = self.get_scalar_value(x_rd)
-        x_ru_val = self.get_scalar_value(x_ru)
-        y_r_val = self.get_scalar_value(y_r)
+        if self.fclim_2d is None or float(self.fclim_2d.max()) < 1e-10:
+            raise RuntimeError(
+                "fclim_2d is zero or not yet computed — call run() or "
+                "calc_xr_footprint() before get_source_area_contour()."
+            )
 
-        # Create distance arrays with unique, evenly spaced coordinates
-        x = np.linspace(x_rd_val, x_ru_val, self.nx)
-        y = np.linspace(-y_r_val, y_r_val, self.ny)
+        # Flatten and sort grid values in descending order
+        vals = self.fclim_2d.values.flatten()
+        sorted_vals = np.sort(vals)[::-1]
 
-        # Ensure coordinates are unique by adding small offset where needed
-        eps = np.finfo(float).eps  # Smallest possible float value
-        x_unique = x + np.arange(len(x)) * eps
-        y_unique = y + np.arange(len(y)) * eps
+        # Cumulative sum weighted by cell area; should reach ~1 for a normalised grid
+        cumsum = np.cumsum(sorted_vals) * self.dx * self.dy
 
-        # Create grid
-        xx, yy = np.meshgrid(x_unique, y_unique)
+        # Find the threshold value where the cumulative sum first reaches r
+        idx = np.searchsorted(cumsum, r)
+        if idx >= len(sorted_vals):
+            idx = len(sorted_vals) - 1
+        contour_level = float(sorted_vals[idx])
 
-        # Calculate polar coordinates
-        rho = np.sqrt(xx**2 + yy**2)
-        theta = np.arctan2(yy, xx)
-
-        # Get mean wind direction
-        wind_dir_mean = self.get_scalar_value(self.ds["wind_dir"])
-        rotated_theta = theta - (wind_dir_mean * np.pi / 180.0)
-
-        # Calculate footprint components using mean values
-        x_star = self.calc_scaled_x(rho)
-        sigma_y = self.calc_crosswind_spread(rho)
-        f_y = self.calc_crosswind_integrated_footprint(x_star)
-
-        # Calculate 2D footprint
-        f_2d = (
-            f_y / (np.sqrt(2 * np.pi) * sigma_y) * np.exp(-(yy**2) / (2.0 * sigma_y**2))
-        )
-
-        # Calculate contour level
-        total_flux = np.sum(f_2d) * self.dx * self.dy
-        sorted_f = np.sort(f_2d.flatten())[::-1]
-        cumsum_f = np.cumsum(sorted_f) * self.dx * self.dy
-        idx = np.searchsorted(cumsum_f / total_flux, r)
-        if idx >= len(sorted_f):
-            idx = len(sorted_f) - 1
-        contour_level = sorted_f[idx]
-
-        # Create output dataset with unique coordinates
         return xr.Dataset(
             {
                 "contour_level": xr.DataArray(contour_level),
-                "x": xr.DataArray(x_unique, dims=["x"]),
-                "y": xr.DataArray(y_unique, dims=["y"]),
-                "f": xr.DataArray(f_2d, dims=["y", "x"]),
+                "x": xr.DataArray(self.x, dims=["x"]),
+                "y": xr.DataArray(self.y, dims=["y"]),
+                "f": self.fclim_2d,
             }
         )
 
     def calc_scaled_x(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
         """
         Calculate the scaled distance X* based on wind and height parameters.
+
+        Implements Eq. 7 of Kljun et al. (2015):
+
+        .. math::
+
+            X^* = \\frac{x}{z_m}\\left(1 - \\frac{z_m}{h}\\right)
+                  \\left[\\ln\\frac{z_m}{z_0} - \\psi_M\\right]^{-1}
+
+        i.e. ``X* = x/zm * (1 - zm/h) / Pi_4`` with
+        ``Pi_4 = ln(zm/z0) - psi_M = u(zm)/(u* k)`` (Eqs. 6/7). This is the
+        same scaled<->real conversion used in :meth:`calc_xr_footprint`, so the
+        auxiliary source-area contour helpers stay consistent with the main
+        climatology path.
 
         Parameters
         ----------
@@ -535,13 +585,13 @@ class FFPModel(BaseFootprintModel):
         # Get mean values
         zm_mean = float(self.ds["zm"].mean())
         h_mean = float(self.ds["h"].mean())
-        u_zm_mean = float(self.ds["umean"].mean())
-        ustar_mean = float(self.ds["ustar"].mean())
+
+        # Pi_4 = ln(zm/z0) - psi_M (Eq. 7); 1/Pi_4 maps real -> scaled distance.
+        # calc_pi_4() returns the full Pi_4 (including the stability correction).
+        pi4_mean = float(self.calc_pi_4().mean())
 
         # Calculate scaling
-        result = (
-            x / zm_mean * (1 - zm_mean / h_mean) * (ustar_mean / (u_zm_mean * self.k))
-        )
+        result = x / zm_mean * (1 - zm_mean / h_mean) / pi4_mean
 
         return result
 
@@ -653,27 +703,30 @@ class FFPModel(BaseFootprintModel):
 
 
     def prep_df_fields(
-        self, crop_height: float, inst_height: float, atm_bound_height: float
+        self,
+        zm: Union[float, "pd.Series"],
+        z0: float,
+        atm_bound_height: float,
     ):
         """
         Prepare and normalize input DataFrame fields for footprint calculation.
 
         Parameters
         ----------
-        crop_height : float
-            Vegetation height.
-        inst_height : float
-            Instrument height.
+        zm : float or pd.Series
+            Effective measurement height above displacement height (m). A Series
+            aligned with the DataFrame index allows per-timestep values, e.g. when
+            the instrument was repositioned during the season.
+        z0 : float
+            Aerodynamic roughness length (m).
         atm_bound_height : float
-            Atmospheric boundary layer height.
+            Atmospheric boundary layer height (m).
         """
-        # Calculate displacement height
-        d_h = 10 ** (0.979 * np.log10(crop_height) - 0.154)
-
-        # Add derived fields
-        self.df["zm"] = inst_height - d_h  # measurement height above displacement
-        self.df["h_c"] = crop_height
-        self.df["z0"] = crop_height * 0.123  # roughness length
+        if isinstance(zm, pd.Series):
+            self.df["zm"] = zm.reindex(self.df.index)
+        else:
+            self.df["zm"] = zm
+        self.df["z0"] = z0
         self.df["h"] = atm_bound_height
 
         # Apply validity checks
@@ -694,9 +747,10 @@ class FFPModel(BaseFootprintModel):
 
         # Log RSL statistics
         mean_z_star = self.df["z_star"].mean()
+        mean_zm = self.df["zm"].mean()
         self.logger.info(
             f"Mean RSL height (z*): {mean_z_star:.1f}m, "
-            f"Measurement height: {inst_height}m"
+            f"Mean measurement height (zm): {mean_zm:.2f}m"
         )
 
     def _apply_validity_masks(self):
@@ -766,7 +820,17 @@ class FFPModel(BaseFootprintModel):
 
     def handle_stability_regimes(self):
         """
-        Classify stability regimes and assign model parameters based on regime.
+        Classify stability regimes for diagnostics.
+
+        Notes
+        -----
+        Kljun et al. (2015) deliberately use a single, stability-independent
+        parameter set (a, b, c, d) for the scaled crosswind-integrated
+        footprint (Appendix A: a=1.4524, b=-1.9914, c=1.4622, d=0.1359). The
+        stability dependence enters only through the scaled distance X* and the
+        crosswind-spread scaling. Therefore this method no longer overrides the
+        universal coefficients; it only classifies regimes and records a
+        diagnostic flag.
 
         Returns
         -------
@@ -786,37 +850,6 @@ class FFPModel(BaseFootprintModel):
             stability_param < self.oln / self.ds["zm"]
         )
         regimes["strongly_stable"] = stability_param >= self.oln / self.ds["zm"]
-
-        # Regime-specific parameters from Appendix A
-        params = {
-            "unstable": {"a": 2.930, "b": -2.285, "c": 2.127, "d": -0.107},
-            "neutral": {"a": 1.472, "b": -1.996, "c": 1.480, "d": 0.169},
-            "stable": {"a": 1.472, "b": -1.996, "c": 1.480, "d": 0.169},
-        }
-
-        # Smooth transitions
-        transition_zone = 0.1
-
-        def transition_weight(param, center, width):
-            """Calculate smooth transition weight."""
-            return 0.5 * (1 + np.tanh((param - center) / width))
-
-        neutral_to_unstable = transition_weight(stability_param, -0.1, transition_zone)
-        neutral_to_stable = transition_weight(stability_param, 0.1, transition_zone)
-
-        # Apply smooth parameter transitions - results have shape (time,)
-        for param in ["a", "b", "c", "d"]:
-            time_varying = (
-                neutral_to_unstable * params["unstable"][param]
-                + (1 - neutral_to_unstable) * (1 - neutral_to_stable) * params["neutral"][param]
-                + neutral_to_stable * params["stable"][param]
-            )
-            
-            # Store as DataArray with time dimension
-            setattr(self, param, time_varying)
-            
-            self.logger.debug(f"Parameter {param}: shape={time_varying.shape}, "
-                            f"range=[{float(time_varying.min()):.3f}, {float(time_varying.max()):.3f}]")
 
         # Log regime statistics
         for regime in regimes:
@@ -848,62 +881,68 @@ class FFPModel(BaseFootprintModel):
 
         Returns
         -------
-        xr.Dataset: Dataset containing boolean masks for:
+        xr.Dataset: Dataset containing per-timestep boolean masks for:
         - height_valid: True where 20z₀ < zm < he
         - stability_valid: True where -15.5 ≤ zm/L
         - turbulence_valid: True where u* > 0.1 and σv > 0
         - rsl_valid: True where measurement height above RSL
-        Combined validity is stored in self.valid_footprint
+        Combined per-timestep validity is stored in self.valid_footprint (dims: time).
         """
-        validity_mask = xr.Dataset()
-
-        # Height validity: 20z₀ < zm < he
-        validity_mask["height_valid"] = xr.where(
-            (self.ds["zm"] > 20 * self.ds["z0"]) & (self.ds["zm"] < 0.8 * self.ds["h"]),
-            True,
-            False,
+        # Per-timestep boolean validity flags (dims: time)
+        height_valid = (
+            (self.ds["zm"] > 20 * self.ds["z0"]) & (self.ds["zm"] < 0.8 * self.ds["h"])
         )
+        stability_valid = self.ds["zm"] / self.ds["ol"] >= -15.5
+        turbulence_valid = (self.ds["ustar"] > 0.1) & (self.ds["sigmav"] > 0)
 
-        # Stability validity: -15.5 ≤ zm/L
-        validity_mask["stability_valid"] = xr.where(
-            self.ds["zm"] / self.ds["ol"] >= -15.5, True, False
-        )
+        # RSL validity was pre-computed in prep_df_fields() and stored in self.ds
+        rsl_valid = self.ds["rsl_valid"].astype(bool)
 
-        # Turbulence validity
-        validity_mask["turbulence_valid"] = xr.where(
-            (self.ds["ustar"] > 0.1) & (self.ds["sigmav"] > 0), True, False
-        )
+        # Combined per-timestep validity mask (dims: time)
+        self.valid_footprint = height_valid & stability_valid & turbulence_valid & rsl_valid
 
-        # Combined validity
-        self.valid_footprint = validity_mask.all()
+        n_invalid = int((~self.valid_footprint).sum())
+        if n_invalid > 0:
+            self.logger.warning(
+                f"{n_invalid}/{self.ts_len} timesteps excluded: outside "
+                f"Kljun et al. (2015) validity bounds (Eq. 27)"
+            )
 
-        # Add RSL-specific checks
-        rsl_valid = self.check_rsl_validity()
-        validity_mask["rsl_valid"] = rsl_valid
-
-        # Update combined validity to include RSL
-        self.valid_footprint = self.valid_footprint & rsl_valid
-
+        validity_mask = xr.Dataset({
+            "height_valid": height_valid,
+            "stability_valid": stability_valid,
+            "turbulence_valid": turbulence_valid,
+            "rsl_valid": rsl_valid,
+        })
         return validity_mask
 
     def calc_pi_4(self):
         """
-        Calculate Π4 with comprehensive stability function implementation including neutral conditions.
+        Calculate the dimensionless wind-speed group
+        Π4 = u(zm)/(u* k) = ln(zm/z0) - ψM, following Kljun et al. (2015).
+
+        Π4 is the scaled<->real conversion factor for the along-wind distance
+        (Eq. 6/7) and must be positive. Callers use the return value of this
+        method *directly* as Π4 (do **not** subtract it from ``ln(zm/z0)``
+        again).
 
         Returns
         -------
         xr.DataArray
-        Calculated Π4 values with proper neutral condition handling
+            Π4 = ln(zm/z0) - ψM. In neutral conditions ψM = 0 so
+            Π4 = ln(zm/z0).
         """
         stability_param = self.ds["zm"] / self.ds["ol"]
 
         # Initialize psi_m array
         psi_m = xr.zeros_like(stability_param)
 
-        # Determine stability regimes
-        stable_mask = self.ds["ol"] > 0
-        unstable_mask = self.ds["ol"] < -self.oln
-        neutral_mask = (self.ds["ol"] <= 0) & (self.ds["ol"] >= -self.oln)
+        # Determine stability regimes.
+        # Stable: 0 < L < oln. Unstable: L < 0.
+        # Near-neutral (|L| >= oln) keeps psi_m = 0.
+        stable_mask = (self.ds["ol"] > 0) & (self.ds["ol"] < self.oln)
+        unstable_mask = self.ds["ol"] < 0
+        neutral_mask = ~(stable_mask | unstable_mask)
 
         # Calculate psi_m for each stability regime
         # Stable conditions
@@ -950,7 +989,7 @@ class FFPModel(BaseFootprintModel):
 
     def apply_paper_smoothing(self):
         """
-        Apply enhanced 3x3 smoothing from Kljun et al. paper with mass conservation.
+        Apply 3x3 smoothing from Kljun et al. paper with mass conservation.
         """
         self.logger.debug("Starting paper smoothing...")
 
@@ -975,10 +1014,11 @@ class FFPModel(BaseFootprintModel):
             smoothed = original.copy()
             for i in range(2):
                 smoothed_values = signal.convolve2d(
-                    smoothed.values, 
-                    skernel, 
-                    mode='same', 
-                    boundary='wrap'  # Changed from 'fill' to 'wrap' for better edges
+                    smoothed.values,
+                    skernel,
+                    mode='same',
+                    boundary='fill',  # Zero-pad edges; 'wrap' would bleed opposite-edge mass
+                    fillvalue=0
                 )
                 smoothed = xr.DataArray(
                     smoothed_values,
@@ -986,22 +1026,6 @@ class FFPModel(BaseFootprintModel):
                     coords=smoothed.coords
                 )
                 self.logger.debug(f"Smoothing iteration {i + 1} complete")
-
-            # Additional Gaussian smoothing for visual quality (optional, scales with resolution)
-            if self.dx <= 5.0:  # Only for fine grids
-                sigma = 0.5  # Very light additional smoothing
-                smoothed_values = gaussian_filter(
-                    smoothed.values,
-                    sigma=sigma,
-                    mode='constant',
-                    cval=0
-                )
-                smoothed = xr.DataArray(
-                    smoothed_values,
-                    dims=smoothed.dims,
-                    coords=smoothed.coords
-                )
-                self.logger.debug(f"Applied additional Gaussian smoothing (sigma={sigma})")
 
             # CRITICAL: Preserve total mass
             smoothed_sum = float(smoothed.sum())
@@ -1143,32 +1167,56 @@ class FFPModel(BaseFootprintModel):
             
             # Now broadcast works correctly: (time, x, y) - (time,) -> (time, x, y)
             self.rotated_theta = theta_3d - wind_dir_rad
-            
+
             self.logger.debug(f"rotated_theta dims: {self.rotated_theta.dims}, shape: {self.rotated_theta.shape}")
 
-            # Step 3: Calculate stability function
-            psi_f = self.calc_pi_4()
-            self.logger.debug(f"psi_f dims: {psi_f.dims}, shape: {psi_f.shape}")
+            # Pre-compute RSL corrections (sigma_y, x_min) when rslayer is enabled.
+            # Must happen after rotated_theta is set; calc_scaled_distance_rsl() uses it.
+            if self.rslayer:
+                self.apply_rsl_corrections()
+
+            # Step 3: Dimensionless wind-speed group Pi_4 = ln(zm/z0) - psi_M
+            # (Eq. 6/7). This is the scaled->real conversion factor and must be
+            # > 0. calc_pi_4() already returns the full Pi_4.
+            pi4 = self.calc_pi_4()
+            self.logger.debug(f"pi4 dims: {pi4.dims}, shape: {pi4.shape}")
+            valid_profile = pi4 > 0
 
             # Step 4: Calculate scaled distance - all should be (time, x, y)
-            xstar_ci = (
-                rho_3d * np.cos(self.rotated_theta)
-                / self.ds["zm"]
-                * (1.0 - self.ds["zm"] / self.ds["h"])
-                / (np.log(self.ds["zm"] / self.ds["z0"]) - psi_f)
-            )
-            
+            if self.rslayer:
+                # RSL-corrected path: blind-zone adjustment via self.x_min (set above)
+                xstar_ci = xr.where(valid_profile, self.calc_scaled_distance_rsl(), 0.0)
+            else:
+                xstar_ci = xr.where(
+                    valid_profile,
+                    rho_3d * np.cos(self.rotated_theta)
+                    / self.ds["zm"]
+                    * (1.0 - self.ds["zm"] / self.ds["h"])
+                    / pi4,
+                    0.0,
+                )
+
             self.logger.debug(f"xstar_ci dims: {xstar_ci.dims}, shape: {xstar_ci.shape}")
             self.logger.debug(
                 f"xstar_ci range: {float(xstar_ci.min()):.2e} to {float(xstar_ci.max()):.2e}"
             )
 
-            # Step 5: Calculate footprint components
-            f_ci = self.calc_crosswind_integrated_footprint(xstar_ci)
+            # Step 5: Calculate footprint components.
+            # calc_crosswind_integrated_footprint returns the *scaled* Fy_hat*;
+            # convert it to the real-scale crosswind-integrated footprint Fy
+            # via the Jacobian (1/zm)(1 - zm/h)/Pi_4 (Eq. 6/7). Without this
+            # factor the 2D footprint carries the wrong units and does not
+            # integrate to unity.
+            f_ci_star = self.calc_crosswind_integrated_footprint(xstar_ci)
+            f_ci = f_ci_star / self.ds["zm"] * (1.0 - self.ds["zm"] / self.ds["h"]) / pi4
             self.logger.debug(f"f_ci dims: {f_ci.dims}, shape: {f_ci.shape}")
             self._log_array_stats("crosswind_integrated_footprint", f_ci)
 
-            sigy = self.calc_crosswind_spread_xr(xstar_ci)
+            if self.rslayer and self.sigma_y is not None:
+                # Use RSL-corrected crosswind spread from apply_rsl_corrections()
+                sigy = self.sigma_y
+            else:
+                sigy = self.calc_crosswind_spread(xstar_ci)
             self.logger.debug(f"sigy dims: {sigy.dims}, shape: {sigy.shape}")
             self._log_array_stats("crosswind_dispersion", sigy)
 
@@ -1185,10 +1233,20 @@ class FFPModel(BaseFootprintModel):
             self.logger.debug(f"f_2d dims: {self.f_2d.dims}, shape: {self.f_2d.shape}")
             self._log_array_stats("2d_footprint", self.f_2d)
 
+            # Zero out timesteps outside the Kljun et al. (2015) validity bounds
+            # (Eq. 27) so they do not contribute weight to the climatology.
+            self.f_2d = xr.where(self.valid_footprint, self.f_2d, 0.0)
+
             # Step 7: Calculate climatology - sum over TIME dimension
             footprint_sum = self.f_2d.sum(dim="time")
             self.logger.debug(f"footprint_sum dims: {footprint_sum.dims}, shape: {footprint_sum.shape}")
-            
+
+            # Count only timesteps that produced a non-zero footprint.
+            # Invalid timesteps (sigy <= 0) are zeroed out and must not count
+            # in the denominator, otherwise the climatology is underestimated.
+            valid_count = int((self.f_2d.sum(dim=("x", "y")) > 0).sum())
+            self.logger.debug(f"Valid timesteps: {valid_count} / {self.ts_len}")
+
             total_sum = float(footprint_sum.sum())
             self.logger.debug(f"Total sum before normalization: {total_sum:.2e}")
 
@@ -1196,8 +1254,8 @@ class FFPModel(BaseFootprintModel):
                 self.logger.warning("Near-zero sum, using uniform distribution")
                 self.fclim_2d = xr.ones_like(self.rho) / (len(self.x) * len(self.y))
             else:
-                # Normalize: divide by number of timesteps
-                self.fclim_2d = footprint_sum / self.ts_len
+                # Normalize: divide by number of valid timesteps only
+                self.fclim_2d = footprint_sum / max(valid_count, 1)
                 
                 # CRITICAL: Verify normalization
                 integrated_flux = float(self.fclim_2d.sum() * self.dx * self.dy)
@@ -1268,13 +1326,13 @@ class FFPModel(BaseFootprintModel):
             Corrected scaled distance.
         """
 
-        # Basic scaled distance calculation
+        # Basic scaled distance calculation (calc_pi_4 returns Pi_4 directly)
         xstar_base = (
             self.rho
             * np.cos(self.rotated_theta)
             / self.ds["zm"]
             * (1.0 - self.ds["zm"] / self.ds["h"])
-            / (np.log(self.ds["zm"] / self.ds["z0"]) - self.calc_pi_4())
+            / self.calc_pi_4()
         )
 
         # Apply RSL correction where needed
@@ -1314,148 +1372,10 @@ class FFPModel(BaseFootprintModel):
         # Π3 = (h - zm)/h = 1 - zm/h
         pi_3 = 1 - self.ds["zm"] / self.ds["h"]
 
-        # Π4 = u(zm)/(u*k) = ln(zm/z0) - ψM
+        # Π4 = u(zm)/(u*k) = ln(zm/z0) - ψM   (calc_pi_4 already returns Π4)
         pi_4 = self.calc_pi_4()
 
         return pi_1, pi_2, pi_3, pi_4
-
-    def calc_crosswind_dispersion(self, xstar_ci_dummy, px):
-        """
-        Compute dimensionless crosswind dispersion with safety checks.
-
-        Parameters
-        ----------
-        xstar_ci_dummy : xarray.DataArray
-            Scaled distance.
-        px : bool
-            Condition flag.
-
-        Returns
-        -------
-        xarray.DataArray
-            Dimensionless crosswind dispersion.
-        """
-        try:
-            # Ensure positive input for sqrt
-            x_abs = np.abs(xstar_ci_dummy)
-            denom = np.maximum(1.0 + self.cc * x_abs, 1e-10)
-
-            sqrt_term = np.clip(
-                self.bc * x_abs**2 / denom,
-                0.0,  # Ensure non-negative input to sqrt
-                1e6,  # Upper limit to prevent overflow
-            )
-
-            result = xr.where(px, self.ac * np.sqrt(sqrt_term), 0.0)
-
-            # Safety check for invalid values
-            result = xr.where(np.isfinite(result), result, 0.0)
-
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Error in crosswind dispersion calculation: {str(e)}")
-            return xr.zeros_like(xstar_ci_dummy)
-    
-
-    def scale_crosswind_dispersion(self, sigystar_dummy):
-        """
-        Scale the dimensionless crosswind dispersion σy* to real-scale σy.
-
-        Implements the real-scale conversion described in Equations 12-13 and surrounding text
-        of Kljun et al. (2015):
-
-        σy = σy*/(scale_const) * zm * σv/u*
-
-        where:
-        - σy* is dimensionless crosswind dispersion
-        - scale_const is stability-dependent scaling factor:
-            For L ≤ 0 (convective): scale_const = min(1, 10⁻⁵|zm/L|⁻¹ + 0.80)
-            For L > 0 (stable): scale_const = min(1, 10⁻⁵|zm/L|⁻¹ + 0.55)
-        - zm is measurement height
-        - σv is standard deviation of lateral velocity fluctuations
-        - u* is friction velocity
-
-        Args:
-            sigystar_dummy (xarray.DataArray): Dimensionless crosswind dispersion σy*
-
-        Returns:
-            xarray.DataArray: Real-scale crosswind dispersion σy [m]
-
-        Note:
-            Includes numerical safety checks to prevent division by zero and handle
-            potential non-finite values in intermediate calculations.
-        """
-        try:
-            self.logger.debug("Starting crosswind dispersion scaling...")
-            self.logger.debug(f"Input σy* shape: {sigystar_dummy.shape}")
-            self.logger.debug(
-                f"σy* range: [{float(sigystar_dummy.min()):.2e}, {float(sigystar_dummy.max()):.2e}]"
-            )
-
-            # Calculate stability parameter
-            stability_param = self.ds["zm"] / self.ds["ol"]
-            self.logger.debug(
-                f"Stability parameter range: [{float(stability_param.min()):.2e}, {float(stability_param.max()):.2e}]"
-            )
-
-            # Calculate stability-dependent scaling constant with safety
-            scale_const = xr.where(
-                self.ds["ol"] <= 0,
-                1e-5 * np.maximum(np.abs(stability_param), 1e-10) ** (-1)
-                + 0.80,  # Convective
-                1e-5 * np.maximum(np.abs(stability_param), 1e-10) ** (-1)
-                + 0.55,  # Stable
-            )
-
-            self.logger.debug(
-                f"Scale constant range: [{float(scale_const.min()):.2e}, {float(scale_const.max()):.2e}]"
-            )
-
-            # Limit scaling constant
-            scale_const = xr.where(
-                np.isfinite(scale_const), np.minimum(scale_const, 1.0), 1.0
-            )
-
-            self.logger.debug("Applied upper limit of 1.0 to scale constant")
-            self.logger.debug(
-                f"Final scale constant range: [{float(scale_const.min()):.2e}, {float(scale_const.max()):.2e}]"
-            )
-
-            # Calculate scaled dispersion with safety checks
-            result = (
-                sigystar_dummy
-                / np.maximum(scale_const, 1e-10)
-                * self.ds["zm"]
-                * np.maximum(self.ds["sigmav"], 1e-10)
-                / np.maximum(self.ds["ustar"], 1e-10)
-            )
-
-            # Log intermediate values
-            self.logger.debug(
-                f"zm range: [{float(self.ds['zm'].min()):.2e}, {float(self.ds['zm'].max()):.2e}]"
-            )
-            self.logger.debug(
-                f"sigmav range: [{float(self.ds['sigmav'].min()):.2e}, {float(self.ds['sigmav'].max()):.2e}]"
-            )
-            self.logger.debug(
-                f"ustar range: [{float(self.ds['ustar'].min()):.2e}, {float(self.ds['ustar'].max()):.2e}]"
-            )
-
-            # Final safety check
-            result = xr.where(np.isfinite(result), result, 0.0)
-
-            self.logger.debug(
-                f"Final σy range: [{float(result.min()):.2e}, {float(result.max()):.2e}]"
-            )
-            self.logger.info("Crosswind dispersion scaling completed successfully")
-
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Error in scaling crosswind dispersion: {str(e)}")
-            self.logger.debug(f"Detailed error trace:", exc_info=True)
-            raise
 
     def calc_2d_footprint(self, f_ci_dummy, sigy_dummy):
         """
@@ -1488,35 +1408,28 @@ class FFPModel(BaseFootprintModel):
 
     def calculate_source_areas(self):
         """
-        Compute source areas for all specified relative contributions.
+        Compute source area contour datasets for all specified relative contributions,
+        derived directly from the fclim_2d climatology grid.
+
+        Must be called after ``run()`` or ``calc_xr_footprint()``.
 
         Returns
         -------
         dict
-            Dictionary of contour datasets by contribution level.
+            Mapping of contribution label (e.g. ``'r_80'``) to the
+            xarray.Dataset returned by :meth:`get_source_area_contour`.
+
+        Raises
+        ------
+        RuntimeError
+            If fclim_2d has not been computed yet.
         """
         source_areas = {}
-
-        # Calculate for each requested relative contribution
         for r in self.rs:
             if not 0.1 <= r <= 0.9:
                 self.logger.warning(f"Skipping r={r}, outside valid range 0.1-0.9")
                 continue
-
-            # Calculate extents
-            x_r = self.calc_crosswind_integrated_extent(r)
-            x_ru, x_rd = self.calc_peak_based_limits(r)
-            y_r = self.calc_crosswind_extent(r, x_ru, x_rd)
-
-            # Store results as xarray objects
-            source_areas[f"r_{int(r * 100)}"] = {
-                "x_r": xr.DataArray(x_r, name="extent"),
-                "x_ru": xr.DataArray(x_ru, name="upwind_extent"),
-                "x_rd": xr.DataArray(x_rd, name="downwind_extent"),
-                "y_r": xr.DataArray(y_r, name="crosswind_extent"),
-                "contour": self.get_source_area_contour(r, x_ru, x_rd, y_r),
-            }
-
+            source_areas[f"r_{int(r * 100)}"] = self.get_source_area_contour(r)
         return source_areas
 
     def calc_crosswind_integrated_extent(self, r: float) -> xr.DataArray:
@@ -1530,19 +1443,15 @@ class FFPModel(BaseFootprintModel):
         Returns:
             xr.DataArray: Distance from receptor containing fraction r of footprint
         """
-        # Parameters from Eq. 17
-        c = 1.462
-        d = 0.136
-
         # Calculate scaled extent from Eq. 24
-        x_star_r = -c / np.log(r) + d
+        x_star_r = -self.c / np.log(r) + self.d
 
-        # Convert to real scale using Eq. 25
+        # Convert to real scale using Eq. 25 (calc_pi_4 returns Pi_4 directly)
         x_r = (
             x_star_r
             * self.ds["zm"]
             * (1 - self.ds["zm"] / self.ds["h"]) ** -1
-            * (np.log(self.ds["zm"] / self.ds["z0"]) - self.calc_pi_4())
+            * self.calc_pi_4()
         )
 
         return x_r
@@ -1619,9 +1528,10 @@ class FFPModel(BaseFootprintModel):
             x_max = x_star_max * zm * (1 - zm / h) ** -1 * u_zm / (ustar * k)
 
         elif z0 is not None:
-            # Use Eq. 22 with roughness length and stability correction
-            psi_m = self.calc_pi_4()
-            x_max = x_star_max * zm * (1 - zm / h) ** -1 * (np.log(zm / z0) - psi_m)
+            # Use Eq. 22 with roughness length and stability correction.
+            # calc_pi_4() already returns Pi_4 = ln(zm/z0) - psi_M.
+            pi4 = self.calc_pi_4()
+            x_max = x_star_max * zm * (1 - zm / h) ** -1 * pi4
 
         else:
             raise ValueError("Must provide either (u_zm, ustar) or z0")
@@ -1660,7 +1570,7 @@ class FFPModel(BaseFootprintModel):
             x_star
             * self.ds["zm"]
             * (1 - self.ds["zm"] / self.ds["h"]) ** -1
-            * (np.log(self.ds["zm"] / self.ds["z0"]) - self.calc_pi_4())
+            * self.calc_pi_4()  # calc_pi_4 returns Pi_4 directly
         )
 
     def calc_crosswind_extent(
@@ -1677,11 +1587,15 @@ class FFPModel(BaseFootprintModel):
         Returns:
             xr.DataArray: Crosswind extent at each distance
         """
-        # Calculate sigma_y at peak location
+        # Calculate sigma_y at peak location using per-timestep parameters
         x_peak = self.calc_real_footprint_peak(
             self.ds["zm"], self.ds["h"], self.ds["umean"], self.ds["ustar"]
         )
-        sigma_y_peak = self.calc_crosswind_spread(x_peak)
+        pi4 = self.calc_pi_4()
+        x_star_peak = (
+            x_peak / self.ds["zm"] * (1.0 - self.ds["zm"] / self.ds["h"]) / pi4
+        )
+        sigma_y_peak = self.calc_crosswind_spread(x_star_peak)
 
         # Scale crosswind extent based on distance from peak
         def scale_sigma(x_dist):
@@ -1691,55 +1605,10 @@ class FFPModel(BaseFootprintModel):
 
         return y_r
 
-    def calc_crosswind_spread_xr(self, x_star):
-        """
-        Calculate the standard deviation of crosswind spread σy.
-
-        Implements Equations 18-19 from Kljun et al. (2015):
-        ``σy* = ac * sqrt((bc * |X*|^2)/(1 + cc|X*|))``
-
-        Where ac=2.17, bc=1.66, cc=20.0 (Equation 19)
-
-        Real-scale σy is then obtained through:
-        ``σy = σy*/(scale_const) * zm * σv/u*``
-
-        Where scale_const depends on stability (Eq. not numbered in paper):
-        - For unstable: 1e-5|zm/L|^(-1) + 0.80
-        - For stable: 1e-5|zm/L|^(-1) + 0.55
-
-        Args:
-            x_star (float or array): Distance from receptor [m]
-
-        Returns:
-            Standard deviation of crosswind spread [m]
-        """
-        try:
-            # Calculate scaled crosswind spread σy* using Eq. 18
-            sigma_y_star = self.ac * np.sqrt(
-                (self.bc * x_star**2) / (1 + self.cc * x_star)
-            )
-
-            scale_const = self.scale_crosswind_dispersion(sigma_y_star)
-
-            # Convert to real scale
-            sigma_y = (
-                sigma_y_star
-                / scale_const
-                * self.ds["zm"]
-                * self.ds["sigmav"]
-                / self.ds["ustar"]
-            )
-
-            return sigma_y
-
-        except Exception as e:
-            self.logger.error(f"Error calculating crosswind spread: {str(e)}")
-            raise
-
     def calc_crosswind_spread(
-        self, x: Union[float, np.ndarray]
-    ) -> Union[float, np.ndarray]:
-        """
+        self, x: Union[float, np.ndarray, "xr.DataArray"]
+    ) -> Union[float, np.ndarray, "xr.DataArray"]:
+        r"""
         Calculate the standard deviation of cross-wind spread :math:`\sigma_y`.
 
         Implements Eqs. 18-19 from *Kljun et al., 2015*:
@@ -1752,55 +1621,67 @@ class FFPModel(BaseFootprintModel):
             \sigma_y   = \frac{\sigma_y^*}{\text{scale\_const}}
                         \; z_m \; \sigma_v / u_*
 
-        where
+        where :math:`a_c = 2.17`, :math:`b_c = 1.66`, :math:`c_c = 20.0`, and
+        ``scale_const`` depends on stability (see paper).
 
-        * :math:`a_c = 2.17`
-        * :math:`b_c = 1.66`
-        * :math:`c_c = 20.0`
-        * ``scale_const`` depends on stability (see paper).
+        The method dispatches on the type of *x*:
+
+        * **xarray DataArray** – *x* is treated as the pre-scaled dimensionless
+          distance :math:`X^*`.  Per-timestep stability parameters from
+          ``self.ds`` are used, and an ``xr.DataArray`` is returned.  Use this
+          path for climatology calculations where time-varying parameters matter.
+        * **numpy array / float** – *x* is treated as the raw upwind distance
+          [m].  ``calc_scaled_x`` converts it to :math:`X^*` using time-mean
+          parameters, and a numpy array / float is returned.  Use this path for
+          single-footprint visualisation where a representative spread is needed.
 
         Parameters
         ----------
-        x : float or ndarray
-            Up-wind distance from the receptor [m].
+        x : float, ndarray, or xr.DataArray
+            For numpy/float: raw upwind distance [m].
+            For DataArray: pre-scaled dimensionless distance :math:`X^*`.
 
         Returns
         -------
-        float or ndarray
+        float, ndarray, or xr.DataArray
             Cross-wind spread :math:`\sigma_y` [m].
         """
+        if isinstance(x, xr.DataArray):
+            # xarray path: x is pre-scaled X*, use per-timestep parameters
+            try:
+                sigma_y_star = self.ac * np.sqrt(
+                    (self.bc * np.abs(x) ** 2) / (1 + self.cc * np.abs(x))
+                )
+                # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
+                scale_const = xr.where(self.ds["ol"] <= 0, 0.80, 0.55)
+                return (
+                    sigma_y_star
+                    / scale_const
+                    * self.ds["zm"]
+                    * self.ds["sigmav"]
+                    / self.ds["ustar"]
+                )
+            except Exception as e:
+                self.logger.error(f"Error calculating crosswind spread: {str(e)}")
+                raise
+        else:
+            # Numpy path: x is raw upwind distance, scale with time-mean parameters
+            zm_mean = float(self.ds["zm"].mean())
+            ol_mean = float(self.ds["ol"].mean())
+            ustar_mean = float(self.ds["ustar"].mean())
+            sigmav_mean = float(self.ds["sigmav"].mean())
 
-        # Get mean values of stability parameters for consistent calculation
-        zm_mean = float(self.ds["zm"].mean())
-        h_mean = float(self.ds["h"].mean())
-        u_zm_mean = float(self.ds["umean"].mean())
-        ustar_mean = float(self.ds["ustar"].mean())
-        sigmav_mean = float(self.ds["sigmav"].mean())
-        ol_mean = float(self.ds["ol"].mean())
+            x_star = self.calc_scaled_x(x)
+            # Use |X*| so points behind the receptor don't drive the denominator negative
+            x_star_abs = np.abs(x_star)
+            sigma_y_star = self.ac * np.sqrt(
+                (self.bc * x_star_abs**2) / (1 + self.cc * x_star_abs)
+            )
 
-        # Calculate mean stability parameter
-        stability_param_mean = zm_mean / ol_mean
+            # Kljun et al. (2015) step function: 0.80 unstable, 0.55 stable
+            scale_const = 0.80 if ol_mean <= 0 else 0.55
 
-        # Calculate scaled distance X*
-        x_star = self.calc_scaled_x(x)
-
-        # Calculate scaled crosswind spread σy* using Eq. 18
-        # Parameters from Eq. 19: ac = 2.17, bc = 1.66, cc = 20.0
-        sigma_y_star = self.ac * np.sqrt((self.bc * x_star**2) / (1 + self.cc * x_star))
-
-        # Calculate stability-dependent scaling constant
-        if stability_param_mean <= 0:  # Convective
-            scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.80
-        else:  # Stable
-            scale_const = 1e-5 * abs(stability_param_mean) ** (-1) + 0.55
-
-        # Limit scaling constant to maximum of 1.0
-        scale_const = min(scale_const, 1.0)
-
-        # Convert to real scale (Eq. 18)
-        sigma_y = sigma_y_star / scale_const * zm_mean * sigmav_mean / ustar_mean
-
-        return sigma_y
+            return sigma_y_star / scale_const * zm_mean * sigmav_mean / ustar_mean
 
     def plot_footprint(self, config=None, ax=None, show_contours=True, levels=10):
         """
@@ -1823,7 +1704,7 @@ class FFPModel(BaseFootprintModel):
 
             # Create meshgrid for plotting if needed
             if not hasattr(self, "X") or not hasattr(self, "Y"):
-                self.X, self.Y = np.meshgrid(self.x, self.y)
+                self.X, self.Y = np.meshgrid(self.x, self.y, indexing="ij")
 
             self.logger.debug(f"Domain shapes - x: {len(self.x)}, y: {len(self.y)}")
             self.logger.debug(f"Footprint climatology shape: {self.fclim_2d.shape}")
@@ -1908,6 +1789,9 @@ class FFPModel(BaseFootprintModel):
             # Perform main calculations
             self.fclim_2d = self.calc_xr_footprint()  # Now returns fclim_2d directly
 
+            # Rescale so the climatology integrates to ~1 over the domain
+            self.normalize_footprint()
+
             # Add validation checks
             if self.fclim_2d is None:
                 self.logger.error("fclim_2d is None after calculations")
@@ -1990,8 +1874,8 @@ class FFPModel(BaseFootprintModel):
         # Store parameters as attributes (NetCDF-safe)
         results.attrs.update(
             {
-                "crop_height": float(self.df["h_c"].iloc[0]),
-                "inst_height": float(self.df["zm"].iloc[0]) + float(self.df["h_c"].iloc[0]),
+                "zm": float(self.df["zm"].iloc[0]),
+                "z0": float(self.df["z0"].iloc[0]),
                 "atm_bound_height": float(self.df["h"].iloc[0]),
             }
         )

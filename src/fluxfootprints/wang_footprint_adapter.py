@@ -54,9 +54,12 @@ class WangFootprintModel(BaseFootprintModel):
         
         self.df = self._validate_input_df(self.df)
         
-        # Calculate measurement height
-        d = 10 ** (0.979 * np.log10(self.crop_height) - 0.154)
-        zm = self.inst_height - d
+        # Use directly supplied zm if available, otherwise derive from crop_height
+        if self.zm is not None:
+            zm = float(self.zm)
+        else:
+            d = 10 ** (0.979 * np.log10(self.crop_height) - 0.154)
+            zm = self.inst_height - d
         
         # Setup x domain (positive upwind)
         xmin, xmax, ymin, ymax = self.domain

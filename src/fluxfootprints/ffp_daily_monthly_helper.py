@@ -113,7 +113,10 @@ def build_climatology(
     model_type: str = "ffp",
     crop_height: float = 0.2,
     atm_bound_height: float = 2000.0,
-    inst_height: float = 2.5,
+    inst_height: Union[float, "pd.Series"] = 2.5,
+    zm: Optional[float] = None,
+    z0: Optional[float] = None,
+    roughness_fraction: float = 0.123,
     dx: float = 10.0,
     dy: float = 10.0,
     domain: Tuple[float, float, float, float] = (-1000.0, 1000.0, -1000.0, 1000.0),
@@ -131,12 +134,27 @@ def build_climatology(
     ----------
     df : pd.DataFrame
         Input DataFrame with required columns (WD, WS, USTAR, MO_LENGTH, V_SIGMA)
+    zm : float, optional
+        Effective measurement height above the zero-plane displacement (m).
+        When provided together with ``z0``, these are passed directly to the
+        model and ``crop_height`` / ``inst_height`` are not used for height
+        derivation.
+    z0 : float, optional
+        Aerodynamic roughness length (m). Must be supplied with ``zm``.
+    roughness_fraction : float, optional
+        Ratio used to derive z0 from crop_height when z0 is not supplied
+        directly: ``z0 = crop_height * roughness_fraction``.  Typical
+        values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
+        (corn).  Default is 0.123.
     crop_height : float
-        Vegetation/canopy height (m)
+        Vegetation/canopy height (m). Used to derive ``zm`` and ``z0`` when
+        those are not provided directly.
     atm_bound_height : float
         Atmospheric boundary layer height (m)
-    inst_height : float
-        Instrument measurement height (m)
+    inst_height : float or pd.Series
+        Instrument measurement height (m). Used to derive ``zm`` when not
+        provided directly. Pass a ``pd.Series`` with the same DatetimeIndex
+        as ``df`` to account for height changes during the season.
     dx, dy : float
         Grid resolution (m)
     domain : tuple
@@ -191,11 +209,18 @@ def build_climatology(
         rs=rs,
         crop_height=float(crop_height),
         atm_bound_height=float(atm_bound_height),
-        inst_height=float(inst_height),
+        inst_height=inst_height if isinstance(inst_height, pd.Series) else float(inst_height),
         smooth_data=smooth_data,
         verbosity=verbosity,
         logger=logger,
     )
+    # Pass zm/z0 only when explicitly supplied so models fall back to
+    # crop_height/inst_height derivation when the caller omits them.
+    if zm is not None:
+        common_params["zm"] = float(zm)
+    if z0 is not None:
+        common_params["z0"] = float(z0)
+    common_params["roughness_fraction"] = float(roughness_fraction)
     
     # Add model-specific parameters
     common_params.update(model_kwargs)

@@ -43,6 +43,59 @@ def test_polar_to_cartesian_dataframe_basic():
     assert out["X_Dist"].iloc[4:].isna().all()
     assert out["Y_Dist"].iloc[4:].isna().all()
 
+
+def test_polar_to_cartesian_dataframe_returns_only_new_columns():
+    """The result holds only the new X_/Y_ columns and the input is unchanged."""
+    df = pd.DataFrame({"WD": [0, 90], "Dist": [1, 1]})
+    original_columns = list(df.columns)
+
+    out = polar_to_cartesian_dataframe(df)
+
+    # Only the freshly computed coordinate columns are returned
+    assert list(out.columns) == ["X_Dist", "Y_Dist"]
+
+    # The input DataFrame is left untouched (no in-place mutation)
+    assert list(df.columns) == original_columns
+
+    # Index is preserved
+    assert out.index.equals(df.index)
+
+
+def test_polar_to_cartesian_dataframe_list_of_columns():
+    """A list of distance columns yields an X_/Y_ pair for each."""
+    df = pd.DataFrame(
+        {
+            "WD": [0, 90, 180],
+            "FETCH_90": [1, 1, 1],
+            "FETCH_40": [2, 2, 2],
+        }
+    )
+
+    out = polar_to_cartesian_dataframe(
+        df, dist_column=["FETCH_90", "FETCH_40"]
+    )
+
+    assert list(out.columns) == [
+        "X_FETCH_90",
+        "Y_FETCH_90",
+        "X_FETCH_40",
+        "Y_FETCH_40",
+    ]
+
+    # Spot-check known angles for both distance columns
+    np.testing.assert_allclose(
+        out["X_FETCH_90"], np.array([0, 1, 0], dtype=float), atol=1e-12
+    )
+    np.testing.assert_allclose(
+        out["Y_FETCH_90"], np.array([1, 0, -1], dtype=float), atol=1e-12
+    )
+    np.testing.assert_allclose(
+        out["X_FETCH_40"], np.array([0, 2, 0], dtype=float), atol=1e-12
+    )
+    np.testing.assert_allclose(
+        out["Y_FETCH_40"], np.array([2, 0, -2], dtype=float), atol=1e-12
+    )
+
 # ---------------------------------------------------------------------------
 # generate_density_raster
 # ---------------------------------------------------------------------------

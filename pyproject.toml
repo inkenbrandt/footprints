@@ -42,7 +42,6 @@ docs = [
     "sphinx-autodoc-typehints>=1.20",
     "sphinx-gallery>=0.14",
     "nbsphinx>=0.9",
-    "nbsphinx-link>=1.4",
     "numpydoc>=1.1",
 ]
 examples = [
