@@ -295,81 +295,56 @@ def summarize_periods(
     et_source: str = "LE",
     daily: bool = True,
     monthly: bool = True,
-    normalize_each_time: bool = True,
+    normalize_each_time: bool = False, # 1. CHANGED TO FALSE BY DEFAULT
 ) -> SummaryResult:
-    """
-    Build daily/monthly summaries from model.f_2d (time,x,y).
+    """Build daily/monthly summaries matching Kljun canonical denominator logic."""
 
-    Parameters
-    ----------
-    model : FFPModel
-        Fitted footprint model with f_2d attribute
-    df : pd.DataFrame
-        Original input DataFrame (for ET data)
-    et_source : str
-        Column name for latent energy flux (W/m²)
-    daily : bool
-        Compute daily aggregations
-    monthly : bool
-        Compute monthly aggregations
-    normalize_each_time : bool
-        Normalize each time slice before aggregation
-
-    Returns
-    -------
-    SummaryResult
-        Object containing requested daily/monthly footprints
-    """
-
-    # Get f_2d from model
     if not hasattr(model, "f_2d") or model.f_2d is None:
-        raise ValueError(
-            "Model must have f_2d attribute computed (call model.run() first)"
-        )
+        raise ValueError("Model must have f_2d attribute computed")
 
-    # Get f_2d from model using standard interface
     f_2d = model.get_footprint_timeseries()
-    
     if f_2d is None:
-        raise ValueError(
-            "Model does not support time-resolved footprints. "
-            "Only climatology available."
-        )
+        raise ValueError("Model does not support time-resolved footprints.")
 
-    f = f_2d
-    #f = model.f_2d
+    # 2. CRITICAL FIX FOR DENOMINATOR: 
+    # Calculate the sum of each 30-min slice. If it's 0, it means it was an invalid/excluded step.
+    slice_sums = f_2d.sum(dim=("x", "y"))
+    
+    # Convert invalid 0.0 timesteps to NaN. 
+    # Xarray's .mean() skips NaNs, meaning it will divide ONLY by the valid footprint count!
+    f = f_2d.where(slice_sums > 0, np.nan)
 
     if normalize_each_time:
         f = _ensure_time_normalized(f)
 
     res = SummaryResult()
 
-    # Mean footprints
+    # Mean footprints (Now correctly dividing only by valid_count)
     if daily:
-        res.f_daily_mean = f.resample(time="1D").mean()
+        res.f_daily_mean = f.resample(time="1D").mean(skipna=True)
     if monthly:
-        res.f_monthly_mean = f.resample(time="MS").mean()
+        res.f_monthly_mean = f.resample(time="MS").mean(skipna=True)
 
     # ET-weighted aggregation
-    et_mmhr = _et_from_le(df, le_col=et_source).reindex(
-        f["time"].to_index(), method=None
-    )
+    et_mmhr = _et_from_le(df, le_col=et_source).reindex(f["time"].to_index(), method=None)
     et_da = xr.DataArray(et_mmhr.values, coords={"time": f["time"]}, dims=("time",))
+    
+    # Mask ET data where footprints are invalid so the weights remain clean
+    et_da = et_da.where(slice_sums > 0, np.nan)
 
     weighted = f * et_da
 
     if daily:
-        num = weighted.resample(time="1D").sum()
-        den = et_da.resample(time="1D").sum()
-        res.f_daily_et_weighted = num / den
+        num = weighted.resample(time="1D").sum(skipna=True)
+        den = et_da.resample(time="1D").sum(skipna=True)
+        res.f_daily_et_weighted = num / den.where(den > 0)
 
     if monthly:
-        num = weighted.resample(time="MS").sum()
-        den = et_da.resample(time="MS").sum()
-        res.f_monthly_et_weighted = num / den
+        num = weighted.resample(time="MS").sum(skipna=True)
+        den = et_da.resample(time="MS").sum(skipna=True)
+        res.f_monthly_et_weighted = num / den.where(den > 0)
 
     return res
-
 
 # ------------------------------
 # Export utilities
