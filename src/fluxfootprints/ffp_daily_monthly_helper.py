@@ -685,7 +685,6 @@ def export_contours_gpkg(
 # Remaining functions (export_rasters_geotiff, export_contour_stats_csv) remain the same
 # but should use model.x, model.y instead of clim.x, clim.y
 
-
 def export_rasters_geotiff(
     model: FFPModel,
     summaries: SummaryResult,
@@ -729,10 +728,17 @@ def export_rasters_geotiff(
     def _write_series(da, layername):
         if da is None:
             return
-        times = pd.to_datetime(da["time"].values)
+        
+        # 1. CRITICAL FIX: Transpose from model layout (time, x, y) to GIS layout (time, y, x)
+        da_gis = da.transpose("time", "y", "x")
+        times = pd.to_datetime(da_gis["time"].values)
 
         for i, ts in enumerate(times):
-            arr = da.isel(time=i).values.astype(dtype)
+            # Extract the transposed 2D grid slice
+            arr = da_gis.isel(time=i).values.astype(dtype)
+            
+            # 2. CORRECTED FLIP: Since Kljun's internal y vector increases South-to-North, 
+            # but GeoTIFF matrix rows read North-to-South, we flip the rows vertically.
             if y[1] > y[0]:
                 arr = np.flipud(arr)
 
@@ -746,8 +752,8 @@ def export_rasters_geotiff(
                 fp,
                 "w",
                 driver="GTiff",
-                height=arr.shape[0],
-                width=arr.shape[1],
+                height=arr.shape[0],  # Now correctly maps to len(y)
+                width=arr.shape[1],   # Now correctly maps to len(x)
                 count=1,
                 dtype=dtype,
                 crs=dst_crs,
@@ -773,7 +779,6 @@ def export_rasters_geotiff(
         _write_series(layer_map[name], name)
 
     return Path(out_dir)
-
 
 def export_contour_stats_csv(
     df: pd.DataFrame,
