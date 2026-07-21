@@ -114,8 +114,8 @@ def build_climatology(
     crop_height: float = 0.2,
     atm_bound_height: float = 2000.0,
     inst_height: Union[float, "pd.Series"] = 2.5,
-    zm: Optional[float] = None,
-    z0: Optional[float] = None,
+    zm: Union[float, "pd.Series"] = None,
+    z0: Union[float, "pd.Series"] = None,
     roughness_fraction: float = 0.123,
     dx: float = 10.0,
     dy: float = 10.0,
@@ -123,7 +123,6 @@ def build_climatology(
     rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
     smooth_data: bool = True,
     verbosity: int = 2,
-    use_legacy: bool = False,
     logger: Optional[logging.Logger] = None,
     **model_kwargs,
 ) -> BaseFootprintModel:
@@ -165,8 +164,6 @@ def build_climatology(
         Apply Gaussian smoothing
     verbosity : int
         Logging verbosity (0=silent, 2=debug)
-    use_legacy : bool
-        Use legacy ffp_xr implementation (for comparison)
     logger : logging.Logger
         Optional logger instance
 
@@ -217,14 +214,13 @@ def build_climatology(
     # Pass zm/z0 only when explicitly supplied so models fall back to
     # crop_height/inst_height derivation when the caller omits them.
     if zm is not None:
-        common_params["zm"] = float(zm)
+        common_params["zm"] = zm if isinstance(zm, pd.Series) else float(zm)
     if z0 is not None:
-        common_params["z0"] = float(z0)
+        common_params["z0"] = z0 if isinstance(z0, pd.Series) else float(z0)
     common_params["roughness_fraction"] = float(roughness_fraction)
     
     # Add model-specific parameters
     common_params.update(model_kwargs)
-    
 
 
     # Map column names to FFPModel expectations

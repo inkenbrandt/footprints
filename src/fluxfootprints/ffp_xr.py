@@ -138,8 +138,8 @@ class ffp_climatology_new(BaseFootprintModel):
         crop_height: float = 0.2,
         atm_bound_height: float = 2000.0,
         inst_height: Union[float, "pd.Series"] = 2.0,
-        zm: Optional[float] = None,
-        z0: Optional[float] = None,
+        zm: Union[float, "pd.Series"] =  None,
+        z0: Union[float, "pd.Series"] =  None,
         roughness_fraction: float = 0.123,
         rslayer: bool = False,
         smooth_data: bool = True,
@@ -148,9 +148,6 @@ class ffp_climatology_new(BaseFootprintModel):
         fig: bool = False,
         logger=None,
         time=None,
-        crs: int = None,
-        station_x: float = None,
-        station_y: float = None,
         **kwargs,
     ):
         super().__init__(
@@ -231,8 +228,8 @@ class ffp_climatology_new(BaseFootprintModel):
         # Direct zm/z0 parameters take priority; otherwise derive from
         # crop_height and inst_height (checking df columns as fallback).
         if zm is not None and z0 is not None:
-            zm_eff = float(zm)
-            z0_eff = float(z0)
+            zm_eff = zm if isinstance(zm, pd.Series) else float(zm)
+            z0_eff = z0 if isinstance(z0, pd.Series) else float(z0)
         else:
             h_c = df["crop_height"] if "crop_height" in df.columns else crop_height
             h_s_col = df["atm_bound_height"] if "atm_bound_height" in df.columns else atm_bound_height
