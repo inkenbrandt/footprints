@@ -16,6 +16,7 @@ from .ffp_daily_monthly_helper import (
     export_contours_gpkg,
     export_rasters_geotiff,
     export_contour_stats_csv,
+    compute_aerodynamic_params
 )
 
 from .by_row_fetch_tools import (

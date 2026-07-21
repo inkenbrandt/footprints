@@ -102,11 +102,117 @@ def load_amf_df(csv_path: str | Path, cfg: Dict[str, Any]) -> pd.DataFrame:
 
     return df
 
+# ------------------------------
+# Calculate zm and zo
+# ------------------------------
 
+VEG_PRESETS = {
+    "stanhill": {"d_h_method": "stanhill", "z0_fraction": 0.123},
+    "alfalfa": {"d_h_fraction": 0.67, "z0_fraction": 0.123},
+    "corn_standard": {"d_h_fraction": 0.67, "z0_fraction": 0.140},
+    "corn_jacobs": {"d_h_fraction": 0.75, "z0_method": "jacobs_1988"},
+    "phragmites": {"d_h_fraction": 0.75, "z0_fraction": 0.090},
+    "wetland_grass": {"d_h_fraction": 0.70, "z0_fraction": 0.110},
+    "pinyon_juniper": {"d_h_fraction": 0.60, "z0_fraction": 0.100},
+}
+
+
+def _resolve_input(val, df: pd.DataFrame, param_name: str):
+    """Safely extract scalar values, DataFrame columns, or Pandas Series."""
+    if isinstance(val, str):
+        if val not in df.columns:
+            raise KeyError(
+                f"Column '{val}' specified for '{param_name}' not found in DataFrame."
+            )
+        return df[val]
+    if isinstance(val, pd.Series):
+        return val.reindex(df.index)
+    return val
+
+
+def compute_aerodynamic_params(
+    df: pd.DataFrame,
+    inst_height: Union[float, str, pd.Series, np.ndarray],
+    crop_height: Union[float, str, pd.Series, np.ndarray],
+    veg_type: Optional[str] = None,
+    z0_ratio: Optional[Union[float, str, pd.Series, np.ndarray]] = None,
+    d_h_ratio: Optional[Union[float, str, pd.Series, np.ndarray]] = None,
+) -> pd.DataFrame:
+    """
+    Calculate effective measurement height (zm) and roughness length (z0).
+
+    Requires inst_height and crop_height, plus EITHER a `veg_type` preset
+    OR custom ratio parameters (`z0_ratio` / `d_h_ratio`).
+
+    If both veg_type and z0_ratio/d_h_ratio are provided, the user-provided ratios
+    will be used instead of the VEG_PRESETS parameters.
+    """
+    df_out = df.copy()
+
+    # 1. Resolve inputs
+    zm_s = _resolve_input(inst_height, df_out, "inst_height")
+    h_c = _resolve_input(crop_height, df_out, "crop_height")
+    z0_r = (
+        _resolve_input(z0_ratio, df_out, "z0_ratio")
+        if z0_ratio is not None
+        else None
+    )
+    d_h_r = (
+        _resolve_input(d_h_ratio, df_out, "d_h_ratio")
+        if d_h_ratio is not None
+        else None
+    )
+
+    # 2. Parameter validation & preset lookup
+    if veg_type is None and z0_r is None and d_h_r is None:
+        raise ValueError(
+            "Missing parameter rule! You must specify either:\n"
+            "  1) A 'veg_type' preset (e.g., veg_type='alfalfa' or 'corn_jacobs')\n"
+            "  2) Custom ratios (e.g., z0_ratio=0.12, d_h_ratio=0.67)"
+        )
+
+    if veg_type is not None:
+        veg_type_clean = veg_type.lower()
+        if veg_type_clean not in VEG_PRESETS:
+            raise ValueError(
+                f"Unknown veg_type '{veg_type}'. Available options: {list(VEG_PRESETS.keys())}"
+            )
+        preset = VEG_PRESETS[veg_type_clean]
+    else:
+        preset = {}
+
+    # 3. Calculate Displacement Height (d_h)
+    if d_h_r is not None:
+        d_h_val = h_c * d_h_r
+    elif preset.get("d_h_method") == "stanhill":
+        d_h_val = 10 ** (0.979 * np.log10(h_c) - 0.154)
+    elif "d_h_fraction" in preset:
+        d_h_val = h_c * preset["d_h_fraction"]
+    else:
+        raise ValueError(
+            "Missing displacement height rule! Specify 'd_h_ratio' or pass a valid 'veg_type'."
+        )
+
+    # 4. Calculate Roughness Length (z0)
+    if z0_r is not None:
+        z0_val = h_c * z0_r
+    elif preset.get("z0_method") == "jacobs_1988":
+        z0_val = 0.26 * (h_c - d_h_val)
+    elif "z0_fraction" in preset:
+        z0_val = h_c * preset["z0_fraction"]
+    else:
+        raise ValueError(
+            "Missing roughness length rule! Specify 'z0_ratio' or pass a valid 'veg_type'."
+        )
+
+    # 5. Assign output columns
+    df_out["zm"] = zm_s - d_h_val
+    df_out["z0"] = z0_val
+
+    return df_out
 # ------------------------------
 # Build & Run Climatology
 # ------------------------------
-
 
 def build_climatology(
     df: pd.DataFrame,
@@ -275,6 +381,8 @@ def _et_from_le(df: pd.DataFrame, le_col: str = "LE") -> pd.Series:
     if le_col not in df.columns:
         raise ValueError(f"LE column '{le_col}' not found in DataFrame")
     return df[le_col] / 680.6
+
+
 
 
 @dataclass
