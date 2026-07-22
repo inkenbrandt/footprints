@@ -135,12 +135,6 @@ class ffp_climatology_new(BaseFootprintModel):
         nx: int = 1000,
         ny: int = 1000,
         rs: Union[list, np.ndarray] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-        crop_height: float = 0.2,
-        atm_bound_height: float = 2000.0,
-        inst_height: Union[float, "pd.Series"] = 2.0,
-        zm: Union[float, "pd.Series"] =  None,
-        z0: Union[float, "pd.Series"] =  None,
-        roughness_fraction: float = 0.123,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -150,18 +144,15 @@ class ffp_climatology_new(BaseFootprintModel):
         time=None,
         **kwargs,
     ):
+        
+        self.df = df.copy()
+
         super().__init__(
             df=df,
             domain=domain,
             dx=dx,
             dy=dy,
             rs=rs,
-            crop_height=crop_height,
-            atm_bound_height=atm_bound_height,
-            inst_height=inst_height,
-            zm=zm,
-            z0=z0,
-            roughness_fraction=roughness_fraction,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
@@ -169,7 +160,7 @@ class ffp_climatology_new(BaseFootprintModel):
 
 
         self.fclim_2d = None
-        self.df = df
+        
 
         # Model parameters
         self.xmin, self.xmax, self.ymin, self.ymax = domain
@@ -224,47 +215,8 @@ class ffp_climatology_new(BaseFootprintModel):
         else:
             self.logger.setLevel(logging.DEBUG)
 
-        # Resolve effective measurement height and roughness length.
-        # Direct zm/z0 parameters take priority; otherwise derive from
-        # crop_height and inst_height (checking df columns as fallback).
-        if zm is not None and z0 is not None:
-            zm_eff = zm if isinstance(zm, pd.Series) else float(zm)
-            z0_eff = z0 if isinstance(z0, pd.Series) else float(z0)
-        else:
-            h_c = df["crop_height"] if "crop_height" in df.columns else crop_height
-            h_s_col = df["atm_bound_height"] if "atm_bound_height" in df.columns else atm_bound_height
-            # Support time-varying inst_height: DataFrame column takes highest priority,
-            # then a Series/array passed as the parameter, then the scalar default.
-            if "inst_height" in df.columns:
-                zm_s = df["inst_height"]
-            elif isinstance(inst_height, (pd.Series, np.ndarray, list)):
-                zm_s = (
-                    inst_height.reindex(df.index)
-                    if isinstance(inst_height, pd.Series)
-                    else pd.Series(inst_height, index=df.index)
-                )
-            else:
-                zm_s = inst_height  # scalar float
-            zm_eff = None   # computed inside prep_df_fields via h_c/zm_s
-            z0_eff = None
+        self.prep_df_fields()
 
-        if zm_eff is not None:
-            self.prep_df_fields(
-                h_c=None,
-                d_h=None,
-                zm_s=None,
-                h_s=atm_bound_height,
-                zm_direct=zm_eff,
-                z0_direct=z0_eff,
-            )
-        else:
-            self.prep_df_fields(
-                h_c=h_c,
-                d_h=None,
-                zm_s=zm_s,
-                h_s=h_s_col,
-                roughness_fraction=roughness_fraction,
-            )
         self.define_domain()
         self.create_xr_dataset()
 
@@ -277,98 +229,32 @@ class ffp_climatology_new(BaseFootprintModel):
         lg.setLevel(logging.WARNING)
         return lg
 
-    def _validate_input_df(self,df, config=None, required_vars=None):
+    def _validate_input_df(self, df=None, config=None, required_vars=None):
+        """Pass-through validation method required by BaseFootprintModel."""
+        if df is not None and isinstance(df, pd.DataFrame):
+            return df
+        if hasattr(self, "df") and isinstance(self.df, pd.DataFrame):
+            return self.df
+        return pd.DataFrame()
+
+    def prep_df_fields(self):
+        """Sanitize DataFrame input range bounds and drop invalid timesteps.
+
+        Assumes df already contains standardized column names from
+        build_climatology.
         """
-        Validate input DataFrame for FFP climatology calculations.
-        
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Input DataFrame containing flux tower measurements
-        config : dict, optional
-            Configuration dictionary mapping standard variable names to column names
-            Expected keys: 'zm', 'u_mean', 'ustar', 'L', 'sigma_v', 'h', 'z0', 'wind_dir'
-        required_vars : list, optional
-            List of required variables. If None, uses default set.
-            
-        Returns
-        -------
-        pd.DataFrame
-            Validated DataFrame with standardized column names
-            
-        Raises
-        ------
-        ValueError
-            If required columns are missing or data is invalid
-        """
-        import pandas as pd
-        import numpy as np
-        
-        # Default configuration mapping
-        default_config = {
-            'zm': 'zm',              # Measurement height [m]
-            'u_mean': 'WS',          # Mean wind speed [m/s]
-            'ustar': 'USTAR',        # Friction velocity [m/s]
-            'L': 'MO_LENGTH',        # Obukhov length [m]
-            'sigma_v': 'V_SIGMA',    # Std dev of lateral velocity [m/s]
-            'h': 'PBLH_F',           # Boundary layer height [m]
-            'z0': 'z0',              # Roughness length [m]
-            'wind_dir': 'WD'         # Wind direction [degrees]
-        }
-        
-        # Check if DataFrame is empty
-        if df.empty:
-            raise ValueError("Input DataFrame is empty")
-        
-        return df
-
-    def prep_df_fields(
-        self,
-        h_c=0.2,
-        d_h=None,
-        zm_s=2.0,
-        h_s=2000.0,
-        zm_direct=None,
-        z0_direct=None,
-        roughness_fraction=0.123,
-    ):
-        # h_c Height of canopy [m]
-        # d_h Estimated displacement height [m]
-        # zm_s Measurement height [m] from AMF metadata
-        # h_s Height of atmos. boundary layer [m] - assumed
-        # zm_direct Effective measurement height (zm) supplied directly [m]
-        # z0_direct Roughness length supplied directly [m]
-        # roughness_fraction Ratio z0/h_c used when z0 is not supplied directly
-
-        if zm_direct is not None and z0_direct is not None:
-            self.df["zm"] = zm_direct
-            self.df["z0"] = z0_direct
-        else:
-            if d_h is None:
-                d_h = 10 ** (0.979 * np.log10(h_c) - 0.154)
-            self.df["zm"] = zm_s - d_h
-            self.df["h_c"] = h_c
-            self.df["z0"] = h_c * roughness_fraction
-
-        self.df["h"] = h_s
-
-        self.df = self.df.rename(
-            columns={
-                "V_SIGMA": "sigmav",
-                "USTAR": "ustar",
-                "wd": "wind_dir",
-                "MO_LENGTH": "ol",
-                "ws": "umean",
-            }
-        )
-
-        # Check if all required fields are in the DataFrame
-        all_present = np.all(
-            np.isin(["ol", "sigmav", "ustar", "wind_dir"], self.df.columns)
-        )
-        if all_present:
-            self.logger.debug("All required fields are present")
-        else:
+        required_fields = [
+            "zm",
+            "z0",
+            "h",
+            "ol",
+            "sigmav",
+            "ustar",
+            "wind_dir",
+            "umean",
+        ]
+        all_present = all(col in self.df.columns for col in required_fields)
+        if not all_present:
             self.raise_ffp_exception(1)
 
         self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
@@ -386,9 +272,7 @@ class ffp_climatology_new(BaseFootprintModel):
             self.df["wind_dir"] < 0.0, np.nan, self.df["wind_dir"]
         )
 
-        self.df = self.df.dropna(
-            subset=["sigmav", "wind_dir", "h", "ol", "ustar"], how="any"
-        )
+        self.df = self.df.dropna(subset=required_fields, how="any")
         self.ts_len = len(self.df)
         self.logger.debug(f"input len is {self.ts_len}")
 

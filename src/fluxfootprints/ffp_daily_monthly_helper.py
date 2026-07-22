@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List, Union, Any
+from typing import Dict, Optional, Tuple, List, Union, Any, Sequence, Type
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -116,18 +116,66 @@ VEG_PRESETS = {
     "pinyon_juniper": {"d_h_fraction": 0.60, "z0_fraction": 0.100},
 }
 
+# Unified Flexible Input Type Alias
+FlexibleInput = Union[
+    str, float, int, pd.Series, np.ndarray, Sequence[float], None
+]
 
-def _resolve_input(val, df: pd.DataFrame, param_name: str):
-    """Safely extract scalar values, DataFrame columns, or Pandas Series."""
+def _resolve_input(
+    val: FlexibleInput,
+    df: pd.DataFrame,
+    param_name: str = "input",
+    as_series: bool = True,
+) -> Union[pd.Series, float, int, None]:
+    """Safely resolve string column names, pd.Series, np.ndarrays, lists, or numeric scalars.
+
+    Parameters
+    ----------
+    val : str, float, int, pd.Series, np.ndarray, list, or None
+        Input value to resolve.
+    df : pd.DataFrame
+        Reference DataFrame for index alignment and length matching.
+    param_name : str, default "input"
+        Parameter name used for informative error messages.
+    as_series : bool, default True
+        If True, converts numeric scalars into a pd.Series broadcasted across df.index.
+
+    Returns
+    -------
+    pd.Series, float, int, or None
+    """
+    if val is None:
+        return None
+
+    # 1. Handle DataFrame Column Name (String)
     if isinstance(val, str):
         if val not in df.columns:
             raise KeyError(
                 f"Column '{val}' specified for '{param_name}' not found in DataFrame."
             )
         return df[val]
+
+    # 2. Handle Pandas Series (Align to df.index)
     if isinstance(val, pd.Series):
         return val.reindex(df.index)
-    return val
+
+    # 3. Handle Arrays or Lists
+    if isinstance(val, (np.ndarray, list, tuple)):
+        if len(val) != len(df):
+            raise ValueError(
+                f"Length of '{param_name}' ({len(val)}) does not match DataFrame length ({len(df)})."
+            )
+        return pd.Series(val, index=df.index, name=param_name)
+
+    # 4. Handle Numeric Scalars
+    if isinstance(val, (int, float, np.number)):
+        if as_series:
+            return pd.Series(float(val), index=df.index, name=param_name)
+        return val
+
+    raise TypeError(
+        f"Invalid type for '{param_name}': {type(val)}. Expected str, float, int, pd.Series, np.ndarray, or list."
+    )
 
 
 def compute_aerodynamic_params(
@@ -214,75 +262,66 @@ def compute_aerodynamic_params(
 # Build & Run Climatology
 # ------------------------------
 
+def _resolve_input(
+    val: Union[str, float, int, pd.Series, None],
+    df: pd.DataFrame,
+    name: str = "input",
+) -> Union[pd.Series, None]:
+    """Helper to convert str column name, single numeric scalar, or pd.Series
+
+    into a consistent pd.Series matched to df.index.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        if val not in df.columns:
+            raise KeyError(
+                f"Column '{val}' specified for {name} not found in DataFrame."
+            )
+        return df[val]
+    elif isinstance(val, (int, float, np.number)):
+        # Broadcast a single scalar value to match the DataFrame index length
+        return pd.Series(float(val), index=df.index, name=name)
+    elif isinstance(val, pd.Series):
+        # Align with original df index if needed
+        return val.reindex(df.index)
+    else:
+        raise TypeError(
+            f"Invalid type for {name}: {type(val)}. Expected str, float, int, or pd.Series."
+        )
+
+FootprintInput = Union[str, float, int, pd.Series, None]
+
 def build_climatology(
     df: pd.DataFrame,
     model_type: str = "ffp",
-    crop_height: float = 0.2,
-    atm_bound_height: float = 2000.0,
-    inst_height: Union[float, "pd.Series"] = 2.5,
-    zm: Union[float, "pd.Series"] = None,
-    z0: Union[float, "pd.Series"] = None,
-    roughness_fraction: float = 0.123,
+    ustar: FootprintInput = "ustar_1_1_1",
+    ol: FootprintInput = "mo_length_1_1_1",
+    umean: FootprintInput = "ws_1_1_1",
+    sigmav: FootprintInput = "v_sigma_1_1_1",
+    wind_dir: FootprintInput = "wd_1_1_1",
+    zm: FootprintInput = "zm",
+    z0: FootprintInput = "z0",
+    h: FootprintInput = 2000.0,
     dx: float = 10.0,
     dy: float = 10.0,
-    domain: Tuple[float, float, float, float] = (-1000.0, 1000.0, -1000.0, 1000.0),
-    rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    domain: Tuple[float, float, float, float] = (
+        -1000.0,
+        1000.0,
+        -1000.0,
+        1000.0,
+    ),
+    rs: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
     smooth_data: bool = True,
     verbosity: int = 2,
     logger: Optional[logging.Logger] = None,
     **model_kwargs,
 ) -> BaseFootprintModel:
-    """
-    Prepare required columns and run the footprint model.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame with required columns (WD, WS, USTAR, MO_LENGTH, V_SIGMA)
-    zm : float, optional
-        Effective measurement height above the zero-plane displacement (m).
-        When provided together with ``z0``, these are passed directly to the
-        model and ``crop_height`` / ``inst_height`` are not used for height
-        derivation.
-    z0 : float, optional
-        Aerodynamic roughness length (m). Must be supplied with ``zm``.
-    roughness_fraction : float, optional
-        Ratio used to derive z0 from crop_height when z0 is not supplied
-        directly: ``z0 = crop_height * roughness_fraction``.  Typical
-        values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
-        (corn).  Default is 0.123.
-    crop_height : float
-        Vegetation/canopy height (m). Used to derive ``zm`` and ``z0`` when
-        those are not provided directly.
-    atm_bound_height : float
-        Atmospheric boundary layer height (m)
-    inst_height : float or pd.Series
-        Instrument measurement height (m). Used to derive ``zm`` when not
-        provided directly. Pass a ``pd.Series`` with the same DatetimeIndex
-        as ``df`` to account for height changes during the season.
-    dx, dy : float
-        Grid resolution (m)
-    domain : tuple
-        (xmin, xmax, ymin, ymax) in meters
-    rs : list
-        Source area fractions to compute (0-1)
-    smooth_data : bool
-        Apply Gaussian smoothing
-    verbosity : int
-        Logging verbosity (0=silent, 2=debug)
-    logger : logging.Logger
-        Optional logger instance
-
-    Returns
-    -------
-    FFPModel or LegacyFFP
-        Footprint model instance with computed results
-    """
-
+    """Prepare inputs, validate per-model requirements, and run the footprint model."""
     if logger is None:
         logger = logging.getLogger(__name__)
 
-    # Model registry
+    # 1. Model Registry
     models = {
         "ffp": FFPModel,
         "ffp_xr": ffp_climatology_new,
@@ -293,75 +332,88 @@ def build_climatology(
         "wang": WangFootprintModel,
         "wang2006": WangFootprintModel,
     }
-    
-    model_type = model_type.lower()
-    if model_type not in models:
+
+    # 2. Per-Model Variable Requirements
+    MODEL_REQUIREMENTS: Dict[str, List[str]] = {
+        "ffp": ["wind_dir", "umean", "ustar", "ol", "sigmav", "zm", "z0", "h"],
+        "ffp_xr": [
+            "wind_dir",
+            "umean",
+            "ustar",
+            "ol",
+            "sigmav",
+            "zm",
+            "z0",
+            "h",
+        ],
+        "kormann-meixner": ["wind_dir", "umean", "ustar", "ol", "sigmav", "zm"],
+        "km": ["wind_dir", "umean", "ustar", "ol", "sigmav", "zm"],
+        "lagrangian": ["wind_dir", "umean", "ustar", "ol", "sigmav", "zm", "z0"],
+        "ls": ["wind_dir", "umean", "ustar", "ol", "sigmav", "zm", "z0"],
+        "wang": ["wind_dir", "umean", "ustar", "ol", "zm", "z0"],
+        "wang2006": ["wind_dir", "umean", "ustar", "ol", "zm", "z0"],
+    }
+
+    key = model_type.lower()
+    if key not in models:
         raise ValueError(
-            f"Unknown model type '{model_type}'. "
-            f"Choose from: {list(models.keys())}"
+            f"Unknown model type '{model_type}'. Choose from: {list(models.keys())}"
         )
-    
-    ModelClass = models[model_type]
-    
-    # Common parameters
+
+    ModelClass = models[key]
+
+    # 3. Resolve all flexible inputs into standard pd.Series inside df_prepared
+    df_prepared = pd.DataFrame(index=df.index)
+
+    df_prepared["ustar"] = _resolve_input(ustar, df, "ustar")
+    df_prepared["ol"] = _resolve_input(ol, df, "ol")
+    df_prepared["umean"] = _resolve_input(umean, df, "umean")
+    df_prepared["sigmav"] = _resolve_input(sigmav, df, "sigmav")
+    df_prepared["wind_dir"] = _resolve_input(wind_dir, df, "wind_dir")
+    df_prepared["zm"] = _resolve_input(zm, df, "zm")
+    df_prepared["z0"] = _resolve_input(z0, df, "z0")
+    df_prepared["h"] = _resolve_input(h, df, "h")
+
+    # 4. Validate model-specific variable requirements
+    required_cols = MODEL_REQUIREMENTS.get(key, [])
+    missing_cols = [
+        col
+        for col in required_cols
+        if col not in df_prepared.columns or df_prepared[col].isnull().all()
+    ]
+
+    if missing_cols:
+        raise ValueError(
+            f"Model '{model_type}' requires the following missing parameters/columns: {missing_cols}. "
+            f"Please specify them as column names in `df`, constant scalars, or pd.Series."
+        )
+
+    # 5. Build parameter dictionary and instantiate model
     common_params = dict(
-        df=df,
+        df=df_prepared,
         domain=list(domain),
         dx=float(dx),
         dy=float(dy),
         rs=rs,
-        crop_height=float(crop_height),
-        atm_bound_height=float(atm_bound_height),
-        inst_height=inst_height if isinstance(inst_height, pd.Series) else float(inst_height),
         smooth_data=smooth_data,
         verbosity=verbosity,
         logger=logger,
     )
-    # Pass zm/z0 only when explicitly supplied so models fall back to
-    # crop_height/inst_height derivation when the caller omits them.
-    if zm is not None:
-        common_params["zm"] = zm if isinstance(zm, pd.Series) else float(zm)
-    if z0 is not None:
-        common_params["z0"] = z0 if isinstance(z0, pd.Series) else float(z0)
-    common_params["roughness_fraction"] = float(roughness_fraction)
-    
-    # Add model-specific parameters
     common_params.update(model_kwargs)
 
-
-    # Map column names to FFPModel expectations
-    df_mapped = df.rename(
-        columns={
-            "WD": "wind_dir",
-            "WS": "umean",
-            "USTAR": "ustar",
-            "MO_LENGTH": "ol",
-            "V_SIGMA": "sigmav",
-        }
-    ).copy()
-
-    # Check for required columns
-    required = ["wind_dir", "umean", "ustar", "ol", "sigmav"]
-    missing_cols = [c for c in required if c not in df_mapped.columns]
-    if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
-
-    # Create and run model
     try:
         logger.info(f"Initializing {model_type} model...")
         model = ModelClass(**common_params)
-        
+
         logger.info("Running footprint calculation...")
         model.run(return_result=True)
-        #model.normalize()
-        
-        logger.info("Footprint calculation completed successfully")
+
+        logger.info("Footprint calculation completed successfully.")
         return model
-        
+
     except Exception as e:
         logger.error(f"Model {model_type} failed: {e}")
         raise
-
 
 # ------------------------------
 # Daily/Monthly Summaries

@@ -1,21 +1,39 @@
 # test_ffp_daily_monthly_helper.py
-# Run with:  pytest -q
+# Run with: pytest -q
 
 import os
+from pathlib import Path
 import sys
 import types
-from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
 
 # Import project from ../src as requested
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src"))
+)
 
 from fluxfootprints import ffp_daily_monthly_helper as helper
 from fluxfootprints.base_footprint_model import BaseFootprintModel
 from fluxfootprints.ffp_xr import ffp_climatology_new
+
+# Shared mapping for build_climatology when using amf_like_df
+AMF_CLIM_PARAMS = dict(
+    ustar="USTAR",
+    ol="MO_LENGTH",
+    umean="WS",
+    sigmav="V_SIGMA",
+    wind_dir="WD",
+    zm=2.0,
+    z0=0.1,
+    h=2000.0,
+    dx=10.0,
+    dy=10.0,
+    domain=(-100.0, 100.0, -100.0, 100.0),
+)
 
 
 # ----------------------------
@@ -36,15 +54,15 @@ def tiny_times():
 @pytest.fixture
 def amf_like_df(tiny_times):
     n = len(tiny_times)
-    return (pd.DataFrame({
+    return pd.DataFrame({
         "TIMESTAMP_START": tiny_times,
-        "WD": np.linspace(0, 330, n),     # deg
-        "WS": np.full(n, 3.0),            # m/s
-        "USTAR": np.full(n, 0.3),         # m/s
-        "MO_LENGTH": np.full(n, 100.0),   # m
-        "V_SIGMA": np.full(n, 0.5),       # m/s
-        "LE": np.linspace(100.0, 200.0, n)  # W/m^2
-    }).set_index("TIMESTAMP_START"))
+        "WD": np.linspace(0, 330, n),  # deg
+        "WS": np.full(n, 3.0),  # m/s
+        "USTAR": np.full(n, 0.3),  # m/s
+        "MO_LENGTH": np.full(n, 100.0),  # m
+        "V_SIGMA": np.full(n, 0.5),  # m/s
+        "LE": np.linspace(100.0, 200.0, n),  # W/m^2
+    }).set_index("TIMESTAMP_START")
 
 
 @pytest.fixture
@@ -97,7 +115,6 @@ def test_load_amf_df(mini_ini, tmp_path):
     )
     cfg = helper.load_config(mini_ini)
     df = helper.load_amf_df(csv, cfg)
-    # FIX 1: robust datetime check
     assert isinstance(df.index, pd.DatetimeIndex)
     assert np.isnan(df.loc[pd.Timestamp("2024-02-01 00:00"), "LE"])
     assert df.loc[pd.Timestamp("2024-02-01 00:30"), "LE"] == 150
@@ -107,10 +124,23 @@ def test_load_amf_df(mini_ini, tmp_path):
 # ffp_xr solver basics
 # ----------------------------
 def test_ffp_xr_run_direct(amf_like_df):
-    # FIX 2: ffp_xr expects 'wd'/'ws' (lowercase) which it renames internally.
-    df2 = amf_like_df.copy().rename(columns={"WD": "wd", "WS": "ws"})
-    clim = ffp_climatology_new(df=df2, dx=10.0, dy=10.0,
-                               domain=[-100.0, 100.0, -100.0, 100.0])
+    # Standardize column names and supply required height parameters directly
+    df2 = amf_like_df.copy().rename(
+        columns={
+            "WD": "wind_dir",
+            "WS": "umean",
+            "USTAR": "ustar",
+            "MO_LENGTH": "ol",
+            "V_SIGMA": "sigmav",
+        }
+    )
+    df2["zm"] = 2.0
+    df2["z0"] = 0.1
+    df2["h"] = 2000.0
+
+    clim = ffp_climatology_new(
+        df=df2, dx=10.0, dy=10.0, domain=[-100.0, 100.0, -100.0, 100.0]
+    )
     clim.run()
     assert isinstance(clim.f_2d, xr.DataArray)
     assert set(clim.f_2d.dims) == {"time", "x", "y"}
@@ -119,9 +149,7 @@ def test_ffp_xr_run_direct(amf_like_df):
 
 
 def test_build_climatology_wrapper(amf_like_df):
-    clim = helper.build_climatology(
-        amf_like_df.copy(), dx=10.0, dy=10.0, domain=(-100.0, 100.0, -100.0, 100.0)
-    )
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
     assert isinstance(clim, BaseFootprintModel)
     assert isinstance(clim.f_2d, xr.DataArray)
     assert clim.f_2d.ndim == 3
@@ -153,11 +181,14 @@ def test_et_from_le(amf_like_df):
 # Daily / Monthly summaries
 # ----------------------------
 def test_summarize_periods(amf_like_df):
-    clim = helper.build_climatology(
-        amf_like_df.copy(), dx=10.0, dy=10.0, domain=(-100.0, 100.0, -100.0, 100.0)
-    )
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
     res = helper.summarize_periods(
-        clim, amf_like_df, et_source="LE", daily=True, monthly=True, normalize_each_time=True
+        clim,
+        amf_like_df,
+        et_source="LE",
+        daily=True,
+        monthly=True,
+        normalize_each_time=True,
     )
     assert res.f_daily_mean is not None
     assert res.f_monthly_mean is not None
@@ -165,7 +196,9 @@ def test_summarize_periods(amf_like_df):
     assert res.f_monthly_et_weighted is not None
     assert res.f_daily_mean.sizes["time"] >= 2
     months = pd.to_datetime(res.f_monthly_mean["time"].values)
-    assert any(ts.month == 1 for ts in months) and any(ts.month == 2 for ts in months)
+    assert any(ts.month == 1 for ts in months) and any(
+        ts.month == 2 for ts in months
+    )
     assert np.isfinite(res.f_daily_et_weighted.values).any()
 
 
@@ -196,31 +229,35 @@ def test_make_contour_polygon_from_field_alt_skimage_or_skip():
     y = np.array([0.0, 1.0, 2.0, 3.0])
     z = np.zeros((y.size, x.size))
     z[1:3, 1:3] = 10.0
-    verts = helper._make_contour_polygon_from_field_alt(z, x, y, level=0.8, method="skimage")
+    verts = helper._make_contour_polygon_from_field_alt(
+        z, x, y, level=0.8, method="skimage"
+    )
     assert verts is not None and verts.shape[1] == 2 and len(verts) >= 4
 
-# --------------
+
+# ----------------------------
 # Optional I/O smoke tests
 # ----------------------------
 def test_export_contours_gpkg_smoke(tmp_path, amf_like_df, monkeypatch):
-    # Skip cleanly if optional deps are missing
     try:
         import geopandas as gpd  # noqa: F401
-        import shapely  # noqa: F401
         import pyproj  # noqa: F401
+        import shapely  # noqa: F401
     except Exception:
         pytest.skip("Optional geospatial dependencies not available")
 
-    clim = helper.build_climatology(
-        amf_like_df.copy(), dx=10.0, dy=10.0, domain=(-100.0, 100.0, -100.0, 100.0)
-    )
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
     res = helper.summarize_periods(clim, amf_like_df, daily=True, monthly=False)
 
     import geopandas as gpd
+
     def _fake_to_file(self, path, *args, **kwargs):
         Path(path).touch(exist_ok=True)
         return None
-    monkeypatch.setattr(gpd.GeoDataFrame, "to_file", _fake_to_file, raising=True)
+
+    monkeypatch.setattr(
+        gpd.GeoDataFrame, "to_file", _fake_to_file, raising=True
+    )
 
     out = helper.export_contours_gpkg(
         model=clim,
@@ -237,12 +274,12 @@ def test_export_contours_gpkg_smoke(tmp_path, amf_like_df, monkeypatch):
     assert out.exists()
 
 
-@pytest.mark.skipif(bool(__import__("importlib").util.find_spec("rasterio") is None),
-                    reason="rasterio not available")
+@pytest.mark.skipif(
+    bool(__import__("importlib").util.find_spec("rasterio") is None),
+    reason="rasterio not available",
+)
 def test_export_rasters_geotiff_smoke(tmp_path, amf_like_df):
-    clim = helper.build_climatology(
-        amf_like_df.copy(), dx=10.0, dy=10.0, domain=(-100.0, 100.0, -100.0, 100.0)
-    )
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
     res = helper.summarize_periods(clim, amf_like_df, daily=True, monthly=False)
     out_dir = helper.export_rasters_geotiff(
         model=clim,
@@ -260,14 +297,12 @@ def test_export_rasters_geotiff_smoke(tmp_path, amf_like_df):
 def test_export_contour_stats_csv_smoke(tmp_path, amf_like_df):
     try:
         import geopandas  # noqa: F401
-        import shapely    # noqa: F401
-        import pyproj     # noqa: F401
+        import pyproj  # noqa: F401
+        import shapely  # noqa: F401
     except Exception:
         pytest.skip("Optional geospatial dependencies not available")
 
-    clim = helper.build_climatology(
-        amf_like_df.copy(), dx=10.0, dy=10.0, domain=(-100.0, 100.0, -100.0, 100.0)
-    )
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
     res = helper.summarize_periods(clim, amf_like_df, daily=True, monthly=False)
     csv_path = tmp_path / "stats.csv"
     out = helper.export_contour_stats_csv(
