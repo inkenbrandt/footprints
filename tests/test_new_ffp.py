@@ -15,11 +15,14 @@ from fluxfootprints.ffp_xr import ffp_climatology_new
 def minimal_df():
     return pd.DataFrame(
         {
-            "V_SIGMA": [0.4, 0.5],
-            "USTAR": [0.3, 0.35],
-            "MO_LENGTH": [50, 60],
-            "wd": [180, 190],
-            "ws": [2.5, 3.0],
+            "sigmav": [0.4, 0.5],
+            "ustar": [0.3, 0.35],
+            "ol": [50.0, 60.0],
+            "wind_dir": [180.0, 190.0],
+            "umean": [2.5, 3.0],
+            "zm": [2.0, 2.0],
+            "z0": [0.1, 0.1],
+            "h": [2000.0, 2000.0],
         },
         index=pd.date_range("2025-01-01", periods=2, freq="30min"),
     )
