@@ -21,11 +21,14 @@ from rasterio import features
 from affine import Affine
 import rasterio
 from rasterio.transform import from_origin
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import csv
 
 import geopandas as gpd
 from shapely.geometry import Polygon
 from pyproj import CRS, Transformer
+from pyproj.database import query_utm_crs_info
+from pyproj.aoi import AreaOfInterest
 
 # Use FFPModel as canonical implementation
 from .improved_ffp import FFPModel
@@ -506,11 +509,18 @@ def summarize_periods(
 # Export utilities
 # ------------------------------
 
-
-def _choose_utm_epsg(lon: float, lat: float) -> int:
-    """Pick a UTM EPSG (NAD83 / WGS84 UTM) from lon/lat."""
-    zone = int(math.floor((lon + 180.0) / 6.0) + 1)
-    return int(f"326{zone:02d}")
+def _choose_utm_epsg_pyproj(lon: float, lat: float) -> int:
+    """Find the standard local WGS 84 UTM EPSG code using pyproj."""
+    crs_info_list = query_utm_crs_info(
+        datum_name="WGS 84",
+        area_of_interest=AreaOfInterest(
+            west_lon_degree=lon,
+            south_lat_degree=lat,
+            east_lon_degree=lon,
+            north_lat_degree=lat,
+        ),
+    )
+    return int(crs_info_list[0].code)
 
 
 def _make_contour_polygon_from_field_alt(
@@ -636,7 +646,7 @@ def export_contours_gpkg(
 
     # CRS setup
     if crs_out == "auto":
-        epsg = _choose_utm_epsg(station_lon, station_lat)
+        epsg = choose_utm_epsg(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
     else:
         dst_crs = CRS.from_user_input(crs_out)
@@ -822,13 +832,13 @@ def export_rasters_geotiff(
     station_lat: float,
     station_lon: float,
     out_dir: str | Path,
-    crs_out: str | int = "auto",
+    crs_out: str | int = "auto",  # ---> ADDED: Parameter for optional target CRS
     which=("daily_mean", "monthly_mean", "daily_etw", "monthly_etw"),
     prefix="ffp",
     dtype="float32",
     nodata=0.0,
 ) -> Path:
-    """Export each time slice as GeoTIFF (adapted for FFPModel)."""
+    """Export each time slice as GeoTIFF, with optional target CRS reprojection."""
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -839,37 +849,61 @@ def export_rasters_geotiff(
     if x.size < 2 or y.size < 2:
         raise ValueError("x/y grid must have at least 2 points each")
 
-    xres = float(x[1] - x[0])
-    yres = float(y[1] - y[0])
+    xres = float(abs(x[1] - x[0]))
+    yres = float(abs(y[1] - y[0]))  # ---> CHANGED: Ensure yres is strictly positive
 
-    if crs_out == "auto":
-        epsg = _choose_utm_epsg(station_lon, station_lat)
-        dst_crs = CRS.from_epsg(epsg)
-    else:
-        dst_crs = CRS.from_user_input(crs_out)
+    # ALWAYS calculate local UTM space first for original grid geometry
+    utm_epsg = _choose_utm_epsg_pyproj(station_lon, station_lat)
+    utm_crs = CRS.from_epsg(utm_epsg)
 
     wgs84 = CRS.from_epsg(4326)
-    to_proj = Transformer.from_crs(wgs84, dst_crs, always_xy=True)
+    to_proj = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
     x0, y0 = to_proj.transform(station_lon, station_lat)
 
-    left = (x.min() + x0) - xres / 2.0
-    top = (y.max() + y0) + yres / 2.0
-    transform = from_origin(left, top, xres, yres)
+    # ---> ADDED: Define full bounding box in local UTM
+    left_utm = (x.min() + x0) - xres / 2.0
+    right_utm = (x.max() + x0) + xres / 2.0
+    bottom_utm = (y.min() + y0) - yres / 2.0
+    top_utm = (y.max() + y0) + yres / 2.0
+
+    utm_transform = from_origin(left_utm, top_utm, xres, yres)
+    width, height = len(x), len(y)
+
+    # ---> ADDED: Determine destination CRS and target grid dimensions
+    if crs_out == "auto":
+        target_crs = utm_crs
+    else:
+        target_crs = CRS.from_user_input(crs_out)
+
+    is_custom_crs = (target_crs != utm_crs)
+
+    if is_custom_crs:
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            utm_crs,
+            target_crs,
+            width,
+            height,
+            left=left_utm,
+            bottom=bottom_utm,
+            right=right_utm,
+            top=top_utm,
+        )
+    else:
+        dst_transform, dst_width, dst_height = utm_transform, width, height
+
+    # ---> ADDED: Safety check for floating point vs integer predictor
+    predictor = 3 if np.issubdtype(np.dtype(dtype), np.floating) else 2
 
     def _write_series(da, layername):
         if da is None:
             return
         
-        # 1. CRITICAL FIX: Transpose from model layout (time, x, y) to GIS layout (time, y, x)
         da_gis = da.transpose("time", "y", "x")
         times = pd.to_datetime(da_gis["time"].values)
 
         for i, ts in enumerate(times):
-            # Extract the transposed 2D grid slice
             arr = da_gis.isel(time=i).values.astype(dtype)
             
-            # 2. CORRECTED FLIP: Since Kljun's internal y vector increases South-to-North, 
-            # but GeoTIFF matrix rows read North-to-South, we flip the rows vertically.
             if y[1] > y[0]:
                 arr = np.flipud(arr)
 
@@ -879,30 +913,48 @@ def export_rasters_geotiff(
                 suf = ts.strftime("%Y%m")
             fp = out_dir / f"{prefix}_{layername}_{suf}.tif"
 
-            with rasterio.open(
-                fp,
-                "w",
-                driver="GTiff",
-                height=arr.shape[0],  # Now correctly maps to len(y)
-                width=arr.shape[1],   # Now correctly maps to len(x)
-                count=1,
-                dtype=dtype,
-                crs=dst_crs,
-                transform=transform,
-                nodata=nodata,
-                compress="deflate",
-                predictor=3,
-                tiled=True,
-                blockxsize=256,
-                blockysize=256,
-            ) as dst:
-                dst.write(arr, 1)
+            # If the raster is small (< 256px), turn tiling off to save overhead.
+            # If tiled, keep block sizes at 256 (which is a valid multiple of 16).
+            use_tiling = (dst_width >= 256) and (dst_height >= 256)
+
+            profile = {
+                "driver": "GTiff",
+                "height": dst_height,
+                "width": dst_width,
+                "count": 1,
+                "dtype": dtype,
+                "crs": target_crs,
+                "transform": dst_transform,
+                "nodata": nodata,
+                "compress": "deflate",
+                "predictor": predictor,
+                "tiled": use_tiling,
+            }
+
+            if use_tiling:
+                profile["blockxsize"] = 256
+                profile["blockysize"] = 256
+
+            with rasterio.open(fp, "w", **profile) as dst:
+                # ---> CHANGED: Conditionally reproject or write directly
+                if is_custom_crs:
+                    reproject(
+                        source=arr,
+                        destination=rasterio.band(dst, 1),
+                        src_transform=utm_transform,
+                        src_crs=utm_crs,
+                        dst_transform=dst_transform,
+                        dst_crs=target_crs,
+                        resampling=Resampling.bilinear,
+                    )
+                else:
+                    dst.write(arr, 1)
 
     layer_map = {
-        "daily_mean": summaries.f_daily_mean,
-        "monthly_mean": summaries.f_monthly_mean,
-        "daily_etw": summaries.f_daily_et_weighted,
-        "monthly_etw": summaries.f_monthly_et_weighted,
+        "daily_mean": getattr(summaries, "f_daily_mean", None),
+        "monthly_mean": getattr(summaries, "f_monthly_mean", None),
+        "daily_etw": getattr(summaries, "f_daily_et_weighted", None),
+        "monthly_etw": getattr(summaries, "f_monthly_et_weighted", None),
     }
     for name in which:
         if name not in layer_map:
@@ -933,7 +985,7 @@ def export_contour_stats_csv(
     y = model.y
 
     if crs_out == "auto":
-        epsg = _choose_utm_epsg(station_lon, station_lat)
+        epsg = _choose_utm_epsg_pyproj(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
     else:
         dst_crs = CRS.from_user_input(crs_out)
