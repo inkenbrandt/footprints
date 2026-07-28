@@ -446,15 +446,19 @@ class SummaryResult:
     f_monthly_mean: Optional[xr.DataArray] = None
     f_daily_et_weighted: Optional[xr.DataArray] = None
     f_monthly_et_weighted: Optional[xr.DataArray] = None
+    daily_domain_coverage: Optional[pd.DataFrame] = None
+    monthly_domain_coverage: Optional[pd.DataFrame] = None
 
 
 def summarize_periods(
     model: BaseFootprintModel,
     df: pd.DataFrame,
-    et_source: str = "LE",
+    et_source: Optional[str] = "LE",
+    is_le: bool = True,  # Set False if passing direct ET (e.g., NLDAS in mm/hr)
+    calc_et_weighted: bool = True,  # Toggle ET weighting on/off
     daily: bool = True,
     monthly: bool = True,
-    normalize_each_time: bool = False, # 1. CHANGED TO FALSE BY DEFAULT
+    normalize_each_time: bool = False,
 ) -> SummaryResult:
     """Build daily/monthly summaries matching Kljun canonical denominator logic."""
 
@@ -465,43 +469,94 @@ def summarize_periods(
     if f_2d is None:
         raise ValueError("Model does not support time-resolved footprints.")
 
-    # 2. CRITICAL FIX FOR DENOMINATOR: 
-    # Calculate the sum of each 30-min slice. If it's 0, it means it was an invalid/excluded step.
-    slice_sums = f_2d.sum(dim=("x", "y"))
-    
-    # Convert invalid 0.0 timesteps to NaN. 
-    # Xarray's .mean() skips NaNs, meaning it will divide ONLY by the valid footprint count!
+    # 1. Determine cell area in m^2 (dx * dy)
+    if hasattr(model, "dx") and hasattr(model, "dy") and model.dx and model.dy:
+        cell_area = float(model.dx) * float(model.dy)
+    else:
+        dx = float(abs(f_2d.x[1] - f_2d.x[0]))
+        dy = float(abs(f_2d.y[1] - f_2d.y[0]))
+        cell_area = dx * dy
+
+    # 2. Integrate density over cell area to get captured fraction (0.0 to 1.0)
+    slice_sums = f_2d.sum(dim=("x", "y")) * cell_area
+    valid_sums = slice_sums.where(slice_sums > 0, np.nan) * 100.0
+
+    # 3. Handle Optional ET Data
+    do_et = calc_et_weighted and (et_source is not None) and (et_source in df.columns)
+
+    if do_et:
+        raw_et = pd.to_numeric(df[et_source], errors="coerce")
+        # Convert LE (W/m^2) to ET (mm/hr) if required
+        et_series = raw_et / 680.6 if is_le else raw_et
+        
+        et_mmhr = et_series.reindex(f_2d["time"].to_index(), method=None)
+        et_da = xr.DataArray(
+            et_mmhr.values, coords={"time": f_2d["time"]}, dims=("time",)
+        )
+        et_da = et_da.where(slice_sums > 0, np.nan)
+    else:
+        et_da = None
+
+    res = SummaryResult()
+
+    # 4. Daily Domain Coverage DataFrame
+    if daily:
+        cov_dict = {
+            "mean_coverage_pct": valid_sums.resample(time="1D").mean(skipna=True).to_series(),
+        }
+        if do_et:
+            daily_num_cov = (valid_sums * et_da).resample(time="1D").sum(skipna=True)
+            daily_den_cov = et_da.resample(time="1D").sum(skipna=True)
+            cov_dict["et_weighted_coverage_pct"] = (daily_num_cov / daily_den_cov.where(daily_den_cov > 0)).to_series()
+        
+        cov_dict.update({
+            "min_coverage_pct": valid_sums.resample(time="1D").min(skipna=True).to_series(),
+            "max_coverage_pct": valid_sums.resample(time="1D").max(skipna=True).to_series(),
+            "valid_timesteps": (slice_sums > 0).resample(time="1D").sum().to_series(),
+        })
+        res.daily_domain_coverage = pd.DataFrame(cov_dict)
+
+    # 5. Monthly Domain Coverage DataFrame
+    if monthly:
+        cov_dict = {
+            "mean_coverage_pct": valid_sums.resample(time="MS").mean(skipna=True).to_series(),
+        }
+        if do_et:
+            monthly_num_cov = (valid_sums * et_da).resample(time="MS").sum(skipna=True)
+            monthly_den_cov = et_da.resample(time="MS").sum(skipna=True)
+            cov_dict["et_weighted_coverage_pct"] = (monthly_num_cov / monthly_den_cov.where(monthly_den_cov > 0)).to_series()
+
+        cov_dict.update({
+            "min_coverage_pct": valid_sums.resample(time="MS").min(skipna=True).to_series(),
+            "max_coverage_pct": valid_sums.resample(time="MS").max(skipna=True).to_series(),
+            "valid_timesteps": (slice_sums > 0).resample(time="MS").sum().to_series(),
+        })
+        res.monthly_domain_coverage = pd.DataFrame(cov_dict)
+
+    # 6. Mask invalid 0.0 timesteps before spatial averaging
     f = f_2d.where(slice_sums > 0, np.nan)
 
     if normalize_each_time:
         f = _ensure_time_normalized(f)
 
-    res = SummaryResult()
-
-    # Mean footprints (Now correctly dividing only by valid_count)
+    # 7. Mean Footprints
     if daily:
         res.f_daily_mean = f.resample(time="1D").mean(skipna=True)
     if monthly:
         res.f_monthly_mean = f.resample(time="MS").mean(skipna=True)
 
-    # ET-weighted aggregation
-    et_mmhr = _et_from_le(df, le_col=et_source).reindex(f["time"].to_index(), method=None)
-    et_da = xr.DataArray(et_mmhr.values, coords={"time": f["time"]}, dims=("time",))
-    
-    # Mask ET data where footprints are invalid so the weights remain clean
-    et_da = et_da.where(slice_sums > 0, np.nan)
+    # 8. ET-Weighted Footprints (Only calculated if ET is available and requested)
+    if do_et:
+        weighted = f * et_da
+        if daily:
+            num = weighted.resample(time="1D").sum(skipna=True)
+            den = et_da.resample(time="1D").sum(skipna=True)
+            res.f_daily_et_weighted = num / den.where(den > 0)
 
-    weighted = f * et_da
-
-    if daily:
-        num = weighted.resample(time="1D").sum(skipna=True)
-        den = et_da.resample(time="1D").sum(skipna=True)
-        res.f_daily_et_weighted = num / den.where(den > 0)
-
-    if monthly:
-        num = weighted.resample(time="MS").sum(skipna=True)
-        den = et_da.resample(time="MS").sum(skipna=True)
-        res.f_monthly_et_weighted = num / den.where(den > 0)
+        if monthly:
+            num = weighted.resample(time="MS").sum(skipna=True)
+            den = et_da.resample(time="MS").sum(skipna=True)
+            res.f_monthly_et_weighted = num / den.where(den > 0)
 
     return res
 
@@ -646,7 +701,7 @@ def export_contours_gpkg(
 
     # CRS setup
     if crs_out == "auto":
-        epsg = choose_utm_epsg(station_lon, station_lat)
+        epsg = _choose_utm_epsg_pyproj(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
     else:
         dst_crs = CRS.from_user_input(crs_out)
