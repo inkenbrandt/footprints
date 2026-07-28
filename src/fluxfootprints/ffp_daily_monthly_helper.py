@@ -701,7 +701,7 @@ def export_contours_gpkg(
 
     # CRS setup
     if crs_out == "auto":
-        epsg = choose_utm_epsg(station_lon, station_lat)
+        epsg = _choose_utm_epsg_pyproj(station_lon, station_lat)
         dst_crs = CRS.from_epsg(epsg)
     else:
         dst_crs = CRS.from_user_input(crs_out)

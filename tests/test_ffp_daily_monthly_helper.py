@@ -214,7 +214,7 @@ def test_summarize_periods(amf_like_df):
     ],
 )
 def test_choose_utm_epsg(lon, lat, epsg):
-    assert helper._choose_utm_epsg(lon, lat) == epsg
+    assert helper._choose_utm_epsg_pyproj(lon, lat) == epsg
 
 
 # ----------------------------
