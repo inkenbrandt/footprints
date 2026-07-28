@@ -1,0 +1,74 @@
+import requests
+import io
+import pandas as pd
+
+
+def call_nldas_time_series(lat,lon,time_start,time_end,data,token):
+    """
+    INPUTS:
+    lat - latitude
+    lon - longitude
+    time_start - start of time series in YYYY-MM-DDThh:mm:ss format (UTC)
+    end_time - end of the time series in YYYY-MM-DDThh:mm:ss format (UTC)
+    data - name of the data parameter for the time series
+    token - earthaccess bearer token
+    
+    OUTPUT:
+    time series csv output string
+
+    Function modified from How_to_Access_GiC_Time_Series_Service.ipynb
+    https://github.com/nasa/gesdisc-tutorials/tree/main/notebooks
+    """
+    time_series_url = "https://api.giovanni.earthdata.nasa.gov/timeseries"
+
+    query_parameters = {
+        "data":data,
+        "location":"[{},{}]".format(lat,lon),
+        "time":"{}/{}".format(time_start,time_end)
+    }
+   
+    headers = {
+    'Authorization': f'Bearer {token}'
+    }
+    
+    response=requests.get(time_series_url, params=query_parameters, headers=headers)
+    print("Status Code:", response.status_code)
+    return response.text
+
+
+def parse_nldas_csv(ts):
+    """
+    INPUTS:
+    ts - time series output of the time series service
+    
+    OUTPUTS:
+    headers,df - the headers from the CSV as a dict and the values in a pandas dataframe
+    Function modified from How_to_Access_GiC_Time_Series_Service.ipynb
+    https://github.com/nasa/gesdisc-tutorials/tree/main/notebooks
+    """
+    with io.StringIO(ts) as f:
+        # the first 13 rows are header
+        headers = {}
+        try:
+            for i in range(13):
+                line = f.readline()
+                key,value = line.split(",")
+                headers[key] = value.strip()
+        except ValueError as e:
+            raise ValueError(
+                "The returned CSV is empty.\n"
+                "Please ensure that your subsetting bounds are within the extent of your dataset\n"
+                "or that your permissions are set up correctly"
+            ) from e
+
+        # Read the csv proper
+        df = pd.read_csv(
+            f,
+            header=1,
+            names=("Timestamp",headers["param_name"]),
+            converters={"Timestamp":pd.Timestamp}
+        )
+
+    return headers, df
+
+
