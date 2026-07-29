@@ -37,42 +37,66 @@ def quiet_logger():
 
 @pytest.fixture
 def minimal_df():
-    """A 2‑row DataFrame with all required meteorological fields."""
-    df = pd.DataFrame(
+    """A 2-row DataFrame with all required standardized meteorological fields."""
+    return pd.DataFrame(
         {
-            "V_SIGMA": [0.40, 0.45],  # σv  [m s⁻¹]
-            "USTAR": [0.30, 0.32],  # u*  [m s⁻¹]
-            "MO_LENGTH": [200.0, 150.0],  # L   [m]
-            "WD": [45.0, 90.0],  # wind direction [°]
-            "WS": [4.0, 4.5],  # wind speed [m s⁻¹]
+            "sigmav": [0.40, 0.45],    # σv [m s⁻¹]
+            "ustar": [0.30, 0.32],     # u* [m s⁻¹]
+            "ol": [200.0, 150.0],      # L [m]
+            "wind_dir": [45.0, 90.0],  # wind direction [°]
+            "umean": [4.0, 4.5],       # wind speed [m s⁻¹]
+            "zm": [2.5, 2.5],          # measurement height [m]
+            "z0": [0.05, 0.05],        # roughness length [m]
+            "h": [1000.0, 1000.0],     # boundary layer height [m]
         },
         index=pd.date_range("2025-05-01", periods=2, freq="30min"),
     )
-    return df
 
 
 @pytest.fixture
 def valid_df():
+    """A valid DataFrame with standardized inputs."""
     index = pd.date_range("2024-01-01", periods=2, freq="30min")
     data = {
-        "V_SIGMA": [0.5, 0.6],
-        "USTAR": [0.2, 0.3],
-        "MO_LENGTH": [-100, -200],
-        "WD": [180, 190],
-        "WS": [2.0, 2.5],
+        "sigmav": [0.5, 0.6],
+        "ustar": [0.25, 0.30],
+        "ol": [-100.0, -200.0],
+        "wind_dir": [180.0, 190.0],
+        "umean": [2.0, 2.5],
+        "zm": [2.0, 2.0],
+        "z0": [0.03, 0.03],
+        "h": [1500.0, 1500.0],
     }
     return pd.DataFrame(data, index=index)
 
 
 @pytest.fixture
+def seasonal_df():
+    """DataFrame spanning 4 timesteps with time-varying measurement heights (zm)."""
+    index = pd.date_range("2025-04-01", periods=4, freq="30min")
+    return pd.DataFrame(
+        {
+            "sigmav": [0.40, 0.45, 0.38, 0.42],
+            "ustar": [0.30, 0.32, 0.28, 0.31],
+            "ol": [200.0, 150.0, -100.0, 300.0],
+            "wind_dir": [45.0, 90.0, 135.0, 180.0],
+            "umean": [4.0, 4.5, 3.5, 5.0],
+            "zm": [1.8, 1.8, 2.8, 2.8],  # Varying measurement height
+            "z0": [0.02, 0.02, 0.02, 0.02],
+            "h": [1500.0, 1500.0, 1500.0, 1500.0],
+        },
+        index=index,
+    )
+
+@pytest.fixture
 def tiny_model(minimal_df, quiet_logger):
-    """FFPModel on a 3 × 3 grid for fast tests."""
+    """FFPModel on a 3 × 3 grid for fast tests."""
     return FFPModel(
         minimal_df,
         domain=[-100.0, 100.0, -100.0, 100.0],
         dx=100.0,  # => 3 points per axis
         dy=100.0,
-        smooth_data=False,  # keep CI fast
+        smooth_data=False,
         verbosity=0,
         logger=quiet_logger,
     )
@@ -82,7 +106,7 @@ def tiny_model(minimal_df, quiet_logger):
 # 1. Validation helpers
 # ---------------------------------------------------------------------------
 def test_missing_column_raises(minimal_df, quiet_logger):
-    bad_df = minimal_df.drop(columns=["USTAR"])
+    bad_df = minimal_df.drop(columns=["ustar"])
     with pytest.raises(ValueError, match="Missing required columns"):
         FFPModel(bad_df, dx=100.0, logger=quiet_logger, smooth_data=False)
 
@@ -214,60 +238,26 @@ def test_calc_xr_footprint(valid_df):
 # Direct zm / z0 input (issue #7)
 # ---------------------------------------------------------------------------
 
-def test_direct_zm_z0_accepted(valid_df, quiet_logger):
-    """FFPModel accepts zm and z0 directly without crop_height/inst_height."""
-    model = FFPModel(
-        valid_df,
-        zm=1.8,
-        z0=0.025,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    assert float(model.df["zm"].iloc[0]) == pytest.approx(1.8)
-    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.025)
+
+def test_all_invalid_zm_raises(valid_df, quiet_logger):
+    """When all zm values are <= 0, the model should raise a ValueError."""
+    bad_df = valid_df.copy()
+    bad_df["zm"] = -1.0  # Or 0.0
+
+    with pytest.raises(ValueError, match="All timesteps were dropped"):
+        FFPModel(bad_df, verbosity=0, logger=quiet_logger)
 
 
-def test_direct_zm_z0_overrides_crop_height(valid_df, quiet_logger):
-    """When zm and z0 are supplied they override crop_height/inst_height."""
-    # Build one model with crop_height path and one with direct zm/z0 set to
-    # different values — the direct parameters must win.
-    model = FFPModel(
-        valid_df,
-        crop_height=0.5,
-        inst_height=3.0,
-        zm=1.0,
-        z0=0.05,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    assert float(model.df["zm"].iloc[0]) == pytest.approx(1.0)
-    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.05)
+def test_partial_invalid_zm_filtered(valid_df, quiet_logger):
+    """Non-positive zm in individual rows should be filtered out without crashing."""
+    df = valid_df.copy()
+    # Make the first row invalid, leave second row valid (2.0)
+    df.loc[df.index[0], "zm"] = 0.0
 
+    model = FFPModel(df, verbosity=0, logger=quiet_logger)
 
-def test_only_one_of_zm_z0_raises(valid_df, quiet_logger):
-    """Supplying only one of zm or z0 must raise a ValueError."""
-    with pytest.raises(ValueError, match="Both zm and z0 must be provided together"):
-        FFPModel(valid_df, zm=1.8, verbosity=0, logger=quiet_logger)
-
-    with pytest.raises(ValueError, match="Both zm and z0 must be provided together"):
-        FFPModel(valid_df, z0=0.025, verbosity=0, logger=quiet_logger)
-
-
-def test_invalid_zm_raises(valid_df, quiet_logger):
-    """Non-positive zm must raise a ValueError."""
-    with pytest.raises(ValueError, match="zm must be positive"):
-        FFPModel(valid_df, zm=0.0, z0=0.025, verbosity=0, logger=quiet_logger)
-
-    with pytest.raises(ValueError, match="zm must be positive"):
-        FFPModel(valid_df, zm=-1.0, z0=0.025, verbosity=0, logger=quiet_logger)
+    # First row should be dropped, leaving 1 valid timestep
+    assert model.ts_len == 1
 
 
 def test_direct_zm_z0_run_produces_footprint(valid_df, quiet_logger):
@@ -289,157 +279,3 @@ def test_direct_zm_z0_run_produces_footprint(valid_df, quiet_logger):
     assert results["footprint_climatology"].values.sum() > 0
 
 
-def test_backward_compat_crop_height_still_works(valid_df, quiet_logger):
-    """crop_height + inst_height path still produces a valid zm in the df."""
-    model = FFPModel(
-        valid_df,
-        crop_height=0.2,
-        inst_height=2.0,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    # zm should be inst_height - displacement_height > 0
-    assert float(model.df["zm"].iloc[0]) > 0
-    # z0 should be crop_height * 0.123
-    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.2 * 0.123)
-
-
-def test_custom_roughness_fraction(valid_df, quiet_logger):
-    """roughness_fraction overrides the default 0.123 multiplier (issue #6)."""
-    custom_fraction = 0.07  # e.g. alfalfa or pinyon-juniper
-    model = FFPModel(
-        valid_df,
-        crop_height=0.5,
-        inst_height=2.0,
-        roughness_fraction=custom_fraction,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.5 * custom_fraction)
-    # Stored on the model for inspection
-    assert model.roughness_fraction == pytest.approx(custom_fraction)
-
-
-def test_roughness_fraction_default_unchanged(valid_df, quiet_logger):
-    """Default roughness_fraction of 0.123 is backward-compatible."""
-    model = FFPModel(
-        valid_df,
-        crop_height=0.3,
-        inst_height=2.0,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    assert float(model.df["z0"].iloc[0]) == pytest.approx(0.3 * 0.123)
-
-
-# ---------------------------------------------------------------------------
-# Time-varying inst_height (issue #5)
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def seasonal_df():
-    """DataFrame spanning two timestamps with differing instrument heights."""
-    index = pd.date_range("2025-04-01", periods=4, freq="30min")
-    return pd.DataFrame(
-        {
-            "V_SIGMA": [0.40, 0.45, 0.38, 0.42],
-            "USTAR": [0.30, 0.32, 0.28, 0.31],
-            "MO_LENGTH": [200.0, 150.0, -100.0, 300.0],
-            "WD": [45.0, 90.0, 135.0, 180.0],
-            "WS": [4.0, 4.5, 3.5, 5.0],
-        },
-        index=index,
-    )
-
-
-def test_series_inst_height_per_timestep_zm(seasonal_df, quiet_logger):
-    """A pd.Series inst_height produces per-timestep zm values in the DataFrame."""
-    heights = pd.Series([2.0, 2.0, 3.0, 3.0], index=seasonal_df.index)
-    crop_h = 0.2
-    d_h = 10 ** (0.979 * np.log10(max(crop_h, 1e-6)) - 0.154)
-
-    model = FFPModel(
-        seasonal_df,
-        crop_height=crop_h,
-        inst_height=heights,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-
-    zm_vals = model.df["zm"]
-    # First two rows used height 2.0, last two used 3.0
-    assert zm_vals.iloc[0] == pytest.approx(2.0 - d_h, rel=1e-6)
-    assert zm_vals.iloc[-1] == pytest.approx(3.0 - d_h, rel=1e-6)
-    # All zm values should be positive
-    assert (zm_vals > 0).all()
-
-
-def test_array_inst_height_accepted(seasonal_df, quiet_logger):
-    """A plain list/array is also accepted as inst_height."""
-    heights = [2.0, 2.0, 3.0, 3.0]
-    model = FFPModel(
-        seasonal_df,
-        crop_height=0.2,
-        inst_height=heights,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    assert (model.df["zm"] > 0).all()
-
-
-def test_series_inst_height_below_crop_raises(seasonal_df, quiet_logger):
-    """Any time step where inst_height <= crop_height must raise ValueError."""
-    crop_h = 0.5
-    heights = pd.Series([2.0, 0.3, 2.0, 2.0], index=seasonal_df.index)  # second row too low
-    with pytest.raises(ValueError, match="inst_height must be greater than crop_height"):
-        FFPModel(
-            seasonal_df,
-            crop_height=crop_h,
-            inst_height=heights,
-            atm_bound_height=1500.0,
-            domain=[-100.0, 100.0, -100.0, 100.0],
-            dx=100.0,
-            smooth_data=False,
-            verbosity=0,
-            logger=quiet_logger,
-        )
-
-
-def test_series_inst_height_end_to_end(seasonal_df, quiet_logger):
-    """End-to-end smoke test: time-varying inst_height produces a valid footprint."""
-    heights = pd.Series([2.0, 2.0, 3.0, 3.0], index=seasonal_df.index)
-    model = FFPModel(
-        seasonal_df,
-        crop_height=0.2,
-        inst_height=heights,
-        atm_bound_height=1500.0,
-        domain=[-100.0, 100.0, -100.0, 100.0],
-        dx=100.0,
-        smooth_data=False,
-        verbosity=0,
-        logger=quiet_logger,
-    )
-    results = model.run(return_result=True)
-    assert results is not None
-    assert "footprint_climatology" in results
-    assert results["footprint_climatology"].values.sum() > 0

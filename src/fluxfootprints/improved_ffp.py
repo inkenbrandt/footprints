@@ -30,9 +30,6 @@ class FFPModel(BaseFootprintModel):
 
     Attributes
     ----------
-    REQUIRED_COLUMNS : list of str
-        Names of required columns in the input DataFrame.
-
     df : pandas.DataFrame
         Copy of the input DataFrame used for modeling.
 
@@ -49,14 +46,6 @@ class FFPModel(BaseFootprintModel):
         Logger instance for model-level debugging.
     """
 
-    REQUIRED_COLUMNS = [
-        "sigmav",  # Standard deviation of lateral velocity fluctuations
-        "ustar",  # Friction velocity
-        "ol",  # Obukhov length
-        "wind_dir",  # Wind direction
-        "umean",  # Wind speed
-    ]
-
     def __init__(
         self,
         df: pd.DataFrame,
@@ -66,12 +55,6 @@ class FFPModel(BaseFootprintModel):
         nx: int = 1000,
         ny: int = 1000,
         rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        crop_height: float = 0.2,
-        atm_bound_height: float = 2000.0,
-        inst_height: float = 2.0,
-        zm: Optional[float] = None,
-        z0: Optional[float] = None,
-        roughness_fraction: float = 0.123,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -85,8 +68,25 @@ class FFPModel(BaseFootprintModel):
         Parameters
         ----------
         df : pandas.DataFrame
-            Input DataFrame with required meteorological columns including:
-            'V_SIGMA', 'USTAR', 'MO_LENGTH', 'WD', 'WS'.
+        DataFrame containing time series of micrometeorological inputs.
+        Must contain the following required columns:
+
+            zm : float or Series
+                Measurement height above displacement height (i.e. z – d) [m].
+            z0 : float or Series or None
+                Surface roughness length [m].
+            umean : float or Series
+                Mean wind speed at zm [m s⁻¹].
+            h : float or Series
+                Boundary‑layer height [m].
+            ol : float or Series
+                Obukhov length [m].
+            sigmav : float or Series
+                Standard deviation of lateral velocity fluctuations [m s⁻¹].
+            ustar : float or Series
+                Friction velocity [m s⁻¹].
+            wind_dir : float or Series
+                Wind direction in degrees (0–360°, meteorological convention).
 
         domain : list of float, optional
             Footprint domain in the format [xmin, xmax, ymin, ymax].
@@ -105,36 +105,6 @@ class FFPModel(BaseFootprintModel):
 
         rs : list of float, optional
             Relative source area contributions to evaluate. Values must be between 0 and 1.
-
-        zm : float, optional
-            Effective measurement height above the zero-plane displacement height
-            (i.e. ``z_instrument - d``) [m].  When provided together with ``z0``,
-            these values are used directly and ``crop_height`` / ``inst_height``
-            are ignored for the height derivation.
-
-        z0 : float, optional
-            Aerodynamic roughness length [m].  Must be supplied together with
-            ``zm`` when bypassing the ``crop_height`` derivation.
-
-        roughness_fraction : float, optional
-            Ratio used to derive z0 from crop_height when z0 is not supplied
-            directly: ``z0 = crop_height * roughness_fraction``.  Typical
-            values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
-            (corn).  Default is 0.123.
-
-        crop_height : float, optional
-            Height of vegetation or surface roughness (m). Used to derive ``zm``
-            and ``z0`` when those are not provided directly. Default is 0.2.
-
-        atm_bound_height : float, optional
-            Height of the atmospheric boundary layer (m). Must be > 10. Default is 2000.0.
-
-        inst_height : float or pandas.Series, optional
-            Height of the measurement instrument (m). Used to derive ``zm`` when
-            ``zm`` is not provided directly. Must be > crop_height. Default is 2.0.
-            Pass a ``pd.Series`` with the same DatetimeIndex as ``df`` to account
-            for instrument height changes throughout the season (e.g. when the
-            IRGASON is repositioned).
 
         rslayer : bool, optional
             If True, apply roughness sublayer corrections. Default is False.
@@ -159,47 +129,6 @@ class FFPModel(BaseFootprintModel):
         ValueError
             If any input parameters are invalid or inconsistent.
         """
-        # Validate atmospheric boundary layer height (always required)
-        if atm_bound_height <= 10:
-            raise ValueError("atm_bound_height must be > 10m")
-
-        # Resolve effective measurement height and roughness length
-        if zm is not None and z0 is not None:
-            # Direct inputs take priority over crop_height / inst_height
-            zm_eff = float(zm)
-            z0_eff = float(z0)
-            if zm_eff <= 0:
-                raise ValueError("zm must be positive")
-            if z0_eff <= 0:
-                raise ValueError("z0 must be positive")
-        elif zm is not None or z0 is not None:
-            raise ValueError(
-                "Both zm and z0 must be provided together. "
-                "Supply neither (use crop_height + inst_height) or both."
-            )
-        else:
-            # Backward-compatible path: derive from crop_height and inst_height.
-            # inst_height may be a scalar float or a pd.Series aligned with df.index
-            # to support instrument repositioning throughout the season.
-            if crop_height < 0:
-                raise ValueError("crop_height must be positive")
-
-            if isinstance(inst_height, (pd.Series, np.ndarray, list)):
-                inst_h = (
-                    inst_height.reindex(df.index)
-                    if isinstance(inst_height, pd.Series)
-                    else pd.Series(inst_height, index=df.index)
-                )
-                if (inst_h <= crop_height).any():
-                    raise ValueError("inst_height must be greater than crop_height at all time steps")
-            else:
-                inst_h = float(inst_height)
-                if inst_h <= crop_height:
-                    raise ValueError("inst_height must be greater than crop_height")
-
-            d_h = 10 ** (0.979 * np.log10(max(crop_height, 1e-6)) - 0.154)
-            zm_eff = inst_h - d_h  # scalar float or pd.Series
-            z0_eff = crop_height * roughness_fraction
 
         super().__init__(
             df=df,
@@ -207,20 +136,10 @@ class FFPModel(BaseFootprintModel):
             dx=dx,
             dy=dy,
             rs=rs,
-            crop_height=crop_height,
-            atm_bound_height=atm_bound_height,
-            inst_height=inst_height,
-            zm=zm,
-            z0=z0,
-            roughness_fraction=roughness_fraction,
             smooth_data=smooth_data,
             verbosity=verbosity,
             logger=logger,
         )
-
-        # Store resolved values for internal use
-        self.zm_eff = zm_eff
-        self.z0_eff = z0_eff
 
         # Set up logger
         self.logger.setLevel(logging.DEBUG if self.verbosity > 1 else logging.WARNING)
@@ -238,13 +157,6 @@ class FFPModel(BaseFootprintModel):
 
         # Validate input DataFrame
         self.df = self._validate_input_df(self.df)
-
-        # Process input data
-        self.prep_df_fields(
-            zm=zm_eff,
-            z0=z0_eff,
-            atm_bound_height=self.atm_bound_height,
-        )
 
         # Initialize basic attributes
         self.sigma_y = None
@@ -266,6 +178,8 @@ class FFPModel(BaseFootprintModel):
         # Initialize model parameters (will be updated based on stability)
         self.initialize_model_parameters()
 
+        self.prep_df_fields()
+
         # Set up computational domain
         self.define_domain()
 
@@ -278,53 +192,13 @@ class FFPModel(BaseFootprintModel):
         # Handle stability regimes
         self.handle_stability_regimes()
 
-    def _validate_input_df(self, df: pd.DataFrame) -> None:
-        """
-        Validate that the input DataFrame contains all required columns.
-
-        Parameters
-        ----------
-        df : pandas.DataFrame
-            The input DataFrame to validate.
-
-        Raises
-        ------
-        ValueError
-            If required columns are missing from the DataFrame.
-        """
-        df1 = df.copy()  # Make a copy to avoid modifying original
-
-        # Rename fields to standard names
-        df1 = df1.rename(
-            columns={
-                "V_SIGMA": "sigmav",
-                "USTAR": "ustar",
-                "wd": "wind_dir",
-                "WD": "wind_dir",
-                "MO_LENGTH": "ol",
-                "ws": "umean",
-                "WS": "umean",
-            }
-        )
-
-        missing_cols = [
-            col
-            for col in self.REQUIRED_COLUMNS
-            if col not in df1.columns
-        ]
-        if missing_cols:
-            raise ValueError(
-                f"Missing required columns in input DataFrame: {missing_cols}"
-            )
-
-        # Check for invalid values
-        for col in self.REQUIRED_COLUMNS:
-            if df1[col].isnull().any():
-                self.logger.warning(f"Found null values in column {col}")
-            if not np.isfinite(df1[col]).all():
-                self.logger.warning(f"Found non-finite values in column {col}")
-
-        return df1
+    def _validate_input_df(self, df=None, config=None, required_vars=None):
+        """Pass-through validation method required by BaseFootprintModel."""
+        if df is not None and isinstance(df, pd.DataFrame):
+            return df
+        if hasattr(self, "df") and isinstance(self.df, pd.DataFrame):
+            return self.df
+        return pd.DataFrame()
 
     def _validate_domain(self, domain: list) -> list:
         """
@@ -702,54 +576,53 @@ class FFPModel(BaseFootprintModel):
             self.x_min = xr.full_like(self.ds["ustar"], np.nan)
 
 
-    def prep_df_fields(
-        self,
-        zm: Union[float, "pd.Series"],
-        z0: float,
-        atm_bound_height: float,
-    ):
-        """
-        Prepare and normalize input DataFrame fields for footprint calculation.
+    def prep_df_fields(self):
+        """Sanitize DataFrame fields, compute RSL parameters, and drop invalid timesteps.
 
-        Parameters
-        ----------
-        zm : float or pd.Series
-            Effective measurement height above displacement height (m). A Series
-            aligned with the DataFrame index allows per-timestep values, e.g. when
-            the instrument was repositioned during the season.
-        z0 : float
-            Aerodynamic roughness length (m).
-        atm_bound_height : float
-            Atmospheric boundary layer height (m).
+        Assumes df already contains standardized column names from
+        build_climatology.
         """
-        if isinstance(zm, pd.Series):
-            self.df["zm"] = zm.reindex(self.df.index)
-        else:
-            self.df["zm"] = zm
-        self.df["z0"] = z0
-        self.df["h"] = atm_bound_height
+        required_fields = [
+            "zm",
+            "z0",
+            "h",
+            "ol",
+            "sigmav",
+            "ustar",
+            "wind_dir",
+            "umean",
+        ]
+        missing_fields = [
+            col for col in required_fields if col not in self.df.columns
+        ]
+        if missing_fields:
+            raise ValueError(
+                f"Missing required columns in DataFrame: {missing_fields}"
+            )
 
-        # Apply validity checks
+        # Filter out out-of-bound physical values
         self._apply_validity_masks()
 
-        # Drop invalid data
-        self.df = self.df.dropna(subset=["sigmav", "wind_dir", "h", "ol"])
-        self.ts_len = len(self.df)
-        self.logger.debug(f"Valid input length: {self.ts_len}")
-
-        # Add RSL validity check
-        rsl_valid = self.check_rsl_validity()
-        self.df["rsl_valid"] = rsl_valid
-
-        # Additional RSL parameters
-        self.df["h_rs"] = 10 * self.df["z0"]
+        # Compute RSL height parameters and validity mask
+        self.df["h_rs"] = 10.0 * self.df["z0"]
         self.df["z_star"] = self.n_rsl * self.df["h_rs"]
+        self.df["rsl_valid"] = self.df["zm"] > self.df["z_star"]
 
-        # Log RSL statistics
+        # Drop any row with NaNs across required fields
+        self.df = self.df.dropna(
+            subset=required_fields + ["rsl_valid"], how="any"
+        )
+        self.ts_len = len(self.df)
+
+        if self.ts_len == 0:
+            raise ValueError(
+                "All timesteps were dropped during field validation due to invalid bounds or NaNs."
+            )
+
         mean_z_star = self.df["z_star"].mean()
         mean_zm = self.df["zm"].mean()
         self.logger.info(
-            f"Mean RSL height (z*): {mean_z_star:.1f}m, "
+            f"Valid timesteps: {self.ts_len} | Mean RSL height (z*): {mean_z_star:.1f}m, "
             f"Mean measurement height (zm): {mean_zm:.2f}m"
         )
 
