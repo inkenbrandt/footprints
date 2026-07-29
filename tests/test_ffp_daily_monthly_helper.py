@@ -4,14 +4,13 @@
 import os
 from pathlib import Path
 import sys
-import types
 
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
 
-# Import project from ../src as requested
+# Import project from ../src
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src"))
 )
@@ -20,16 +19,16 @@ from fluxfootprints import ffp_daily_monthly_helper as helper
 from fluxfootprints.base_footprint_model import BaseFootprintModel
 from fluxfootprints.ffp_xr import ffp_climatology_new
 
-# Shared mapping for build_climatology when using amf_like_df
+# Shared mapping for build_climatology matching lowercase amf_like_df columns
 AMF_CLIM_PARAMS = dict(
-    ustar="USTAR",
-    ol="MO_LENGTH",
-    umean="WS",
-    sigmav="V_SIGMA",
-    wind_dir="WD",
-    zm=2.0,
-    z0=0.1,
-    h=2000.0,
+    ustar="ustar",
+    ol="ol",
+    umean="umean",
+    sigmav="sigmav",
+    wind_dir="wind_dir",
+    zm="zm",
+    z0="z0",
+    h="h",
     dx=10.0,
     dy=10.0,
     domain=(-100.0, 100.0, -100.0, 100.0),
@@ -53,16 +52,22 @@ def tiny_times():
 
 @pytest.fixture
 def amf_like_df(tiny_times):
+    """DataFrame containing required micrometeorological inputs and LE for ET weighting."""
     n = len(tiny_times)
-    return pd.DataFrame({
-        "TIMESTAMP_START": tiny_times,
-        "WD": np.linspace(0, 330, n),  # deg
-        "WS": np.full(n, 3.0),  # m/s
-        "USTAR": np.full(n, 0.3),  # m/s
-        "MO_LENGTH": np.full(n, 100.0),  # m
-        "V_SIGMA": np.full(n, 0.5),  # m/s
-        "LE": np.linspace(100.0, 200.0, n),  # W/m^2
-    }).set_index("TIMESTAMP_START")
+    return pd.DataFrame(
+        {
+            "TIMESTAMP_START": tiny_times,
+            "wind_dir": np.linspace(0, 330, n),  # deg
+            "umean": np.full(n, 3.0),            # m/s
+            "ustar": np.full(n, 0.3),            # m/s
+            "ol": np.full(n, 100.0),             # m
+            "sigmav": np.full(n, 0.5),           # m/s
+            "zm": np.full(n, 2.5),               # m (measurement height)
+            "z0": np.full(n, 0.05),              # m (roughness length)
+            "h": np.full(n, 1000.0),             # m (boundary layer height)
+            "LE": np.linspace(100.0, 200.0, n),  # W/m^2
+        }
+    ).set_index("TIMESTAMP_START")
 
 
 @pytest.fixture
@@ -124,19 +129,7 @@ def test_load_amf_df(mini_ini, tmp_path):
 # ffp_xr solver basics
 # ----------------------------
 def test_ffp_xr_run_direct(amf_like_df):
-    # Standardize column names and supply required height parameters directly
-    df2 = amf_like_df.copy().rename(
-        columns={
-            "WD": "wind_dir",
-            "WS": "umean",
-            "USTAR": "ustar",
-            "MO_LENGTH": "ol",
-            "V_SIGMA": "sigmav",
-        }
-    )
-    df2["zm"] = 2.0
-    df2["z0"] = 0.1
-    df2["h"] = 2000.0
+    df2 = amf_like_df.copy()
 
     clim = ffp_climatology_new(
         df=df2, dx=10.0, dy=10.0, domain=[-100.0, 100.0, -100.0, 100.0]

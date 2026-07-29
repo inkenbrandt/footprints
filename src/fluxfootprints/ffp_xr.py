@@ -28,62 +28,46 @@ class ffp_climatology_new(BaseFootprintModel):
 
     Parameters
     ----------
-    zm : float or 1‑D array_like
-        Measurement height above displacement height (i.e.\ ``z – d``) [m].
-    z0 : float or 1‑D array_like or None
-        Surface roughness length [m].  Either `z0` **or** `umean` must be
-        provided; if both are given, `z0` takes precedence.
-    umean : float or 1‑D array_like or None
-        Mean wind speed at `zm` [m s⁻¹].
-    h : 1‑D array_like
-        Boundary‑layer height [m].
-    ol : 1‑D array_like
-        Obukhov length [m].
-    sigmav : 1‑D array_like
-        Standard deviation of lateral velocity fluctuations [m s⁻¹].
-    ustar : 1‑D array_like
-        Friction velocity [m s⁻¹].
-    wind_dir : 1‑D array_like
-        Wind direction in degrees (0–360°, meteorological convention).
+    df : pandas.DataFrame
+        DataFrame containing time series of micrometeorological inputs.
+        Must contain the following required columns:
 
-    Other Parameters
-    ----------------
-    domain : array_like of float, optional
+        zm : float or Series
+            Measurement height above displacement height (i.e. z – d) [m].
+        z0 : float or Series or None
+            Surface roughness length [m].
+        umean : float or Series
+            Mean wind speed at zm [m s⁻¹].
+        h : float or Series
+            Boundary‑layer height [m].
+        ol : float or Series
+            Obukhov length [m].
+        sigmav : float or Series
+            Standard deviation of lateral velocity fluctuations [m s⁻¹].
+        ustar : float or Series
+            Friction velocity [m s⁻¹].
+        wind_dir : float or Series
+            Wind direction in degrees (0–360°, meteorological convention).
+
+    domain : array_like of float, default=[-1000.0, 1000.0, -1000.0, 1000.0]
         Domain limits ``[xmin, xmax, ymin, ymax]`` [m].
-        Default is the smaller of
-
-        * the minimal rectangle that contains the *r* % footprint, or
-        * ``[-1000, 1000, -1000, 1000]``.
-    dx, dy : float, optional
-        Grid‑cell size in x and y [m].  Defaults to 2 m.  If only `dx`
-        is given, `dy = dx`.
-    nx, ny : int, optional
-        Number of grid cells in x and y.  Defaults to 1000×1000.  Ignored
-        when `dx`/`dy` **and** `domain` are supplied (cell size wins).
-    rs : float or sequence of float, optional
-        Source‑area percentages for which contour lines are returned,
-        e.g.\ ``80`` or ``[10, 30, 80]``.  Values may be expressed as
-        percentages (``80``) or fractions (``0.8``).  Must be 10–90 %.
-        Default is ``np.arange(10, 90, 10)``.  Use ``None`` to skip
-        contour calculations.
-    rslayer : {0, 1}, optional
-        If 1, allow calculations when `zm` lies in the roughness sub‑layer
-        (RS).  **Warning:** the model is formally **invalid** within the RS,
-        so results are only indicative.  Requires `z0`.  Default is 0.
-    smooth_data : {0, 1}, optional
-        Apply a convolution filter to smooth the footprint climatology.
-        Default is 1 (smooth).
-    crop : {0, 1}, optional
-        Crop the output grid to the extent of the largest requested
-        contour (`rs`) or, if `rs` is *None*, the 80 % contour.  Default 0.
-    pulse : int, optional
-        Print progress every *pulse* footprints.  Default is no output.
-    verbosity : {0, 1, 2}, optional
-        Verbosity level: 0 = silent, 1 = only fatal messages, 2 = chatty.
-        Default 2.
-    fig : {0, 1}, optional
-        Plot an example footprint on screen when set to 1.  Default 0.
-
+    dx, dy : float, default=10.0
+        Grid‑cell size in x and y directions [m].
+    nx, ny : int, default=1000
+        Number of grid cells in x and y. Ignored if `dx`/`dy` are supplied.
+    rs : list or ndarray, default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+        Source‑area contour fractions (e.g., 0.8 for 80%).
+    rslayer : bool, default=False
+        If True, allow calculations when `zm` lies in the roughness sub‑layer (RS).
+        Warning: Model is formally invalid within the RS.
+    smooth_data : bool, default=True
+        Apply a Gaussian convolution filter to smooth the footprint climatology.
+    crop : bool, default=False
+        Crop the output grid to the extent of the largest requested contour.
+    verbosity : {0, 1, 2}, default=2
+        Verbosity level: 0 = silent, 1 = fatal only, 2 = warning/info.
+    fig : bool, default=False
+        Plot an example footprint on screen.
     Returns
     -------
     FFP : dict
@@ -112,18 +96,15 @@ class ffp_climatology_new(BaseFootprintModel):
 
     Examples
     --------
+    >>> import pandas as pd
     >>> from fluxfootprints import ffp_climatology_new
-    >>> clim = ffp_climatology_new(
-    ...     zm=2.5,
-    ...     z0=0.1,
-    ...     h=h_series,
-    ...     ol=ol_series,
-    ...     sigmav=sigmav_series,
-    ...     ustar=ustar_series,
-    ...     wind_dir=wd_series,
-    ... )
-    >>> clim["fclim_2d"].shape
-    (1000, 1000)
+    >>> # Prepare DataFrame with required columns
+    >>> df = pd.DataFrame({
+    ...     "zm": [2.5], "z0": [0.1], "umean": [3.2], "h": [800.0],
+    ...     "ol": [-50.0], "sigmav": [0.4], "ustar": [0.25], "wind_dir": [180.0]
+    ... })
+    >>> model = ffp_climatology_new(df=df, dx=5.0, dy=5.0)
+    >>> results = model.run()
     """
 
     def __init__(
@@ -160,7 +141,6 @@ class ffp_climatology_new(BaseFootprintModel):
 
 
         self.fclim_2d = None
-        
 
         # Model parameters
         self.xmin, self.xmax, self.ymin, self.ymax = domain
