@@ -49,12 +49,6 @@ class BaseFootprintModel(ABC):
         dx: float = 10.0,
         dy: float = 10.0,
         rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-        crop_height: float = 0.2,
-        atm_bound_height: float = 2000.0,
-        inst_height: float = 2.0,
-        zm: Optional[float] = None,
-        z0: Optional[float] = None,
-        roughness_fraction: float = 0.123,
         smooth_data: bool = True,
         verbosity: int = 2,
         logger: Optional[logging.Logger] = None,
@@ -73,28 +67,6 @@ class BaseFootprintModel(ABC):
             Grid spacing in meters
         rs : list
             Source area fractions (0-1) to compute
-        zm : float, optional
-            Effective measurement height above displacement height (m).
-            When provided together with ``z0``, takes priority over
-            ``crop_height`` / ``inst_height``.
-        z0 : float, optional
-            Aerodynamic roughness length (m).  Must be supplied together
-            with ``zm`` when bypassing the ``crop_height`` derivation.
-        roughness_fraction : float, optional
-            Ratio used to derive z0 from crop_height when z0 is not supplied
-            directly: ``z0 = crop_height * roughness_fraction``.  Typical
-            values range from ~0.05 (pinyon-juniper, alfalfa) to ~0.15
-            (corn).  Default is 0.123 (a commonly used approximation).
-        crop_height : float
-            Vegetation/canopy height (m). Used to derive ``zm`` and ``z0``
-            when those are not supplied directly.
-        atm_bound_height : float
-            Atmospheric boundary layer height (m)
-        inst_height : float or pandas.Series
-            Instrument measurement height (m). Used to derive ``zm`` when
-            ``zm`` is not supplied directly. Pass a ``pd.Series`` with the
-            same DatetimeIndex as ``df`` to support height changes throughout
-            the season (e.g. IRGASON repositioned mid-season).
         smooth_data : bool
             Apply smoothing to output
         verbosity : int
@@ -107,12 +79,6 @@ class BaseFootprintModel(ABC):
         self.dx = float(dx)
         self.dy = float(dy)
         self.rs = rs
-        self.crop_height = crop_height
-        self.atm_bound_height = atm_bound_height
-        self.inst_height = inst_height
-        self.zm = zm
-        self.z0 = z0
-        self.roughness_fraction = float(roughness_fraction)
         self.smooth_data = smooth_data
         self.verbosity = int(verbosity)
         

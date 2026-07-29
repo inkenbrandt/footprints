@@ -167,7 +167,6 @@ def test_initialization(valid_df):
     assert isinstance(model.df, pd.DataFrame)
     assert model.dx == 10.0
     assert model.dy == 10.0
-    assert model.inst_height > model.crop_height
     assert all(col in model.df.columns for col in ["sigmav", "ustar", "ol"])
 
 
