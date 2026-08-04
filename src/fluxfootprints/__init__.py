@@ -28,7 +28,8 @@ from .by_row_fetch_tools import (
 
 from .nldas_read_functions import (
     call_nldas_time_series,
-    parse_nldas_csv
+    parse_nldas_csv,
+    fetch_nldas_forcing_dataset,
 )
 
 from .kormannmeixner import (  # type: ignore
