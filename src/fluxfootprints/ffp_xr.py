@@ -401,7 +401,6 @@ class ffp_climatology_new(BaseFootprintModel):
 
         # less than or equal to zero covers the px filter as well
         sigy_dummy = xr.where(sigy_dummy <= 0.0, np.nan, sigy_dummy)
-        # sigy_dummy = xr.where(px, sigy_dummy, 0.0)
 
         # sig_cond = np.logical_or(sigy_dummy.isnull(), px, sigy_dummy == 0.0)
         #
@@ -470,46 +469,6 @@ class ffp_climatology_new(BaseFootprintModel):
                 output_core_dims=[["x", "y"]],
             )
 
-    def smooth_and_contour(self, rs=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]):
-        """
-        Compute footprint climatology using xarray structures for efficient, vectorized operations.
-
-        Parameters:
-            rs (list): Contour levels to compute.
-            smooth_data (bool): Whether to smooth data using Gaussian filtering.
-
-        Returns:
-            xr.Dataset: Aggregated footprint climatology.
-        """
-
-        # Ensure the footprint data is normalized
-        self.ds["footprint"] = self.fclim_2d
-        self.ds["footprint"] = self.ds["footprint"] / self.ds["footprint"].sum(
-            dim=("x", "y")
-        )
-
-        # Apply smoothing if requested
-        if self.smooth_data:
-            self.ds["footprint"] = xr.apply_ufunc(
-                gaussian_filter,
-                self.ds["footprint"],
-                kwargs={"sigma": 1.0},
-                input_core_dims=[["x", "y"]],
-                output_core_dims=[["x", "y"]],
-            )
-
-        # Calculate cumulative footprint and extract contours
-        cumulative = self.ds["footprint"].cumsum(dim="x").cumsum(dim="y")
-
-        contours = {r: cumulative.where(cumulative >= r).fillna(0) for r in self.rs}
-
-        # Combine results into a dataset
-        climatology = xr.Dataset(
-            {f"contour_{int(r * 100)}": data for r, data in contours.items()}
-        )
-
-        return climatology
-
     def run(self, return_result: bool = True):
 
         self.calc_xr_footprint()
@@ -523,4 +482,3 @@ class ffp_climatology_new(BaseFootprintModel):
                         }
                     )
             return results
-        # self.smooth_and_contour()
