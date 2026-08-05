@@ -70,24 +70,14 @@ class ffp_climatology_new(BaseFootprintModel):
         Plot an example footprint on screen.
     Returns
     -------
-    FFP : dict
-        Dictionary with keys (see below) carrying the climatology results.
-    x_2d, y_2d : ndarray
-        2‑D grids (mesh‑grids) of x and y coordinates [m].
-    fclim_2d : ndarray
-        Normalised footprint‑climatology values [m⁻²].
-    rs : ndarray or None
-        Echo of input `rs` in percent, or *None* when `rs` was *None*.
-    fr : ndarray or None
-        Footprint value at each `rs` contour.
-    xr, yr : list[ndarray] or None
-        x‑ and y‑coordinates of every `rs` contour line.
-    n : int
-        Number of individual footprints used in the aggregation.
-    flag_err : {0, 1, 2, 3}
-        Error/status flag:
-        *0* no error, *1* fatal error, *2* some contours outside domain,
-        *3* invalid input rows removed.
+    results : xarray.Dataset
+        Dataset containing:
+        - footprint_climatology : DataArray (x, y)
+            Normalised 2D footprint climatology density values [m⁻²].
+        - domain_x : 1D coordinate array
+            x-axis grid coordinates [m].
+        - domain_y : 1D coordinate array
+            y-axis grid coordinates [m].
 
     Notes
     -----
@@ -169,7 +159,6 @@ class ffp_climatology_new(BaseFootprintModel):
 
         # ===========================================================================
         # Input check
-        self.flag_err = 0
 
         self.dx = dx
         self.dy = dy
@@ -238,6 +227,7 @@ class ffp_climatology_new(BaseFootprintModel):
             self.raise_ffp_exception(1)
 
         self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
+        self.df['z0'] = np.where(self.df['z0'] <= 0, np.nan, self.df["z0"])
         self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
         self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])
         self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])
@@ -254,20 +244,14 @@ class ffp_climatology_new(BaseFootprintModel):
 
         self.df = self.df.dropna(subset=required_fields, how="any")
         self.ts_len = len(self.df)
+        if self.df.empty:
+            self.raise_ffp_exception(2)
         self.logger.debug(f"input len is {self.ts_len}")
 
     def raise_ffp_exception(self, code):
         exceptions = {
             1: "At least one required parameter is missing. Check the inputs.",
-            2: "zm (measurement height) must be larger than zero.",
-            3: "z0 (roughness length) must be larger than zero.",
-            4: "h (boundary layer height) must be larger than 10 m.",
-            5: "zm (measurement height) must be smaller than h (boundary layer height).",
-            6: "zm (measurement height) should be above the roughness sub-layer.",
-            7: "zm/ol (measurement height to Obukhov length ratio) must be >= -15.5.",
-            8: "sigmav (standard deviation of crosswind) must be larger than zero.",
-            9: "ustar (friction velocity) must be >= 0.1.",
-            10: "wind_dir (wind direction) must be in the range [0, 360].",
+            2: "At least one row in dataframe required after filtering bad values"
         }
 
         message = exceptions.get(code, "Unknown error code.")
@@ -276,7 +260,7 @@ class ffp_climatology_new(BaseFootprintModel):
             print(f"Error {code}: {message}")
             self.logger.info(f"Error {code}: {message}")
 
-        if code in [1, 4, 5, 7, 9, 10]:  # Fatal errors
+        if code in [1, 2]:  # Fatal errors
             self.logger.error(f"Error {code}: {message}")
             raise ValueError(f"FFP Exception {code}: {message}")
 
@@ -406,7 +390,6 @@ class ffp_climatology_new(BaseFootprintModel):
 
         # less than or equal to zero covers the px filter as well
         sigy_dummy = xr.where(sigy_dummy <= 0.0, np.nan, sigy_dummy)
-        # sigy_dummy = xr.where(px, sigy_dummy, 0.0)
 
         # sig_cond = np.logical_or(sigy_dummy.isnull(), px, sigy_dummy == 0.0)
         #
@@ -475,46 +458,6 @@ class ffp_climatology_new(BaseFootprintModel):
                 output_core_dims=[["x", "y"]],
             )
 
-    def smooth_and_contour(self, rs=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]):
-        """
-        Compute footprint climatology using xarray structures for efficient, vectorized operations.
-
-        Parameters:
-            rs (list): Contour levels to compute.
-            smooth_data (bool): Whether to smooth data using Gaussian filtering.
-
-        Returns:
-            xr.Dataset: Aggregated footprint climatology.
-        """
-
-        # Ensure the footprint data is normalized
-        self.ds["footprint"] = self.fclim_2d
-        self.ds["footprint"] = self.ds["footprint"] / self.ds["footprint"].sum(
-            dim=("x", "y")
-        )
-
-        # Apply smoothing if requested
-        if self.smooth_data:
-            self.ds["footprint"] = xr.apply_ufunc(
-                gaussian_filter,
-                self.ds["footprint"],
-                kwargs={"sigma": 1.0},
-                input_core_dims=[["x", "y"]],
-                output_core_dims=[["x", "y"]],
-            )
-
-        # Calculate cumulative footprint and extract contours
-        cumulative = self.ds["footprint"].cumsum(dim="x").cumsum(dim="y")
-
-        contours = {r: cumulative.where(cumulative >= r).fillna(0) for r in self.rs}
-
-        # Combine results into a dataset
-        climatology = xr.Dataset(
-            {f"contour_{int(r * 100)}": data for r, data in contours.items()}
-        )
-
-        return climatology
-
     def run(self, return_result: bool = True):
 
         self.calc_xr_footprint()
@@ -528,4 +471,3 @@ class ffp_climatology_new(BaseFootprintModel):
                         }
                     )
             return results
-        # self.smooth_and_contour()
