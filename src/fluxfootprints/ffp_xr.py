@@ -254,20 +254,14 @@ class ffp_climatology_new(BaseFootprintModel):
 
         self.df = self.df.dropna(subset=required_fields, how="any")
         self.ts_len = len(self.df)
+        if not self.df.empty:
+            self.raise_ffp_exception(2)
         self.logger.debug(f"input len is {self.ts_len}")
 
     def raise_ffp_exception(self, code):
         exceptions = {
             1: "At least one required parameter is missing. Check the inputs.",
-            2: "zm (measurement height) must be larger than zero.",
-            3: "z0 (roughness length) must be larger than zero.",
-            4: "h (boundary layer height) must be larger than 10 m.",
-            5: "zm (measurement height) must be smaller than h (boundary layer height).",
-            6: "zm (measurement height) should be above the roughness sub-layer.",
-            7: "zm/ol (measurement height to Obukhov length ratio) must be >= -15.5.",
-            8: "sigmav (standard deviation of crosswind) must be larger than zero.",
-            9: "ustar (friction velocity) must be >= 0.1.",
-            10: "wind_dir (wind direction) must be in the range [0, 360].",
+            2: "At least one row in dataframe required after filtering bad values"
         }
 
         message = exceptions.get(code, "Unknown error code.")
@@ -276,7 +270,7 @@ class ffp_climatology_new(BaseFootprintModel):
             print(f"Error {code}: {message}")
             self.logger.info(f"Error {code}: {message}")
 
-        if code in [1, 4, 5, 7, 9, 10]:  # Fatal errors
+        if code in [1, 2]:  # Fatal errors
             self.logger.error(f"Error {code}: {message}")
             raise ValueError(f"FFP Exception {code}: {message}")
 
