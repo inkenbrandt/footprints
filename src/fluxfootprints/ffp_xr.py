@@ -238,6 +238,7 @@ class ffp_climatology_new(BaseFootprintModel):
             self.raise_ffp_exception(1)
 
         self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
+        self.df['z0'] = np.where(self.df['z0'] <= 0, np.nan, self.df["z0"])
         self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
         self.df["zm"] = np.where(self.df["zm"] > self.df["h"], np.nan, self.df["zm"])
         self.df["sigmav"] = np.where(self.df["sigmav"] < 0.0, np.nan, self.df["sigmav"])
