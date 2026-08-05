@@ -70,24 +70,14 @@ class ffp_climatology_new(BaseFootprintModel):
         Plot an example footprint on screen.
     Returns
     -------
-    FFP : dict
-        Dictionary with keys (see below) carrying the climatology results.
-    x_2d, y_2d : ndarray
-        2‑D grids (mesh‑grids) of x and y coordinates [m].
-    fclim_2d : ndarray
-        Normalised footprint‑climatology values [m⁻²].
-    rs : ndarray or None
-        Echo of input `rs` in percent, or *None* when `rs` was *None*.
-    fr : ndarray or None
-        Footprint value at each `rs` contour.
-    xr, yr : list[ndarray] or None
-        x‑ and y‑coordinates of every `rs` contour line.
-    n : int
-        Number of individual footprints used in the aggregation.
-    flag_err : {0, 1, 2, 3}
-        Error/status flag:
-        *0* no error, *1* fatal error, *2* some contours outside domain,
-        *3* invalid input rows removed.
+    results : xarray.Dataset
+        Dataset containing:
+        - footprint_climatology : DataArray (x, y)
+            Normalised 2D footprint climatology density values [m⁻²].
+        - domain_x : 1D coordinate array
+            x-axis grid coordinates [m].
+        - domain_y : 1D coordinate array
+            y-axis grid coordinates [m].
 
     Notes
     -----
@@ -169,7 +159,6 @@ class ffp_climatology_new(BaseFootprintModel):
 
         # ===========================================================================
         # Input check
-        self.flag_err = 0
 
         self.dx = dx
         self.dy = dy
@@ -255,7 +244,7 @@ class ffp_climatology_new(BaseFootprintModel):
 
         self.df = self.df.dropna(subset=required_fields, how="any")
         self.ts_len = len(self.df)
-        if not self.df.empty:
+        if self.df.empty:
             self.raise_ffp_exception(2)
         self.logger.debug(f"input len is {self.ts_len}")
 
