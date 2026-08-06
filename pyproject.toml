@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 license = {text = "GNU General Public License v3.0"}
 authors = [
     {name = "Paul Inkenbrandt", email = "paulinkenbrandt@utah.gov"},
+    {name = "Diane Menuz", email = "dmenuz@utah.gov"},
     {name = "Natascha Kljun", email = "natascha.kljun@cec.lu.se"},
     {name = "John Volk", email = "John.Volk@dri.edu "},
 ]
