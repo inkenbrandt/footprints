@@ -226,6 +226,8 @@ class ffp_climatology_new(BaseFootprintModel):
         if not all_present:
             self.raise_ffp_exception(1)
 
+        initial_len = len(self.df)
+
         self.df["zm"] = np.where(self.df["zm"] <= 0.0, np.nan, self.df["zm"])
         self.df['z0'] = np.where(self.df['z0'] <= 0, np.nan, self.df["z0"])
         self.df["h"] = np.where(self.df["h"] <= 10.0, np.nan, self.df["h"])
@@ -242,11 +244,28 @@ class ffp_climatology_new(BaseFootprintModel):
             self.df["wind_dir"] < 0.0, np.nan, self.df["wind_dir"]
         )
 
+        # Kljun et al. (2015) Eq. 27 Validity Bounds
+        stability_mask = (self.df["zm"] / self.df["ol"]) >= -15.5
+        self.df["ol"] = np.where(stability_mask, self.df["ol"], np.nan)
+
+        # 2. Roughness sublayer bound: zm >= 12.5 * z0 (only enforced if rslayer is False)
+        # listed as 12.5 in Kljun python script but 20 in paper
+        if not bool(self.rslayer):
+            rslayer_mask = self.df["zm"] >= (12.5 * self.df["z0"])
+            self.df["zm"] = np.where(rslayer_mask, self.df["zm"], np.nan)
+
         self.df = self.df.dropna(subset=required_fields, how="any")
         self.ts_len = len(self.df)
+
+        dropped_count = initial_len - self.ts_len
+        if dropped_count > 0:
+            self.logger.warning(
+                f"{dropped_count}/{initial_len} timesteps excluded due to range or "
+                f"Kljun validity bounds (rslayer={self.rslayer})."
+            )
         if self.df.empty:
             self.raise_ffp_exception(2)
-        self.logger.debug(f"input len is {self.ts_len}")
+        self.logger.debug(f"Input length after prep is {self.ts_len}")
 
     def raise_ffp_exception(self, code):
         exceptions = {
@@ -255,14 +274,7 @@ class ffp_climatology_new(BaseFootprintModel):
         }
 
         message = exceptions.get(code, "Unknown error code.")
-
-        if self.verbosity > 0:
-            print(f"Error {code}: {message}")
-            self.logger.info(f"Error {code}: {message}")
-
-        if code in [1, 2]:  # Fatal errors
-            self.logger.error(f"Error {code}: {message}")
-            raise ValueError(f"FFP Exception {code}: {message}")
+        raise ValueError(message)
 
     def define_domain(self):
         # ===========================================================================
@@ -404,29 +416,6 @@ class ffp_climatology_new(BaseFootprintModel):
                 -((self.rho * np.sin(self.rotated_theta)) ** 2) / (2.0 * sigy_dummy**2)
             ),
         )
-
-        # Apply Kljun et al. (2015) Eq. 27 validity bounds — zero out timesteps
-        # outside the parameterisation's stated applicability range so they do not
-        # contribute weight to the climatology.
-        stability_valid = (self.ds["zm"] / self.ds["ol"]) >= -15.5
-        height_valid = (
-            (self.ds["zm"] > 20.0 * self.ds["z0"])
-            & (self.ds["zm"] < 0.8 * self.ds["h"])
-        )
-        valid_mask = stability_valid & height_valid
-        if not self.rslayer:
-            # Exclude in-RSL timesteps (zm ≤ n_rsl·h_rs ≈ 27.5·z0) when not in
-            # RSL mode; the parameterisation is formally invalid below this height.
-            valid_mask = valid_mask & (self.ds["zm"] > 27.5 * self.ds["z0"])
-
-        n_invalid = int((~valid_mask).sum())
-        if n_invalid > 0:
-            self.logger.warning(
-                f"{n_invalid}/{self.ts_len} timesteps excluded: outside "
-                "Kljun et al. (2015) validity bounds (Eq. 27)"
-            )
-
-        self.f_2d = xr.where(valid_mask, self.f_2d, 0.0)
 
         # Reproduce the original Kljun et al. (2015) aggregation: sum the
         # real-scale footprint densities [m^-2] over time and divide by the
