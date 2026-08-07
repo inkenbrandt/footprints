@@ -48,3 +48,5 @@ docs/notebooks/.DS_Store
 .gitignore
 .DS_Store
 /.venv/*
+/.claude
+/uv.lock
