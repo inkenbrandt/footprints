@@ -1,6 +1,7 @@
-import numpy as np
 from dataclasses import dataclass
-from typing import Optional, Tuple
+
+import numpy as np
+import scipy
 
 
 @dataclass
@@ -321,7 +322,7 @@ def kormann_meixner_01(
         x = i * dx
         # Cross-wind integrated 1D function (gamma function approximation)
         contribution = (
-            zeta**mu * np.exp(-zeta / x) / (x ** (1.0 + mu) * np.math.gamma(mu))
+            zeta**mu * np.exp(-zeta / x) / (x ** (1.0 + mu) * scipy.special.gamma(mu))
         )
         integral += contribution * dx
 
