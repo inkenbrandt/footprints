@@ -50,3 +50,4 @@ docs/notebooks/.DS_Store
 /.venv/*
 /.claude
 /uv.lock
+/tests/__pycache__

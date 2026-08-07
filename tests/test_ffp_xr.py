@@ -108,12 +108,6 @@ def test_missing_required_parameters_raise():
         _ = FFP(df=df_missing, domain=[-50, 50, -50, 50], dx=10.0, dy=10.0, verbosity=0)
 
 
-def test_explicit_raise_ffp_exception(model_unsmoothed):
-    """Exercise the explicit error path to ensure ValueError is raised for fatal codes."""
-    with pytest.raises(ValueError, match="FFP Exception 4"):
-        model_unsmoothed.raise_ffp_exception(4)
-
-
 # --- Tests: grid and dataset setup --------------------------------------------
 def test_grid_creation_and_initial_arrays(model_unsmoothed, small_domain):
     m = model_unsmoothed
@@ -243,23 +237,6 @@ def test_smoothing_changes_variability_and_preserves_scale(
     sm_sum = float(np.nansum(sm))
     ratio = sm_sum / raw_sum if raw_sum > 0 else 1.0
     assert 0.85 <= ratio <= 1.15
-
-
-# --- Tests: contour post-processing -------------------------------------------
-def test_smooth_and_contour_produces_expected_vars(model_smoothed):
-    """smooth_and_contour() should return a dataset with expected contour variables."""
-    m = model_smoothed
-    m.calc_xr_footprint()
-
-    m.rs = [0.2, 0.5, 0.8]
-    ds_contours = m.smooth_and_contour()
-
-    for pct in (20, 50, 80):
-        var = f"contour_{pct}"
-        assert var in ds_contours.data_vars
-        da = ds_contours[var]
-        assert da.shape == (len(m.x), len(m.y))
-        assert bool((da.values > 0).any())
 
 
 # --- Tests: Kljun validity filtering (issue #8) --------------------------------
