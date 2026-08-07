@@ -101,11 +101,16 @@ def test_polar_to_cartesian_dataframe_list_of_columns():
 # ---------------------------------------------------------------------------
 def test_generate_density_raster_properties():
     """Minimal smoke test: array dims, transform, bounds, and non‑negativity."""
-    # Create ten weighted points in a diagonal line
-    pts = [
-        Point(x, y) for x, y in zip(np.linspace(0, 100, 10), np.linspace(0, 100, 10))
-    ]
-    gdf = gpd.GeoDataFrame({"ET": np.ones(10)}, geometry=pts, crs="EPSG:5070")
+    # Create ten weighted points jittered off a diagonal line so the
+    # coordinates aren't collinear (gaussian_kde requires a non‑singular
+    # covariance matrix, which a perfectly straight line can't provide).
+    rng = np.random.default_rng(0)
+    base = np.linspace(0, 100, 10)
+    x = base + rng.normal(scale=5, size=10)
+    y = base + rng.normal(scale=5, size=10)
+    pts = [Point(px, py) for px, py in zip(x, y)]
+    weights = rng.uniform(0.5, 1.5, size=10)
+    gdf = gpd.GeoDataFrame({"ET": weights}, geometry=pts, crs="EPSG:5070")
 
     density, transform, bounds = generate_density_raster(gdf, resolution=50)
 

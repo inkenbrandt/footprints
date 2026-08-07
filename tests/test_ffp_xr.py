@@ -260,13 +260,13 @@ def _base_df(n=6, ol=-100.0, wind_dir=180.0, zm=2.0, z0=0.05, h=800.0):
     )
 
 
-_FFP_KW = dict(
-    domain=[-200.0, 200.0, -200.0, 200.0],
-    dx=20.0,
-    dy=20.0,
-    smooth_data=False,
-    verbosity=0,
-)
+_FFP_KW = {
+    "domain": [-200.0, 200.0, -200.0, 200.0],
+    "dx": 20.0,
+    "dy": 20.0,
+    "smooth_data": False,
+    "verbosity": 0,
+}
 
 
 def test_no_nans_in_climatology_after_validity_masking():
