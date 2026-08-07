@@ -16,7 +16,7 @@ from .ffp_daily_monthly_helper import (
     export_contours_gpkg,
     export_rasters_geotiff,
     export_contour_stats_csv,
-    compute_aerodynamic_params
+    compute_aerodynamic_params,
 )
 
 from .by_row_fetch_tools import (
@@ -54,21 +54,17 @@ from .ls_footprint_model import (  # noqa: E402
 
 from .wang_footprint import wang2006_fy, reconstruct_gaussian_2d
 
-
-
 __all__ = [
     # Base interface
     "BaseFootprintModel",
-    
     # Model implementations
     "FFPModel",
-    "KormannMeixnerModel", 
+    "KormannMeixnerModel",
     "LSFootprintModelAdapter",
     "WangFootprintModel",
-    
     # Helper functions
     "build_climatology",
     # ... rest ...
 ]
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
