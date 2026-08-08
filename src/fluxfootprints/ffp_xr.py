@@ -35,9 +35,12 @@ class ffp_climatology_new(BaseFootprintModel):
         zm : float or Series
             Measurement height above displacement height (i.e. z – d) [m].
         z0 : float or Series or None
-            Surface roughness length [m].
-        umean : float or Series
-            Mean wind speed at zm [m s⁻¹].
+            Surface roughness length [m]. Either `z0` or `umean` must be
+            supplied per timestep; if `z0` is missing it is derived from the
+            log-wind profile using `umean` (see :meth:`calc_xr_footprint`).
+        umean : float or Series or None
+            Mean wind speed at zm [m s⁻¹]. Either `umean` or `z0` must be
+            supplied per timestep.
         h : float or Series
             Boundary‑layer height [m].
         ol : float or Series
@@ -210,21 +213,33 @@ class ffp_climatology_new(BaseFootprintModel):
         """Sanitize DataFrame input range bounds and drop invalid timesteps.
 
         Assumes df already contains standardized column names from
-        build_climatology.
+        build_climatology. `z0` and `umean` are not both required: at least
+        one must be available per timestep, since a missing `z0` can be
+        derived from the log-wind profile using `umean` (see
+        :meth:`calc_xr_footprint`). Kljun et al. (2015) Eq. 27 validity
+        bounds (stability, height, roughness sublayer) are evaluated
+        per-timestep in :meth:`calc_xr_footprint`, not here.
         """
-        required_fields = [
+        base_required_fields = [
             "zm",
-            "z0",
             "h",
             "ol",
             "sigmav",
             "ustar",
             "wind_dir",
-            "umean",
         ]
-        all_present = all(col in self.df.columns for col in required_fields)
+        all_present = all(col in self.df.columns for col in base_required_fields)
         if not all_present:
             self.raise_ffp_exception(1)
+
+        has_z0 = "z0" in self.df.columns
+        has_umean = "umean" in self.df.columns
+        if not has_z0 and not has_umean:
+            self.raise_ffp_exception(1)
+        if not has_z0:
+            self.df["z0"] = np.nan
+        if not has_umean:
+            self.df["umean"] = np.nan
 
         initial_len = len(self.df)
 
@@ -244,24 +259,18 @@ class ffp_climatology_new(BaseFootprintModel):
             self.df["wind_dir"] < 0.0, np.nan, self.df["wind_dir"]
         )
 
-        # Kljun et al. (2015) Eq. 27 Validity Bounds
-        stability_mask = (self.df["zm"] / self.df["ol"]) >= -15.5
-        self.df["ol"] = np.where(stability_mask, self.df["ol"], np.nan)
+        # A row needs z0 directly, or umean to derive an effective z0 from the
+        # log-wind profile in calc_xr_footprint; drop rows with neither.
+        self.df = self.df[~(self.df["z0"].isna() & self.df["umean"].isna())]
 
-        # 2. Roughness sublayer bound: zm >= 12.5 * z0 (only enforced if rslayer is False)
-        # listed as 12.5 in Kljun python script but 20 in paper
-        if not bool(self.rslayer):
-            rslayer_mask = self.df["zm"] >= (12.5 * self.df["z0"])
-            self.df["zm"] = np.where(rslayer_mask, self.df["zm"], np.nan)
-
-        self.df = self.df.dropna(subset=required_fields, how="any")
+        self.df = self.df.dropna(subset=base_required_fields, how="any")
         self.ts_len = len(self.df)
 
         dropped_count = initial_len - self.ts_len
         if dropped_count > 0:
             self.logger.warning(
-                f"{dropped_count}/{initial_len} timesteps excluded due to range or "
-                f"Kljun validity bounds (rslayer={self.rslayer})."
+                f"{dropped_count}/{initial_len} timesteps excluded due to range "
+                f"bounds or missing both z0 and umean."
             )
         if self.df.empty:
             self.raise_ffp_exception(2)
@@ -273,7 +282,7 @@ class ffp_climatology_new(BaseFootprintModel):
             2: "At least one row in dataframe required after filtering bad values"
         }
 
-        message = exceptions.get(code, "Unknown error code.")
+        message = f"FFP Exception {code}: {exceptions.get(code, 'Unknown error code.')}"
         raise ValueError(message)
 
     def define_domain(self):
@@ -325,14 +334,18 @@ class ffp_climatology_new(BaseFootprintModel):
             + np.pi / 2.0,
         )
 
-        xstar_bottom = xr.where(
-            self.ds["z0"].isnull(),
-            (self.ds["umean"] / self.ds["ustar"] * self.k),
-            (np.log(self.ds["zm"] / self.ds["z0"]) - psi_f),
+        # Derive an effective z0 from the log-wind profile (Kljun et al. 2015,
+        # Eq. 6) for timesteps where z0 was not supplied, so umean-only rows
+        # can still be evaluated consistently with rows that have z0 directly.
+        z0_est = self.ds["zm"] * np.exp(
+            -((self.ds["umean"] * self.k / self.ds["ustar"]) + psi_f)
         )
+        effective_z0 = xr.where(self.ds["z0"].isnull(), z0_est, self.ds["z0"])
+
+        xstar_bottom = np.log(self.ds["zm"] / effective_z0) - psi_f
 
         xstar_ci_dummy = xr.where(
-            (np.log(self.ds["zm"] / self.ds["z0"]) - psi_f) > 0,
+            xstar_bottom > 0,
             self.rho
             * np.cos(self.rotated_theta)
             / self.ds["zm"]
@@ -343,8 +356,19 @@ class ffp_climatology_new(BaseFootprintModel):
 
         xstar_ci_dummy = xstar_ci_dummy.astype(float)
 
+        # Kljun et al. (2015) Eq. 27 validity bounds, evaluated with
+        # effective_z0 so rows lacking z0 (using the umean-derived estimate)
+        # are checked consistently with rows that supplied z0 directly.
+        stability_valid = (self.ds["zm"] / self.ds["ol"]) >= -15.5
+        height_valid = (self.ds["zm"] > 20.0 * effective_z0) & (
+            self.ds["zm"] < 0.8 * self.ds["h"]
+        )
+        valid_mask = stability_valid & height_valid
+        if not self.rslayer:
+            valid_mask = valid_mask & (self.ds["zm"] > 27.5 * effective_z0)
+
         # Mask invalid values
-        px = xstar_ci_dummy > self.d
+        px = (xstar_ci_dummy > self.d) & valid_mask
 
         # Compute fstar_ci_dummy and f_ci_dummy
         fstar_ci_dummy = xr.where(

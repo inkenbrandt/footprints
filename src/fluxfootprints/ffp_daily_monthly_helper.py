@@ -478,6 +478,10 @@ def summarize_periods(
         cell_area = dx * dy
 
     # 2. Integrate density over cell area to get captured fraction (0.0 to 1.0)
+    # Near the tower (small sigma_y), this Riemann sum can exceed 1.0 (i.e. >100%
+    # coverage) because a narrow Gaussian peak is sampled at a single grid center
+    # rather than integrated over the cell. This is a known discretization artifact,
+    # not a bug, and is intentionally left unclamped so it stays visible for review.
     slice_sums = f_2d.sum(dim=("x", "y")) * cell_area
     valid_sums = slice_sums.where(slice_sums > 0, np.nan) * 100.0
 
