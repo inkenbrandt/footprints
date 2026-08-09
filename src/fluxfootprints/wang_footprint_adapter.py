@@ -16,36 +16,51 @@ from .wang_footprint import wang2006_fy, reconstruct_gaussian_2d
 class WangFootprintModel(BaseFootprintModel):
     """
     Wang et al. (2006) convective footprint model adapter.
-    
-    Note: Valid only for daytime convective conditions.
+
+    Wraps :func:`wang2006_fy` and :func:`reconstruct_gaussian_2d` in the
+    standard :class:`BaseFootprintModel` interface. Intended to be driven
+    through :func:`fluxfootprints.ffp_daily_monthly_helper.build_climatology`,
+    which resolves per-timestep inputs into a DataFrame with the standardized
+    column names below; the model reads those columns directly.
+
+    Note: Valid only for daytime convective conditions (Obukhov length < 0).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input data. Must contain the following required columns:
+
+        zm : float or Series
+            Measurement height above displacement height (i.e. z - d) [m].
+        h : float or Series
+            Boundary-layer height [m].
+        ol : float or Series
+            Obukhov length [m]. Must be negative (convective) per timestep.
+        sigmav : float or Series
+            Standard deviation of lateral velocity fluctuations [m s⁻¹].
+        umean : float or Series
+            Mean wind speed at zm [m s⁻¹].
     """
-    
-    REQUIRED_COLUMNS = ["ol", "sigmav", "umean"]
-    
+
+    REQUIRED_COLUMNS = ["zm", "h", "ol", "sigmav", "umean"]
+
     def _validate_input_df(self, df: pd.DataFrame) -> pd.DataFrame:
         """Validate required columns."""
         df = df.copy()
-        
-        rename_map = {
-            "MO_LENGTH": "ol",
-            "V_SIGMA": "sigmav",
-            "WS": "umean",
-        }
-        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-        
+
         missing = [col for col in self.REQUIRED_COLUMNS if col not in df.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
-        
+
         df = df.replace(-9999, np.nan)
         df = df.dropna(subset=self.REQUIRED_COLUMNS)
-        
+
         # Filter for convective conditions only
         df = df[df["ol"] < 0]
-        
+
         if len(df) == 0:
             raise ValueError("Wang model requires convective conditions (L < 0)")
-        
+
         return df
     
     def run(self, return_result: bool = True) -> Optional[xr.Dataset]:
@@ -53,14 +68,7 @@ class WangFootprintModel(BaseFootprintModel):
         self.logger.info("Starting Wang et al. (2006) footprint calculation...")
         
         self.df = self._validate_input_df(self.df)
-        
-        # Use directly supplied zm if available, otherwise derive from crop_height
-        if self.zm is not None:
-            zm = float(self.zm)
-        else:
-            d = 10 ** (0.979 * np.log10(self.crop_height) - 0.154)
-            zm = self.inst_height - d
-        
+
         # Setup x domain (positive upwind)
         xmin, xmax, ymin, ymax = self.domain
         self.x = np.arange(0, abs(xmin) + self.dx, self.dx)
@@ -74,8 +82,8 @@ class WangFootprintModel(BaseFootprintModel):
                 # Calculate 1D footprint
                 fy = wang2006_fy(
                     self.x,
-                    zm=zm,
-                    h=self.atm_bound_height,
+                    zm=row["zm"],
+                    h=row["h"],
                     L=row["ol"],
                 )
                 
@@ -86,12 +94,12 @@ class WangFootprintModel(BaseFootprintModel):
                     sigma_v=row["sigmav"],
                     U=row["umean"],
                     y_max=abs(ymax),
-                    ny=int((abs(ymax) - abs(ymin)) / self.dy),
+                    ny=int((ymax - ymin) / self.dy) + 1,
                 )
                 
                 if footprint_sum_2d is None:
                     footprint_sum_2d = F
-                    self.y = Y[0, :]  # Extract y coordinates
+                    self.y = Y[:, 0]  # Extract y coordinates
                 else:
                     footprint_sum_2d += F
                 
