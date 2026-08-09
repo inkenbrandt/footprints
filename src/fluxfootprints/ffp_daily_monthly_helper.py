@@ -9,35 +9,33 @@ Updated to use FFPModel as the canonical implementation.
 
 from __future__ import annotations
 
-import math
-import logging
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List, Union, Any, Sequence, Type
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import xarray as xr
-from rasterio import features
-from affine import Affine
-import rasterio
-from rasterio.transform import from_origin
-from rasterio.warp import calculate_default_transform, reproject, Resampling
 import csv
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional, Union
 
 import geopandas as gpd
-from shapely.geometry import Polygon
+import numpy as np
+import pandas as pd
+import rasterio
+import xarray as xr
+from affine import Affine
 from pyproj import CRS, Transformer
-from pyproj.database import query_utm_crs_info
 from pyproj.aoi import AreaOfInterest
+from pyproj.database import query_utm_crs_info
+from rasterio import features
+from rasterio.transform import from_origin
+from rasterio.warp import Resampling, calculate_default_transform, reproject
+from shapely.geometry import Polygon
 
-# Use FFPModel as canonical implementation
+from .base_footprint_model import BaseFootprintModel
+from .ffp_xr import ffp_climatology_new
 from .improved_ffp import FFPModel
-    # Import models
 from .kormannmeixner_adapter import KormannMeixnerModel
 from .ls_footprint_adapter import LSFootprintModelAdapter
 from .wang_footprint_adapter import WangFootprintModel
-from .base_footprint_model import BaseFootprintModel
-from .ffp_xr import ffp_climatology_new
 
 # Keep backward compatibility option
 _LEGACY_MODE = False
@@ -53,7 +51,7 @@ except ImportError:
 # ------------------------------
 
 
-def load_config(ini_path: str | Path) -> Dict[str, Any]:
+def load_config(ini_path: str | Path) -> dict[str, Any]:
     """Read a minimal INI for site metadata and column names."""
     import configparser
 
@@ -66,24 +64,24 @@ def load_config(ini_path: str | Path) -> Dict[str, Any]:
         except Exception:
             return fallback
 
-    cfg = dict(
-        station_latitude=_getfloat("METADATA", "station_latitude"),
-        station_longitude=_getfloat("METADATA", "station_longitude"),
-        missing_data_value=_getfloat("METADATA", "missing_data_value", -9999.0),
-        skiprows=int(cp.get("METADATA", "skiprows", fallback="0")),
-        date_parser=cp.get("METADATA", "date_parser", fallback="%Y%m%d%H%M"),
-        ts_col=cp.get("DATA", "datestring_col", fallback="TIMESTAMP_START"),
+    cfg = {
+        "station_latitude": _getfloat("METADATA", "station_latitude"),
+        "station_longitude": _getfloat("METADATA", "station_longitude"),
+        "missing_data_value": _getfloat("METADATA", "missing_data_value", -9999.0),
+        "skiprows": int(cp.get("METADATA", "skiprows", fallback="0")),
+        "date_parser": cp.get("METADATA", "date_parser", fallback="%Y%m%d%H%M"),
+        "ts_col": cp.get("DATA", "datestring_col", fallback="TIMESTAMP_START"),
         # Column names used by the footprint model
-        wind_dir_col=cp.get("DATA", "wind_dir_col", fallback="WD"),
-        wind_spd_col=cp.get("DATA", "wind_spd_col", fallback="WS"),
-        ustar_col=cp.get("DATA", "USTAR", fallback="USTAR"),
-        mo_length_col=cp.get("DATA", "MO_LENGTH", fallback="MO_LENGTH"),
-        v_sigma_col=cp.get("DATA", "V_SIGMA", fallback="V_SIGMA"),
-    )
+        "wind_dir_col": cp.get("DATA", "wind_dir_col", fallback="WD"),
+        "wind_spd_col": cp.get("DATA", "wind_spd_col", fallback="WS"),
+        "ustar_col": cp.get("DATA", "USTAR", fallback="USTAR"),
+        "mo_length_col": cp.get("DATA", "MO_LENGTH", fallback="MO_LENGTH"),
+        "v_sigma_col": cp.get("DATA", "V_SIGMA", fallback="V_SIGMA"),
+    }
     return cfg
 
 
-def load_amf_df(csv_path: str | Path, cfg: Dict[str, Any]) -> pd.DataFrame:
+def load_amf_df(csv_path: str | Path, cfg: dict[str, Any]) -> pd.DataFrame:
     """Load AMF half-hourly CSV and return a tidy DataFrame indexed by time."""
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -120,16 +118,14 @@ VEG_PRESETS = {
 }
 
 # Unified Flexible Input Type Alias
-FlexibleInput = Union[
-    str, float, int, pd.Series, np.ndarray, Sequence[float], None
-]
+FlexibleInput = str | float | int | pd.Series | np.ndarray | Sequence[float] | None
 
 def _resolve_input(
     val: FlexibleInput,
     df: pd.DataFrame,
     param_name: str = "input",
     as_series: bool = True,
-) -> Union[pd.Series, float, int, None]:
+) -> pd.Series | float | int | None:
     """Safely resolve string column names, pd.Series, np.ndarrays, lists, or numeric scalars.
 
     Parameters
@@ -183,11 +179,11 @@ def _resolve_input(
 
 def compute_aerodynamic_params(
     df: pd.DataFrame,
-    inst_height: Union[float, str, pd.Series, np.ndarray],
-    crop_height: Union[float, str, pd.Series, np.ndarray],
-    veg_type: Optional[str] = None,
-    z0_ratio: Optional[Union[float, str, pd.Series, np.ndarray]] = None,
-    d_h_ratio: Optional[Union[float, str, pd.Series, np.ndarray]] = None,
+    inst_height: float | str | pd.Series | np.ndarray,
+    crop_height: float | str | pd.Series | np.ndarray,
+    veg_type: str | None = None,
+    z0_ratio: float | str | pd.Series | np.ndarray | None = None,
+    d_h_ratio: float | str | pd.Series | np.ndarray | None = None,
 ) -> pd.DataFrame:
     """
     Calculate effective measurement height (zm) and roughness length (z0).
@@ -266,10 +262,10 @@ def compute_aerodynamic_params(
 # ------------------------------
 
 def _resolve_input(
-    val: Union[str, float, int, pd.Series, None],
+    val: str | float | pd.Series | None,
     df: pd.DataFrame,
     name: str = "input",
-) -> Union[pd.Series, None]:
+) -> pd.Series | None:
     """Helper to convert str column name, single numeric scalar, or pd.Series
 
     into a consistent pd.Series matched to df.index.
@@ -293,7 +289,7 @@ def _resolve_input(
             f"Invalid type for {name}: {type(val)}. Expected str, float, int, or pd.Series."
         )
 
-FootprintInput = Union[str, float, int, pd.Series, None]
+FootprintInput = str | float | int | pd.Series | None
 
 def build_climatology(
     df: pd.DataFrame,
@@ -308,13 +304,13 @@ def build_climatology(
     h: FootprintInput = 2000.0,
     dx: float = 10.0,
     dy: float = 10.0,
-    domain: Tuple[float, float, float, float] = (
+    domain: tuple[float, float, float, float] = (
         -1000.0,
         1000.0,
         -1000.0,
         1000.0,
     ),
-    rs: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    rs: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
     smooth_data: bool = True,
     verbosity: int = 2,
     logger: Optional[logging.Logger] = None,
@@ -337,7 +333,7 @@ def build_climatology(
     }
 
     # 2. Per-Model Variable Requirements
-    MODEL_REQUIREMENTS: Dict[str, List[str]] = {
+    MODEL_REQUIREMENTS: dict[str, list[str]] = {
         "ffp": ["wind_dir", "umean", "ustar", "ol", "sigmav", "zm", "z0", "h"],
         "ffp_xr": [
             "wind_dir",
@@ -392,16 +388,16 @@ def build_climatology(
         )
 
     # 5. Build parameter dictionary and instantiate model
-    common_params = dict(
-        df=df_prepared,
-        domain=list(domain),
-        dx=float(dx),
-        dy=float(dy),
-        rs=rs,
-        smooth_data=smooth_data,
-        verbosity=verbosity,
-        logger=logger,
-    )
+    common_params = {
+        "df": df_prepared,
+        "domain": list(domain),
+        "dx": float(dx),
+        "dy": float(dy),
+        "rs": rs,
+        "smooth_data": smooth_data,
+        "verbosity": verbosity,
+        "logger": logger,
+    }
     common_params.update(model_kwargs)
 
     try:
@@ -442,18 +438,18 @@ def _et_from_le(df: pd.DataFrame, le_col: str = "LE") -> pd.Series:
 
 @dataclass
 class SummaryResult:
-    f_daily_mean: Optional[xr.DataArray] = None
-    f_monthly_mean: Optional[xr.DataArray] = None
-    f_daily_et_weighted: Optional[xr.DataArray] = None
-    f_monthly_et_weighted: Optional[xr.DataArray] = None
-    daily_domain_coverage: Optional[pd.DataFrame] = None
-    monthly_domain_coverage: Optional[pd.DataFrame] = None
+    f_daily_mean: xr.DataArray | None = None
+    f_monthly_mean: xr.DataArray | None = None
+    f_daily_et_weighted: xr.DataArray | None = None
+    f_monthly_et_weighted: xr.DataArray | None = None
+    daily_domain_coverage: pd.DataFrame | None = None
+    monthly_domain_coverage: pd.DataFrame | None = None
 
 
 def summarize_periods(
     model: BaseFootprintModel,
     df: pd.DataFrame,
-    et_source: Optional[str] = "LE",
+    et_source: str | None = "LE",
     is_le: bool = True,  # Set False if passing direct ET (e.g., NLDAS in mm/hr)
     calc_et_weighted: bool = True,  # Toggle ET weighting on/off
     daily: bool = True,
@@ -752,13 +748,13 @@ def export_contours_gpkg(
 
             resid_m = rn_m - sum(v for v in (h_m, le_m, g_m) if np.isfinite(v))
             out.update(
-                dict(
-                    Rn_mean_Wm2=rn_m,
-                    H_mean_Wm2=h_m,
-                    LE_mean_Wm2=le_m,
-                    G_mean_Wm2=g_m,
-                    Residual_mean_Wm2=resid_m,
-                )
+                {
+                    "Rn_mean_Wm2": rn_m,
+                    "H_mean_Wm2": h_m,
+                    "LE_mean_Wm2": le_m,
+                    "G_mean_Wm2": g_m,
+                    "Residual_mean_Wm2": resid_m,
+                }
             )
             if np.isfinite(rn_m) and rn_m != 0.0:
                 total = sum(v for v in (h_m, le_m, g_m) if np.isfinite(v))
@@ -768,15 +764,15 @@ def export_contours_gpkg(
                 out["Closure_frac"] = np.nan
                 out["Residual_frac_of_Rn"] = np.nan
         except Exception:
-            out = dict(
-                Rn_mean_Wm2=np.nan,
-                H_mean_Wm2=np.nan,
-                LE_mean_Wm2=np.nan,
-                G_mean_Wm2=np.nan,
-                Residual_mean_Wm2=np.nan,
-                Closure_frac=np.nan,
-                Residual_frac_of_Rn=np.nan,
-            )
+            out = {
+                "Rn_mean_Wm2": np.nan,
+                "H_mean_Wm2": np.nan,
+                "LE_mean_Wm2": np.nan,
+                "G_mean_Wm2": np.nan,
+                "Residual_mean_Wm2": np.nan,
+                "Closure_frac": np.nan,
+                "Residual_frac_of_Rn": np.nan,
+            }
         return out
 
     # Prepare output
@@ -795,7 +791,7 @@ def export_contours_gpkg(
         return Polygon(np.column_stack([vx, vy]))
 
     # Layer collection helper
-    def _collect_layer(da: Optional[xr.DataArray], base_layer: str):
+    def _collect_layer(da: xr.DataArray | None, base_layer: str):
         if da is None:
             return
         for r in levels:
