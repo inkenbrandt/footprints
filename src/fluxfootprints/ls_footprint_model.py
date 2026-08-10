@@ -131,8 +131,7 @@ class BackwardLSModel:
         y = np.zeros(n)
         z = np.full(n, cfg.zm)
 
-        active = np.ones(n, dtype=bool)
-        return dict(x=x, y=y, z=z, u=u, v=v, w=w, active=active)
+        return dict(x=x, y=y, z=z, u=u, v=v, w=w)
 
     # ------------------------------------------------------------------
     # Velocity update – simplified well‑mixed form (Ornstein‑Uhlenbeck)
@@ -170,8 +169,8 @@ class BackwardLSModel:
         """Run the LS footprint simulation and accumulate 2‑D footprint."""
         cfg = self.cfg
         p = self._initial_particle_state(cfg.n_particles)
+        x, y, z, u, v, w = p["x"], p["y"], p["z"], p["u"], p["v"], p["w"]
 
-        n_active = cfg.n_particles
         steps = int(cfg.t_max / cfg.dt)
 
         # Rotate mean wind coordinate frame so x is upstream
@@ -179,18 +178,11 @@ class BackwardLSModel:
         cosd, sind = math.cos(wind_dir_rad), math.sin(wind_dir_rad)
 
         for _ in range(steps):
-            if n_active == 0:
+            if x.size == 0:
                 break  # all particles have landed
 
-            idx = p["active"]
-            z = p["z"][idx]
-            u = p["u"][idx]
-            v = p["v"][idx]
-            w = p["w"][idx]
-
-            # Update velocities
+            # Update velocities (arrays hold only still-airborne particles)
             u, v, w = self._update_velocity(z, u, v, w)
-            p["u"][idx], p["v"][idx], p["w"][idx] = u, v, w
 
             # Mean wind at current *z*
             U_mean = log_wind_profile(z, cfg.ustar, cfg.z0)
@@ -203,24 +195,32 @@ class BackwardLSModel:
             dy_cross = -v * dt
             dz = -w * dt
 
-            p["x"][idx] += (
-                dx_upwind * cosd - dy_cross * sind
-            )  # rotate back to geographic
-            p["y"][idx] += dx_upwind * sind + dy_cross * cosd
-            p["z"][idx] += dz
+            x += dx_upwind * cosd - dy_cross * sind  # rotate back to geographic
+            y += dx_upwind * sind + dy_cross * cosd
+            z += dz
 
-            # Check for landings
-            landed = p["z"] <= cfg.z0
+            # Check for landings and drop landed particles from further
+            # integration so they are counted exactly once.
+            landed = z <= cfg.z0
             if np.any(landed):
-                # Bin landing positions into footprint grid
-                self._accumulate(p["x"][landed], p["y"][landed])
-                p["active"][landed] = False
-                n_active -= int(np.sum(landed))
+                self._accumulate(x[landed], y[landed])
+                survivors = ~landed
+                x, y, z, u, v, w = (
+                    x[survivors],
+                    y[survivors],
+                    z[survivors],
+                    u[survivors],
+                    v[survivors],
+                    w[survivors],
+                )
+                if x.size == 0:
+                    break
 
             # Reflect particles that escape top of BL to conserve mass
-            above = p["z"] > cfg.h
-            p["z"][above] = 2 * cfg.h - p["z"][above]  # mirror reflection
-            p["w"][above] *= -1  # invert vertical velocity when reflecting
+            above = z > cfg.h
+            if np.any(above):
+                z[above] = 2 * cfg.h - z[above]  # mirror reflection
+                w[above] *= -1  # invert vertical velocity when reflecting
 
         # Normalise to unit flux contribution
         self.footprint_2d /= np.sum(self.footprint_2d * cfg.dx * cfg.dy)
