@@ -37,6 +37,7 @@ from .kormannmeixner import (  # type: ignore
     length_scale_xi,
     crosswind_integrated_footprint,
     footprint_2d,
+    footprint_at_points,
     cumulative_fetch,
     effective_fetch,
     KAPPA,

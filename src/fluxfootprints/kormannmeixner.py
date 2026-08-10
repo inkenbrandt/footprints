@@ -36,81 +36,103 @@ PI_SQRT2 = np.sqrt(2.0 * np.pi)
 # -----------------------------------------------------------------------------
 
 
-def _phi_m(z_over_L: float) -> float:
+def _descalar(a: np.ndarray) -> float | np.ndarray:
+    """Return a Python float for 0-d arrays, else the array unchanged.
+
+    Lets the vectorized stability/power-law functions below accept either
+    scalars or arrays and hand back the matching shape, so a single
+    implementation serves both a one-off call and a whole-column call over
+    a DataFrame.
+    """
+    a = np.asarray(a)
+    return a.item() if a.ndim == 0 else a
+
+
+def _phi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
     """
     Compute the non-dimensional wind shear function φ_m(z/L).
 
     This function returns the stability correction for momentum
     as a function of the stability parameter z/L. It follows
     the Businger-Dyer relationships for both stable and unstable conditions.
+    Accepts scalars or arrays; both branches are evaluated elementwise and
+    selected with :func:`numpy.where`, so this is safe to call on a whole
+    column of z/L values at once.
 
     Parameters
     ----------
-    z_over_L : float
+    z_over_L : float or np.ndarray
         Stability parameter (z / L), where z is the measurement height and L is the Monin-Obukhov length.
 
     Returns
     -------
-    float
+    float or np.ndarray
         The value of φ_m(z/L), the stability correction for momentum.
     """
-    if z_over_L >= 0.0:  # stable or neutral
-        return 1.0 + 5.0 * z_over_L
-    # unstable
-    return (1.0 - 16.0 * z_over_L) ** -0.25
+    z_over_L = np.asarray(z_over_L, dtype=float)
+    with np.errstate(invalid="ignore"):
+        stable = 1.0 + 5.0 * z_over_L
+        unstable = (1.0 - 16.0 * z_over_L) ** -0.25
+    return _descalar(np.where(z_over_L >= 0.0, stable, unstable))
 
 
-def _phi_c(z_over_L: float) -> float:
+def _phi_c(z_over_L: float | np.ndarray) -> float | np.ndarray:
     """
     Compute the non-dimensional scalar diffusivity function φ_c(z/L).
 
     This function returns the stability correction for scalar transport
     (e.g., heat, vapor) as a function of the stability parameter z/L,
-    using the Businger-Dyer formulation.
+    using the Businger-Dyer formulation. Accepts scalars or arrays; see
+    :func:`_phi_m` for the elementwise-selection approach.
 
     Parameters
     ----------
-    z_over_L : float
+    z_over_L : float or np.ndarray
         Stability parameter (z / L), where z is the measurement height and L is the Monin-Obukhov length.
 
     Returns
     -------
-    float
+    float or np.ndarray
         The value of φ_c(z/L), the stability correction for scalar transport.
     """
-    if z_over_L >= 0.0:
-        return 1.0 + 5.0 * z_over_L
-    return (1.0 - 16.0 * z_over_L) ** -0.5
+    z_over_L = np.asarray(z_over_L, dtype=float)
+    with np.errstate(invalid="ignore"):
+        stable = 1.0 + 5.0 * z_over_L
+        unstable = (1.0 - 16.0 * z_over_L) ** -0.5
+    return _descalar(np.where(z_over_L >= 0.0, stable, unstable))
 
 
-def _psi_m(z_over_L: float) -> float:
+def _psi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
     """
     Compute the integrated stability correction function ψ_m(z/L) for momentum.
 
     This function calculates the integral form of the Monin-Obukhov
     stability correction for momentum. For unstable conditions, it uses
-    the formulation from Paulson (1970).
+    the formulation from Paulson (1970). Accepts scalars or arrays; see
+    :func:`_phi_m` for the elementwise-selection approach.
 
     Parameters
     ----------
-    z_over_L : float
+    z_over_L : float or np.ndarray
         Stability parameter (z / L), where z is the measurement height and L is the Monin-Obukhov length.
 
     Returns
     -------
-    float
+    float or np.ndarray
         The value of ψ_m(z/L), the integrated stability correction for momentum.
     """
-    if z_over_L >= 0.0:  # stable or neutral
-        return 5.0 * z_over_L
-    # unstable (Paulson 1970)
-    ζ = (1.0 - 16.0 * z_over_L) ** 0.25
-    return (
-        -2.0 * np.log((1.0 + ζ) / 2.0)
-        - np.log((1.0 + ζ**2) / 2.0)
-        + 2.0 * np.arctan(ζ)
-        - np.pi / 2.0
-    )
+    z_over_L = np.asarray(z_over_L, dtype=float)
+    with np.errstate(invalid="ignore"):
+        stable = 5.0 * z_over_L
+        # unstable (Paulson 1970)
+        zeta = (1.0 - 16.0 * z_over_L) ** 0.25
+        unstable = (
+            -2.0 * np.log((1.0 + zeta) / 2.0)
+            - np.log((1.0 + zeta**2) / 2.0)
+            + 2.0 * np.arctan(zeta)
+            - np.pi / 2.0
+        )
+    return _descalar(np.where(z_over_L >= 0.0, stable, unstable))
 
 
 # -----------------------------------------------------------------------------
@@ -119,13 +141,17 @@ def _psi_m(z_over_L: float) -> float:
 
 
 def analytical_power_law_parameters(
-    z_m: float,
-    z_0: float,
-    L: float,
-    u_star: float,
-    u_zm: float,
-) -> Tuple[float, float, float, float]:
+    z_m: float | np.ndarray,
+    z_0: float | np.ndarray,
+    L: float | np.ndarray,
+    u_star: float | np.ndarray,
+    u_zm: float | np.ndarray,
+) -> Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     """Return *m*, *n*, *U*, *κ* using the *analytical* matching approach.
+
+    Accepts scalars or same-shaped arrays for every argument, so a whole
+    column of per-timestep inputs can be resolved in one vectorized call
+    instead of looping row by row.
 
     Parameters
     ----------
@@ -146,22 +172,27 @@ def analytical_power_law_parameters(
         Power-law exponents and proportionality constants for
         ``u(z) = U z**m`` and ``K(z) = kappa z**n``.
     """
-    z_by_L = z_m / L if L != 0.0 else 0.0
+    z_m = np.asarray(z_m, dtype=float)
+    L = np.asarray(L, dtype=float)
+    u_star = np.asarray(u_star, dtype=float)
+    u_zm = np.asarray(u_zm, dtype=float)
 
-    # Exponent for wind-speed profile (Eq. 36)
-    m = (u_star / (KAPPA * u_zm)) * _phi_m(z_by_L)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z_by_L = np.where(L != 0.0, z_m / np.where(L != 0.0, L, 1.0), 0.0)
 
-    # Exponent for eddy diffusivity profile (Eq. 36)
-    if L >= 0.0:
-        n = 1.0 / (1.0 + 5.0 * z_by_L)
-    else:
-        n = (1.0 - 24.0 * z_by_L) / (1.0 - 16.0 * z_by_L)
+        # Exponent for wind-speed profile (Eq. 36)
+        m = (u_star / (KAPPA * u_zm)) * _phi_m(z_by_L)
 
-    # Proportionality constants by matching at z_m
-    U = u_zm / (z_m**m)
-    kappa = (KAPPA * u_star / _phi_c(z_by_L)) / (z_m ** (n - 1.0))
+        # Exponent for eddy diffusivity profile (Eq. 36)
+        n_stable = 1.0 / (1.0 + 5.0 * z_by_L)
+        n_unstable = (1.0 - 24.0 * z_by_L) / (1.0 - 16.0 * z_by_L)
+        n = np.where(L >= 0.0, n_stable, n_unstable)
 
-    return m, n, U, kappa
+        # Proportionality constants by matching at z_m
+        U = u_zm / (z_m**m)
+        kappa = (KAPPA * u_star / _phi_c(z_by_L)) / (z_m ** (n - 1.0))
+
+    return _descalar(m), _descalar(n), _descalar(U), _descalar(kappa)
 
 
 # -----------------------------------------------------------------------------
@@ -278,6 +309,66 @@ def footprint_2d(
 
     phi = Dy * f_x
     return X, Y, phi
+
+
+def footprint_at_points(
+    x: np.ndarray,
+    y: np.ndarray,
+    xi: float,
+    m: float,
+    n: float,
+    u_zm: float,
+    sigma_v: float,
+) -> np.ndarray:
+    """Evaluate the closed-form 2-D footprint density directly at given points.
+
+    Implements the same Eq. (19)/(21) formulation as
+    :pyfunc:`crosswind_integrated_footprint`/:pyfunc:`footprint_2d`, but
+    takes ``x``/``y`` as same-shaped arrays of arbitrary points (e.g. an
+    already-rotated output grid) rather than building the density on the
+    outer product of separate 1-D wind-aligned axes. This lets a footprint
+    grid in a rotated/translated frame be filled by direct evaluation
+    instead of computing it on a wind-aligned grid and then interpolating
+    (e.g. via :func:`scipy.interpolate.griddata`) onto the target frame.
+
+    Parameters
+    ----------
+    x, y
+        Arrays of downwind distance and crosswind offset (m) in the
+        wind-aligned frame, same shape. Points with ``x <= 0`` are upwind of
+        the sensor, where the model is undefined, and are assigned zero
+        density.
+    xi, m, n
+        Parameters returned by :pyfunc:`length_scale_xi` and
+        :pyfunc:`analytical_power_law_parameters`.
+    u_zm
+        Mean wind speed at measurement height (m s⁻¹).
+    sigma_v
+        Standard deviation of cross-wind velocity fluctuations (m s⁻¹).
+
+    Returns
+    -------
+    np.ndarray
+        Footprint density φ (m⁻²), same shape as ``x``/``y``.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valid = x > 0.0
+
+    r = 2.0 + m - n
+    mu = (1.0 + m) / r
+    coeff = (xi**mu) / gamma(mu)
+
+    # Substitute a safe placeholder for invalid (x <= 0) points so the
+    # closed-form expressions don't raise divide/invalid warnings; those
+    # entries are masked out below regardless of what they evaluate to.
+    x_safe = np.where(valid, x, 1.0)
+    f_x = coeff * x_safe ** (-(1.0 + mu)) * np.exp(-xi / x_safe)
+
+    sigma = sigma_v * x_safe / u_zm
+    Dy = 1.0 / (PI_SQRT2 * sigma) * np.exp(-0.5 * (y / sigma) ** 2)
+
+    return np.where(valid, Dy * f_x, 0.0)
 
 
 # -----------------------------------------------------------------------------

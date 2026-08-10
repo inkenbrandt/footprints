@@ -7,14 +7,13 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 
 from .base_footprint_model import BaseFootprintModel
 from .kormannmeixner import (
     analytical_power_law_parameters,
     length_scale_xi,
-    footprint_2d,
+    footprint_at_points,
 )
 
 
@@ -80,65 +79,58 @@ class KormannMeixnerModel(BaseFootprintModel):
         self.y = np.arange(ymin, ymax + self.dy, self.dy)
         X_grid, Y_grid = np.meshgrid(self.x, self.y, indexing="ij")
 
-        # The KM crosswind-integrated footprint is only defined for strictly
-        # positive downwind distance in the wind-aligned frame, so it is
-        # evaluated on a separate physical grid, then placed onto the output
-        # grid above: rotated by wind_dir when available, or reflected onto
-        # the standard negative-upwind x convention when it is not.
-        x_phys = np.arange(self.dx, max(abs(xmin), abs(xmax)) + self.dx, self.dx)
-        y_phys = self.y
+        # Resolve power-law parameters and length scale for every timestep
+        # in one vectorized call instead of looping row by row.
+        zm = self.df["zm"].to_numpy(dtype=float)
+        z0 = self.df["z0"].to_numpy(dtype=float)
+        ustar = self.df["ustar"].to_numpy(dtype=float)
+        ol = self.df["ol"].to_numpy(dtype=float)
+        umean = self.df["umean"].to_numpy(dtype=float)
+        sigmav = self.df["sigmav"].to_numpy(dtype=float)
+        wind_dir = (
+            self.df["wind_dir"].to_numpy(dtype=float)
+            if "wind_dir" in self.df.columns
+            else np.full(len(self.df), np.nan)
+        )
+
+        m, n, U, kappa = analytical_power_law_parameters(
+            z_m=zm, z_0=z0, L=ol, u_star=ustar, u_zm=umean
+        )
+        xi = length_scale_xi(zm, U, kappa, m, n)
 
         footprint_sum = np.zeros((len(self.x), len(self.y)))
 
-        # Process each timestep
+        # Process each timestep. The per-timestep footprint is evaluated
+        # directly in the output frame: the fixed output grid is mapped
+        # back into the wind-aligned frame (x = downwind distance, y =
+        # crosswind offset) via the inverse of the rotation/reflection used
+        # to place the footprint, then the closed-form KM density is
+        # evaluated at those points. This avoids rebuilding a Delaunay
+        # triangulation (scipy.interpolate.griddata) on every timestep and
+        # is exact rather than a linear-interpolation approximation of the
+        # analytical solution.
         n_valid = 0
-        for idx, row in self.df.iterrows():
+        for i, idx in enumerate(self.df.index):
             try:
-                # Calculate power-law parameters
-                m, n, U, kappa = analytical_power_law_parameters(
-                    z_m=row["zm"],
-                    z_0=row["z0"],
-                    L=row["ol"],
-                    u_star=row["ustar"],
-                    u_zm=row["umean"],
-                )
+                if not np.isfinite(xi[i]):
+                    raise ValueError(f"non-finite length scale xi={xi[i]!r}")
 
-                # Calculate length scale
-                xi = length_scale_xi(row["zm"], U, kappa, m, n)
-
-                # Calculate 2D footprint in the wind-aligned frame (x =
-                # downwind distance, y = crosswind offset).
-                X, Y, phi = footprint_2d(
-                    x_phys,
-                    y_phys,
-                    xi,
-                    m,
-                    n,
-                    row["umean"],
-                    row["sigmav"],
-                )
-
-                if "wind_dir" in row and not np.isnan(row["wind_dir"]):
-                    # Rotate the wind-aligned footprint into the output frame
-                    # using the meteorological wind direction.
-                    angle_rad = np.radians(row["wind_dir"])
+                if not np.isnan(wind_dir[i]):
+                    # Wind direction available: invert the forward rotation
+                    # (X_src = X cosθ - Y sinθ, Y_src = X sinθ + Y cosθ) to
+                    # recover wind-aligned coordinates for each output point.
+                    angle_rad = np.radians(wind_dir[i])
                     cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
-                    X_src = X * cos_a - Y * sin_a
-                    Y_src = X * sin_a + Y * cos_a
+                    x_wind = X_grid * cos_a + Y_grid * sin_a
+                    y_wind = -X_grid * sin_a + Y_grid * cos_a
                 else:
-                    # No wind direction available: fall back to the standard
-                    # negative-upwind convention (x flipped, y unchanged).
-                    X_src = -X
-                    Y_src = Y
+                    # No wind direction: invert the standard negative-upwind
+                    # placement (X_src = -X, Y_src = Y).
+                    x_wind = -X_grid
+                    y_wind = Y_grid
 
-                points = np.column_stack([X_src.ravel(), Y_src.ravel()])
-                values = phi.ravel()
-                phi_grid = griddata(
-                    points,
-                    values,
-                    (X_grid, Y_grid),
-                    method="linear",
-                    fill_value=0.0,
+                phi_grid = footprint_at_points(
+                    x_wind, y_wind, xi[i], m[i], n[i], umean[i], sigmav[i]
                 )
 
                 footprint_sum += phi_grid
