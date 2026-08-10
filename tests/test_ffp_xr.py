@@ -327,3 +327,155 @@ def test_in_rsl_timesteps_allowed_when_rslayer_true():
     assert (
         float(m_off.fclim_2d.sum()) == pytest.approx(0.0)
     ), "rslayer=False should exclude in-RSL timesteps"
+
+
+# --- Tests: flexible umean/z0 requirement (issue #43) --------------------------
+#
+# Issue #43 requests that either `umean` or `z0` be sufficient (not both),
+# with a missing `z0` derived per-timestep from the log-wind profile
+# (Kljun et al. 2015, Eq. 6) and that derived value used consistently in the
+# Eq. 27 validity checks.
+
+
+def _expected_effective_z0(zm, ol, umean, ustar, k=0.4, oln=5000.0):
+    """Reference re-implementation of the log-wind-profile z0 estimate used
+    to independently verify the value computed in calc_xr_footprint."""
+    zm = np.asarray(zm, dtype=float)
+    ol = np.asarray(ol, dtype=float)
+    psi_cond = np.logical_and(oln > ol, ol > 0)
+    xx = (1.0 - 19.0 * zm / ol) ** 0.25
+    psi_f = np.where(
+        psi_cond,
+        -5.3 * zm / ol,
+        np.log((1.0 + xx**2) / 2.0)
+        + 2.0 * np.log((1.0 + xx) / 2.0)
+        - 2.0 * np.arctan(xx)
+        + np.pi / 2.0,
+    )
+    return zm * np.exp(-((umean * k / ustar) + psi_f))
+
+
+def test_umean_only_no_z0_column_does_not_raise():
+    """A DataFrame lacking a 'z0' column entirely, but with 'umean', must be accepted."""
+    df = _base_df(n=4).drop(columns=["z0"])
+    m = FFP(df=df, **_FFP_KW)
+    assert m.ts_len == 4
+    assert "z0" in m.df.columns
+    assert m.df["z0"].isna().all()
+
+
+def test_z0_only_no_umean_column_does_not_raise():
+    """A DataFrame lacking a 'umean' column entirely, but with 'z0', must be accepted."""
+    df = _base_df(n=4).drop(columns=["umean"])
+    m = FFP(df=df, **_FFP_KW)
+    assert m.ts_len == 4
+    assert "umean" in m.df.columns
+    assert m.df["umean"].isna().all()
+
+
+def test_missing_both_z0_and_umean_columns_raises():
+    """Neither 'z0' nor 'umean' present at all should still raise FFP Exception 1."""
+    df = _base_df(n=4).drop(columns=["z0", "umean"])
+    with pytest.raises(ValueError, match=r"FFP Exception 1"):
+        _ = FFP(df=df, **_FFP_KW)
+
+
+def test_row_level_filtering_drops_only_rows_missing_both():
+    """When both columns exist, a row is dropped only if *both* z0 and umean are NaN."""
+    times = pd.date_range("2025-01-01", periods=4, freq="h")
+    df = pd.DataFrame(
+        {
+            "sigmav": [0.5] * 4,
+            "ustar": [0.35] * 4,
+            "wind_dir": [180.0] * 4,
+            "ol": [-100.0] * 4,
+            "zm": [2.0] * 4,
+            "h": [800.0] * 4,
+            # row0: z0 only, row1: umean only, row2: neither -> dropped, row3: both
+            "z0": [0.05, np.nan, np.nan, 0.05],
+            "umean": [np.nan, 3.0, np.nan, 3.0],
+        },
+        index=times,
+    )
+    m = FFP(df=df, **_FFP_KW)
+    assert m.ts_len == 3
+    assert not (m.df["z0"].isna() & m.df["umean"].isna()).any()
+
+
+def test_derived_z0_matches_explicit_z0_footprint():
+    """A umean-only row must reproduce the footprint of an equivalent explicit-z0 row.
+
+    calc_xr_footprint derives an effective z0 from the log-wind profile when
+    z0 is missing; that derivation should be wired through xstar/validity
+    checks identically to a directly-supplied z0.
+    """
+    zm, ol, ustar, umean = 2.0, -100.0, 0.35, 3.0
+    expected_z0 = float(_expected_effective_z0(zm, ol, umean, ustar))
+
+    df_umean_only = _base_df(n=1, ol=ol, zm=zm).drop(columns=["z0"])
+    df_umean_only["ustar"] = ustar
+    df_umean_only["umean"] = umean
+
+    df_explicit_z0 = _base_df(n=1, ol=ol, zm=zm, z0=expected_z0)
+    df_explicit_z0["ustar"] = ustar
+    df_explicit_z0["umean"] = umean
+
+    m_derived = FFP(df=df_umean_only, **_FFP_KW)
+    m_derived.calc_xr_footprint()
+
+    m_explicit = FFP(df=df_explicit_z0, **_FFP_KW)
+    m_explicit.calc_xr_footprint()
+
+    assert float(m_derived.fclim_2d.sum()) > 0.0
+    assert np.allclose(
+        m_derived.fclim_2d.values, m_explicit.fclim_2d.values, rtol=1e-6, atol=1e-12
+    ), "Derived z0 (from umean via log-wind profile) should match an equivalent explicit z0"
+
+
+def test_derived_z0_used_in_rsl_validity_check():
+    """The RSL validity check (zm > 27.5*z0) must use the umean-derived z0,
+    not silently pass a umean-only row through."""
+    zm, ol, ustar, umean, h = 1.0, -100.0, 0.35, 2.7, 800.0
+    expected_z0 = float(_expected_effective_z0(zm, ol, umean, ustar))
+    # Sanity-check the chosen parameters actually land the derived z0 in the
+    # roughness-sublayer boundary zone: 20*z0 < zm <= 27.5*z0.
+    assert 20.0 * expected_z0 < zm <= 27.5 * expected_z0
+
+    df = _base_df(n=4, ol=ol, zm=zm, h=h).drop(columns=["z0"])
+    df["ustar"] = ustar
+    df["umean"] = umean
+
+    m_off = FFP(df=df, rslayer=False, **_FFP_KW)
+    m_off.calc_xr_footprint()
+    assert float(m_off.fclim_2d.sum()) == pytest.approx(
+        0.0
+    ), "umean-derived z0 in the RSL boundary should be excluded when rslayer=False"
+
+    m_on = FFP(df=df, rslayer=True, **_FFP_KW)
+    m_on.calc_xr_footprint()
+    assert (
+        float(m_on.fclim_2d.sum()) > 0.0
+    ), "umean-derived z0 in the RSL boundary should be allowed when rslayer=True"
+
+
+def test_mixed_umean_only_and_z0_only_rows_produce_finite_climatology():
+    """A dataset mixing umean-only and z0-only rows should compute cleanly."""
+    times = pd.date_range("2025-01-01", periods=2, freq="h")
+    df = pd.DataFrame(
+        {
+            "sigmav": [0.5, 0.5],
+            "ustar": [0.35, 0.35],
+            "wind_dir": [180.0, 90.0],
+            "ol": [-100.0, -100.0],
+            "zm": [2.0, 2.0],
+            "h": [800.0, 800.0],
+            "z0": [0.05, np.nan],
+            "umean": [np.nan, 3.0],
+        },
+        index=times,
+    )
+    m = FFP(df=df, **_FFP_KW)
+    assert m.ts_len == 2
+    m.calc_xr_footprint()
+    assert np.isfinite(m.fclim_2d.values).all()
+    assert float(m.fclim_2d.sum()) > 0.0
