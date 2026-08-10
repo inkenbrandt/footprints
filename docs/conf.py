@@ -16,7 +16,7 @@ import fluxfootprints  # Import the package to be documented
 project = "fluxfootprints"
 copyright = "2025, Paul Inkenbrandt, Natascha Kljun, John Volk"
 author = "Paul Inkenbrandt, Natascha Kljun, John Volk"
-release = "0.3.0"
+release = "0.3.1"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
