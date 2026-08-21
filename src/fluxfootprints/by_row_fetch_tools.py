@@ -6,7 +6,9 @@ from scipy.stats import gaussian_kde
 from shapely.geometry import Point
 
 
-def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
+def polar_to_cartesian_dataframe(df: pd.DataFrame, 
+                                 wd_column: str="WD", 
+                                 dist_column: str="Dist"):
     """
     Convert polar coordinates in a DataFrame to Cartesian coordinates.
 
@@ -74,11 +76,11 @@ def polar_to_cartesian_dataframe(df, wd_column="WD", dist_column="Dist"):
 
 
 def aggregate_to_daily_centroid(
-    df,
-    date_column="Timestamp",
-    x_column="X",
-    y_column="Y",
-    weighted=True,
+    df: pd.DataFrame,
+    date_column: str="Timestamp",
+    x_column: str="X",
+    y_column: str="Y",
+    weighted: bool=True,
 ):
     """
     Aggregate sub-daily coordinate data to daily centroids.
@@ -145,11 +147,11 @@ def aggregate_to_daily_centroid(
 
 
 def generate_density_raster(
-    gdf,
-    resolution=50,  # Cell size in meters
-    buffer_distance=200,  # Buffer beyond extent in meters
-    epsg=5070,  # Default coordinate system
-    weight_field="ET",
+    gdf: gpd.GeoDataFrame,
+    resolution: float=50,  # Cell size in meters
+    buffer_distance: float=200,  # Buffer beyond extent in meters
+    epsg: int=5070,  # Default coordinate system
+    weight_field: str="ET",
 ):
     """
     Generate a weighted kernel density raster from a point GeoDataFrame.
@@ -225,7 +227,8 @@ def generate_density_raster(
     return density, transform, (xmin, ymin, xmax, ymax)
 
 
-def concat_fetch_gdf(data, epsg=5070):
+def concat_fetch_gdf(data, 
+                     epsg=5070):
     dataxy = data.dropna(
         subset=[
             "X_FETCH_90",
@@ -305,7 +308,9 @@ def concat_fetch_gdf(data, epsg=5070):
     return gdf_day, gdf
 
 
-def impute_evapotranspiration(df, in_field="ET", out_field="ET"):
+def impute_evapotranspiration(df: pd.DataFrame, 
+                              in_field:str="ET", 
+                              out_field:str="ET"):
     """
     Impute missing data in a half-hourly evapotranspiration time series.
 

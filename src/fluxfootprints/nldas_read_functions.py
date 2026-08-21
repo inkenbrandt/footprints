@@ -1,7 +1,8 @@
-import requests
 import io
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+import requests
 
 
 def call_nldas_time_series(lat,lon,time_start,time_end,data,token):
@@ -24,8 +25,8 @@ def call_nldas_time_series(lat,lon,time_start,time_end,data,token):
 
     query_parameters = {
         "data":data,
-        "location":"[{},{}]".format(lat,lon),
-        "time":"{}/{}".format(time_start,time_end)
+        "location":f"[{lat},{lon}]",
+        "time":f"{time_start}/{time_end}"
     }
    
     headers = {
