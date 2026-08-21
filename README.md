@@ -1,5 +1,11 @@
 # fluxfootprints
 
+[![DOI](https://zenodo.org/badge/976380813.svg)](https://doi.org/10.5281/zenodo.22048260)
+[![Read the Docs](https://img.shields.io/readthedocs/fluxfootprints)](https://fluxfootprints.readthedocs.io/en/latest/)
+[![PyPI - Version](https://img.shields.io/pypi/v/fluxfootprints)](https://pypi.org/project/fluxfootprints/)
+[![Conda Version](https://img.shields.io/conda/vn/conda-forge/fluxfootprints.svg)](https://anaconda.org/conda-forge/fluxfootprints)
+
+
 > **fluxfootprints** is a Python package for micrometeorological flux-footprint
 > analysis. It bundles several footprint models — the Kljun et al. (2015)
 > parameterisation, the Kormann & Meixner (2001) and Wang et al. (2006)
@@ -8,20 +14,24 @@
 > from eddy-covariance tower data, summarise them by day and month, and export
 > the results as GeoPackages, GeoTIFFs, and CSV statistics.
 
+
+
 ---
 
 ### Table of Contents
 
-1. [Installation](#installation)
-2. [Documentation](#documentation)
-3. [Quick-start Example](#quick-start-example)
-4. [Available Models](#available-models)
-5. [Input Requirements](#input-requirements)
-6. [Beyond the Climatology](#beyond-the-climatology)
-7. [Citing & Referencing](#citing--referencing)
-8. [Contributing](#contributing)
-9. [Development Road-map](#development-road-map)
-10. [License](#license)
+- [fluxfootprints](#fluxfootprints)
+    - [Table of Contents](#table-of-contents)
+    - [Installation](#installation)
+    - [Documentation](#documentation)
+    - [Quick-start Example](#quick-start-example)
+    - [Available Models](#available-models)
+    - [Input Requirements](#input-requirements)
+    - [Beyond the Climatology](#beyond-the-climatology)
+    - [Citing \& Referencing](#citing--referencing)
+    - [Contributing](#contributing)
+    - [Development Road-map](#development-road-map)
+    - [License](#license)
 
 ---
 
