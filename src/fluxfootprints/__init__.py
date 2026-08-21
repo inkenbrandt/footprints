@@ -63,9 +63,48 @@ __all__ = [
     "KormannMeixnerModel",
     "LSFootprintModelAdapter",
     "WangFootprintModel",
-    # Helper functions
+    "ffp_climatology_new",
+    # Config / data loading
+    "load_config",
+    "load_amf_df",
+    "compute_aerodynamic_params",
+    # Climatology workflow
     "build_climatology",
-    # ... rest ...
+    "summarize_periods",
+    # Export helpers
+    "export_contours_gpkg",
+    "export_rasters_geotiff",
+    "export_contour_stats_csv",
+    # Fetch / geospatial tools
+    "polar_to_cartesian_dataframe",
+    "aggregate_to_daily_centroid",
+    "generate_density_raster",
+    "concat_fetch_gdf",
+    # NLDAS retrieval
+    "call_nldas_time_series",
+    "parse_nldas_csv",
+    "fetch_nldas_forcing_dataset",
+    # Kormann-Meixner analytical model
+    "analytical_power_law_parameters",
+    "length_scale_xi",
+    "crosswind_integrated_footprint",
+    "footprint_2d",
+    "footprint_at_points",
+    "cumulative_fetch",
+    "effective_fetch",
+    # Lagrangian stochastic model
+    "LSFootprintConfig",
+    "BackwardLSModel",
+    "log_wind_profile",
+    "sigma_w",
+    "sigma_v",
+    "lagrangian_timescale",
+    # Wang & Davis analytical model
+    "wang2006_fy",
+    "reconstruct_gaussian_2d",
+    # Constants
+    "KAPPA",
+    "__version__",
 ]
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"

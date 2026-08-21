@@ -14,9 +14,10 @@ sys.path.insert(0, os.path.abspath("../src"))  # adjust path as needed
 import fluxfootprints  # Import the package to be documented
 
 project = "fluxfootprints"
-copyright = "2025, Paul Inkenbrandt, Natascha Kljun, John Volk"
-author = "Paul Inkenbrandt, Natascha Kljun, John Volk"
-release = "0.3.1"
+copyright = "2025, Paul Inkenbrandt, Diane Menuz, Natascha Kljun, John Volk"
+author = "Paul Inkenbrandt, Diane Menuz, Natascha Kljun, John Volk"
+release = fluxfootprints.__version__
+version = release
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -40,14 +41,17 @@ bibtex_bibfiles = ["refs.bib"]  # Your BibTeX file(s)
 bibtex_reference_style = "author_year"  # Use author-year style for citations
 bibtex_default_style = "plain"
 templates_path = ["_templates"]
+# Paths here are relative to this file (docs/).
 exclude_patterns = [
     "_build/*",
     "Thumbs.db",
     ".DS_Store",
-    "docs/_build/*",
-    "tests/*",
-    "docs/notebook/output/*",
-    "docs/notebook/NLDAS_data/*",
+    "**.ipynb_checkpoints",
+    "notebooks/input_data/*",
+    # These notebooks demonstrate the separate `micromet` package, not
+    # fluxfootprints, so they are not part of this documentation.
+    "notebooks/multiply_rasters.ipynb",
+    "notebooks/openet_comparison.ipynb",
 ]
 
 nbsphinx_allow_errors = True

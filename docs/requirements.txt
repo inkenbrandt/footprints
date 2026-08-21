@@ -1,3 +1,7 @@
+# Read the Docs installs this file only; conf.py imports fluxfootprints from
+# ../src, so every *runtime* dependency must be listed here as well.
+
+# Runtime dependencies (keep in sync with [project].dependencies)
 numpy
 pandas
 xarray
@@ -10,22 +14,17 @@ rasterio
 pyproj
 affine
 requests
-refet
-plotly
-sqlalchemy
-pyyaml
 netcdf4
+
+# Documentation toolchain (matches the extensions enabled in conf.py)
 sphinx
-pydantic
-sphinx-autodoc-typehints
 sphinx-rtd-theme
+sphinx-autodoc-typehints
 myst-parser
-pytest
-pytest-cov
-nbsphinx
-jupyter
-ipykernel
-jupyterlab
-notebook 
 numpydoc
 sphinxcontrib-bibtex
+nbsphinx
+
+# Notebook rendering
+ipykernel
+jupyter

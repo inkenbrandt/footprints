@@ -1,8 +1,14 @@
 """wang2006_footprint.py
 =====================================================
-Semi‑empirical flux‑footprint parameterisation (cross‑wind
-integrated) after **Wang et al. 2006, JTECH 23, 1384‑1394**
-plus an optional *Gaussian 2‑D reconstruction* utility.
+Semi-empirical flux-footprint parameterisation (cross-wind integrated) after
+**Wang, W., Davis, K.J., Ricciuto, D.M. & Butler, M.P. (2006): An Approximate
+Footprint Model for Flux Measurements in the Convective Boundary Layer.
+J. Atmos. Oceanic Technol., 23(10), 1384-1394, doi:10.1175/JTECH1911.1**,
+plus an optional *Gaussian 2-D reconstruction* utility.
+
+Note: this is *not* the later Wang & Davis (2008) analytical CBL footprint
+model (Boundary-Layer Meteorology, 126, 213-233), which this package does
+not implement.
 
 This module provides:
     • `wang2006_fy(...)`   – 1‑D cross‑wind‑integrated footprint f(x)

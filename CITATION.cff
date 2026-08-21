@@ -10,10 +10,10 @@ authors:
 - family-names: "Inkenbrandt"
   given-names: "Paul"
   orcid: "https://orcid.org/0000-0002-9194-5936"
-- family-names: "Schroeder"
-  given-names: "Martin"
+- family-names: "Menuz"
+  given-names: "Diane"
 title: "fluxfootprints"
-version: 0.3.1
+version: 0.4.0
 doi: 10.5281/zenodo.1234
 date-released: 2025-05-01
 url: "https://github.com/inkenbrandt/footprints"
