@@ -1,11 +1,12 @@
 import logging
-from typing import Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
-from scipy.ndimage import gaussian_filter
 import xarray as xr
+from scipy.ndimage import gaussian_filter
 
 from .base_footprint_model import BaseFootprintModel
+
 
 class ffp_climatology_new(BaseFootprintModel):
     r"""
@@ -103,12 +104,12 @@ class ffp_climatology_new(BaseFootprintModel):
     def __init__(
         self,
         df: pd.DataFrame,
-        domain: np.ndarray = [-1000.0, 1000.0, -1000.0, 1000.0],
+        domain: list | np.ndarray | tuple |None = None,
         dx: int = 10.0,
         dy: int = 10.0,
         nx: int = 1000,
         ny: int = 1000,
-        rs: Union[list, np.ndarray] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        rs: list | np.ndarray | None = None,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -118,6 +119,11 @@ class ffp_climatology_new(BaseFootprintModel):
         time=None,
         **kwargs,
     ):
+        if domain is None or len(domain) != 4:
+            domain = [-1000.0, 1000.0, -1000.0, 1000.0]
+        if rs is None or not isinstance(rs, list) or not all(0 <= r <= 1 for r in rs):
+            rs = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
         
         self.df = df.copy()
 
@@ -192,7 +198,7 @@ class ffp_climatology_new(BaseFootprintModel):
         self.define_domain()
         self.create_xr_dataset()
 
-    def _ensure_logger(self, logger: Optional[logging.Logger]) -> logging.Logger:
+    def _ensure_logger(self, logger: logging.Logger | None) -> logging.Logger:
         if isinstance(logger, logging.Logger):
             return logger
         lg = logging.getLogger("footprint_daily_summary")

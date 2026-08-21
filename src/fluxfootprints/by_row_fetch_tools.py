@@ -1,12 +1,8 @@
-import pandas as pd
-import numpy as np
-
 import geopandas as gpd
-
+import numpy as np
+import pandas as pd
 from rasterio.transform import from_origin
 from scipy.stats import gaussian_kde
-import geopandas as gpd
-import pandas as pd
 from shapely.geometry import Point
 
 
@@ -117,22 +113,19 @@ def aggregate_to_daily_centroid(
     -----
     - Requires a column named `'ET'` if `weighted=True`.
     - Assumes the timestamp column can be parsed with `pd.to_datetime`.
+    - The input DataFrame is left unchanged.
     """
-    # Define a lambda function to compute the weighted mean:
-    wm = lambda x: np.average(x, weights=df.loc[x.index, "ET"])
-
-    # Ensure datetime format
-    df[date_column] = pd.to_datetime(df[date_column])
-
-    # Group by date (ignoring time component)
-    df["Date"] = df[date_column].dt.date
+    # Build the grouping key separately so ``df`` is never modified: parse the
+    # timestamps, drop the time component, and name the result 'Date' so it
+    # becomes the 'Date' column after ``reset_index``.
+    dates = pd.to_datetime(df[date_column]).dt.date.rename("Date")
 
     # Calculate centroid (mean of X and Y)
     if weighted:
 
         # Compute weighted average using ET as weights
         daily_centroids = (
-            df.groupby("Date")
+            df.groupby(dates)
             .apply(
                 lambda g: pd.Series(
                     {
@@ -145,7 +138,7 @@ def aggregate_to_daily_centroid(
         )
     else:
         daily_centroids = (
-            df.groupby("Date").agg({x_column: "mean", y_column: "mean"}).reset_index()
+            df.groupby(dates).agg({x_column: "mean", y_column: "mean"}).reset_index()
         )
     # Groupby and aggregate with namedAgg [1]:
     return daily_centroids

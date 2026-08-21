@@ -10,14 +10,16 @@ This version includes improvements for better alignment with the theoretical fra
 """
 
 import logging
-from typing import Optional, Tuple, Union
+import traceback
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy import signal
-import matplotlib.pyplot as plt
-import traceback
+
 from .base_footprint_model import BaseFootprintModel
+
 
 class FFPModel(BaseFootprintModel):
     """
@@ -49,12 +51,12 @@ class FFPModel(BaseFootprintModel):
     def __init__(
         self,
         df: pd.DataFrame,
-        domain: list = [-1000.0, 1000.0, -1000.0, 1000.0],
+        domain: list | None = None,
         dx: float = 10.0,
         dy: float = 10.0,
         nx: int = 1000,
         ny: int = 1000,
-        rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        rs: list | None = None,
         rslayer: bool = False,
         smooth_data: bool = True,
         crop: bool = False,
@@ -130,6 +132,8 @@ class FFPModel(BaseFootprintModel):
             If any input parameters are invalid or inconsistent.
         """
 
+        if domain is None:
+            domain = [-1000.0, 1000.0, -1000.0, 1000.0]
         super().__init__(
             df=df,
             domain=domain,
@@ -140,6 +144,11 @@ class FFPModel(BaseFootprintModel):
             verbosity=verbosity,
             logger=logger,
         )
+
+        if domain is None or len(domain) != 4:
+            domain = [-1000.0, 1000.0, -1000.0, 1000.0]
+        if rs is None or not isinstance(rs, list) or not all(0 <= r <= 1 for r in rs):
+            rs = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
         # Set up logger
         self.logger.setLevel(logging.DEBUG if self.verbosity > 1 else logging.WARNING)
@@ -246,7 +255,7 @@ class FFPModel(BaseFootprintModel):
             If any value in the list is not in the (0, 1) range.
         """
         if not isinstance(rs, (list, np.ndarray)):
-            raise ValueError("rs must be a list or array")
+            raise TypeError("rs must be a list or array")
         rs = [float(r) for r in rs]
         if any(r <= 0 or r >= 1 for r in rs):
             raise ValueError("all rs values must be between 0 and 1")
@@ -371,7 +380,7 @@ class FFPModel(BaseFootprintModel):
             return f_star
 
         except Exception as e:
-            self.logger.error(f"Error in crosswind integration: {str(e)}")
+            self.logger.error(f"Error in crosswind integration: {e!s}")
             import traceback
             self.logger.error(traceback.format_exc())
             raise
@@ -429,7 +438,7 @@ class FFPModel(BaseFootprintModel):
             }
         )
 
-    def calc_scaled_x(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+    def calc_scaled_x(self, x: float | np.ndarray) -> float | np.ndarray:
         """
         Calculate the scaled distance X* based on wind and height parameters.
 
@@ -683,7 +692,7 @@ class FFPModel(BaseFootprintModel):
             self.logger.info("Domain setup completed successfully")
 
         except Exception as e:
-            self.logger.error(f"Error in domain setup: {str(e)}")
+            self.logger.error(f"Error in domain setup: {e!s}")
             raise
 
     def create_xr_dataset(self):
@@ -922,8 +931,8 @@ class FFPModel(BaseFootprintModel):
 
             return smoothed
 
-        except Exception as e:
-            self.logger.error(f"Error in smoothing: {str(e)}")
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"Error in smoothing: {e!s}")
             self.logger.debug("Returning original unsmoothed data")
             return self.fclim_2d
 
@@ -965,7 +974,7 @@ class FFPModel(BaseFootprintModel):
                     )
 
         except Exception as e:
-            self.logger.warning(f"Error verifying {name}: {str(e)}")
+            self.logger.warning(f"Error verifying {name}: {e!s}")
 
     def verify_data(self, data: xr.DataArray, name: str) -> bool:
         """
@@ -1150,7 +1159,7 @@ class FFPModel(BaseFootprintModel):
             return self.fclim_2d
 
         except Exception as e:
-            self.logger.error(f"Error in footprint calculation: {str(e)}")
+            self.logger.error(f"Error in footprint calculation: {e!s}")
             import traceback
             self.logger.debug(f"Traceback:\n{traceback.format_exc()}")
             raise
@@ -1330,7 +1339,7 @@ class FFPModel(BaseFootprintModel):
         return x_r
     
 
-    def calc_peak_based_limits(self, r: float) -> Tuple[xr.DataArray, xr.DataArray]:
+    def calc_peak_based_limits(self, r: float) -> tuple[xr.DataArray, xr.DataArray]:
         """
         Calculate upwind and downwind distances from the peak location for fraction r.
         Following Eq. 26 of the paper.
@@ -1368,13 +1377,13 @@ class FFPModel(BaseFootprintModel):
 
     def calc_real_footprint_peak(
         self,
-        zm: Union[float, xr.DataArray],
-        h: Union[float, xr.DataArray],
-        u_zm: Union[float, xr.DataArray] = None,
-        ustar: Union[float, xr.DataArray] = None,
-        z0: Union[float, xr.DataArray] = None,
+        zm: float | xr.DataArray,
+        h: float | xr.DataArray,
+        u_zm: float | xr.DataArray = None,
+        ustar: float | xr.DataArray = None,
+        z0: float | xr.DataArray = None,
         k: float = 0.4,
-    ) -> Union[float, xr.DataArray]:
+    ) -> float | xr.DataArray:
         """
         Calculate the real-scale footprint peak location.
         Based on Equations 20-22 of Kljun et al. (2015).
@@ -1479,8 +1488,8 @@ class FFPModel(BaseFootprintModel):
         return y_r
 
     def calc_crosswind_spread(
-        self, x: Union[float, np.ndarray, "xr.DataArray"]
-    ) -> Union[float, np.ndarray, "xr.DataArray"]:
+        self, x: float | np.ndarray | xr.DataArray
+    ) -> float | np.ndarray | xr.DataArray:
         r"""
         Calculate the standard deviation of cross-wind spread :math:`\sigma_y`.
 
@@ -1543,7 +1552,7 @@ class FFPModel(BaseFootprintModel):
                     / self.ds["ustar"]
                 )
             except Exception as e:
-                self.logger.error(f"Error calculating crosswind spread: {str(e)}")
+                self.logger.error(f"Error calculating crosswind spread: {e!s}")
                 raise
         else:
             # Numpy path: x is raw upwind distance, scale with time-mean parameters
@@ -1631,7 +1640,7 @@ class FFPModel(BaseFootprintModel):
                         title = f"Flux Footprint - {site_name}"
                 except Exception as e:
                     self.logger.warning(
-                        f"Could not get site name from config: {str(e)}"
+                        f"Could not get site name from config: {e!s}"
                     )
 
             ax.set_title(title)
@@ -1642,11 +1651,11 @@ class FFPModel(BaseFootprintModel):
             return fig, ax
 
         except Exception as e:
-            self.logger.error(f"Error plotting footprint: {str(e)}")
+            self.logger.error(f"Error plotting footprint: {e!s}")
             self.logger.debug(f"Traceback:\n{traceback.format_exc()}")
             raise
 
-    def run(self, return_result: bool = True) -> Optional[xr.Dataset]:
+    def run(self, return_result: bool = True) -> xr.Dataset | None:
         """
         Execute the FFP model calculations.
 
@@ -1654,7 +1663,7 @@ class FFPModel(BaseFootprintModel):
             return_result: If True, returns complete results dataset
 
         Returns:
-            Optional[xr.Dataset]: Dataset containing footprint results
+            xr.Dataset | None: Dataset containing footprint results
         """
         self.logger.info("Starting FFP model calculations...")
 
@@ -1692,7 +1701,7 @@ class FFPModel(BaseFootprintModel):
                 self.logger.error(
                     f"fclim_2d is not a DataArray, got {type(self.fclim_2d)}"
                 )
-                raise ValueError("Invalid footprint climatology type")
+                raise TypeError("Invalid footprint climatology type")
 
             if np.all(np.isnan(self.fclim_2d)):
                 self.logger.error("All values in fclim_2d are NaN")
@@ -1732,11 +1741,11 @@ class FFPModel(BaseFootprintModel):
                     return results
 
                 except Exception as e:
-                    self.logger.error(f"Error creating results dataset: {str(e)}")
+                    self.logger.error(f"Error creating results dataset: {e!s}")
                     raise
 
         except Exception as e:
-            self.logger.error(f"Error in FFP calculations: {str(e)}")
+            self.logger.error(f"Error in FFP calculations: {e!s}")
             self.logger.debug("Traceback:", exc_info=True)  # Add full traceback
             raise
 

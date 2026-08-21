@@ -1,9 +1,10 @@
-import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-from matplotlib.colors import LogNorm
-from typing import Optional, Tuple, List, Dict, Any
+import numpy as np
+import pandas as pd
 import xarray as xr
+from matplotlib import cm
+from matplotlib.colors import LogNorm
+
 
 class FootprintPlotter:
     """Class to handle all footprint plotting functionality."""
@@ -13,7 +14,7 @@ class FootprintPlotter:
         self.default_line_width = 0.5
 
     def get_contour_levels(self, f: np.ndarray, dx: float, dy: float, 
-                          rs: Optional[List[float]] = None) -> List[Tuple[float, float, float]]:
+                          rs: list[float] | None = None) -> list[tuple[float, float, float]]:
         """Calculate contour levels at specified percentages of the footprint integral."""
         if not isinstance(rs, (list, np.ndarray)):
             rs = np.linspace(0.10, 0.90, 9)
@@ -37,7 +38,7 @@ class FootprintPlotter:
         return [(round(r, 3), ar, pclev) for r, ar, pclev in zip(rs, ars, pclevs)]
 
     def get_contour_vertices(self, x: np.ndarray, y: np.ndarray, f: np.ndarray, 
-                           lev: float) -> Tuple[Optional[List], Optional[List]]:
+                           lev: float) -> tuple[list | None, list | None]:
         """Get vertices of contour at specified level."""
         cs = plt.contour(x, y, f, [lev])
         plt.close()
@@ -57,10 +58,10 @@ class FootprintPlotter:
             return None, None
 
     def plot_footprint(self, x_2d: np.ndarray, y_2d: np.ndarray, fs: np.ndarray,
-                      clevs: Optional[List[float]] = None, show_heatmap: bool = True,
-                      normalize: Optional[str] = None, colormap = None,
-                      line_width: float = 0.5, iso_labels: Optional[bool] = None,
-                      title: Optional[str] = None) -> Tuple[plt.Figure, plt.Axes]:
+                      clevs: list[float] | None = None, show_heatmap: bool = True,
+                      normalize: str | None = None, colormap = None,
+                      line_width: float = 0.5, iso_labels: bool | None = None,
+                      title: str | None = None) -> tuple[plt.Figure, plt.Axes]:
         """Plot footprint function and contours."""
         
         if colormap is None:
@@ -115,7 +116,7 @@ def add_plotting_to_footprint(FluxFootprint):
     
     def plot_footprint_climatology(self, ds: xr.Dataset, 
                                  show_heatmap: bool = True,
-                                 title: Optional[str] = None) -> Tuple[plt.Figure, plt.Axes]:
+                                 title: str | None = None) -> tuple[plt.Figure, plt.Axes]:
         """Plot footprint climatology with contours."""
         
         # Calculate mean footprint
@@ -140,7 +141,8 @@ def add_plotting_to_footprint(FluxFootprint):
         return fig, ax
 
     def plot_footprint_snapshot(self, ds: xr.Dataset, time_index: int,
-                              show_heatmap: bool = True) -> Tuple[plt.Figure, plt.Axes]:
+                              title: str | None = None,
+                              show_heatmap: bool = True) -> tuple[plt.Figure, plt.Axes]:
         """Plot single footprint for specified time."""
         
         # Get footprint for specified time

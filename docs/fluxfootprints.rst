@@ -127,19 +127,6 @@ Per-row fetch geometry, daily centroids, and density rasters.
    :show-inheritance:
    :undoc-members:
 
-fluxfootprints.tools module
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. note::
-   This module predates :mod:`fluxfootprints.by_row_fetch_tools` and duplicates
-   several of its functions. The package namespace exports the
-   ``by_row_fetch_tools`` versions; prefer those.
-
-.. automodule:: fluxfootprints.tools
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
 fluxfootprints.compare module
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

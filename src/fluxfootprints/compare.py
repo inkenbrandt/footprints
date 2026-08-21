@@ -6,9 +6,8 @@ models.
 The module provides a small toolkit to **re‑run the side‑by‑side evaluations**
 we discussed earlier:
 
-1. Run multiple footprint models (classic Kljun‑FFP, the xarray rewrite
-   ``ffp_xr``\, the analytic Kormann‑Meixner (KM) approximation, or any other
-   user‑supplied function).
+1. Run multiple footprint models (the xarray rewrite ``ffp_xr``\, the analytic
+   Kormann‑Meixner (KM) approximation, or any other user‑supplied function).
 2. Compute common diagnostic metrics against a chosen reference model
    (RMSE, peak‑location bias, 80 % source‑area overlap).
 3. Return a tidy ``pandas.DataFrame`` *and* create optional difference plots.
@@ -20,35 +19,31 @@ Example
 -------
 >>> import pandas as pd, numpy as np
 >>> from footprint_compare import (
-...     run_ffp, run_ffp_xr, run_km, compare_footprints)
+...     run_ffp_xr, run_km, compare_footprints)
 >>> met = pd.DataFrame({  # 24 h synthetic
 ...     "wind_dir": 0.0, "ws": 5.0, "sigmav": .5,
 ...     "ustar": .3, "ol": 200.0},
 ...     index=pd.date_range("2025-05-01", periods=24, freq="h"))
 >>> dom = [-300, 300, -300, 300]
->>> f_ref, (x, y) = run_ffp(met, domain=dom, dx=2)
->>> f_xr,  _       = run_ffp_xr(met, domain=dom, dx=2)
+>>> f_ref, (x, y) = run_ffp_xr(met, domain=dom, dx=2)
+>>> f_km,  _       = run_km(met, domain=dom, dx=2)
 >>> res = compare_footprints(f_ref, (x, y),
-...                          {"FFP_xr": (f_xr, (x, y))})
+...                          {"KM": (f_km, (x, y))})
 >>> print(res)
 
 Dependencies
 ------------
 ``numpy, pandas, matplotlib, scipy``;
-footprint models: ``calc_footprint_FFP_climatology``, ``ffp_xr`` (these must be
-importable, e.g. placed on ``PYTHONPATH``).
+footprint models: ``ffp_xr`` (must be importable, e.g. placed on
+``PYTHONPATH``).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Callable, Dict, Tuple
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import scipy
-from scipy.interpolate import RegularGridInterpolator
 
 # -----------------------------------------------------------------------------
 # Helper metrics
@@ -115,7 +110,7 @@ def footprint_metrics(
     f_other: np.ndarray,
     x_other: np.ndarray,
     y_other: np.ndarray,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute diagnostic comparison metrics between two footprint distributions.
 
@@ -187,95 +182,17 @@ def footprint_metrics(
 # Wrappers to *run* individual models
 # -----------------------------------------------------------------------------
 
-# Classic FFP (Kljun 2015) -----------------------------------------------------
-
-
-def run_ffp(
-    met: pd.DataFrame,
-    *,
-    zm: float = 2.0,
-    z0: float = 0.1,
-    h: float = 2000.0,
-    domain: list[float] | Tuple[float, float, float, float] = (-300, 300, -300, 300),
-    dx: float = 2.0,
-    **extra_kwargs,
-) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-    """
-    Compute the footprint climatology using the classic FFP implementation.
-
-    This function runs the `FFP_climatology` model from the
-    `calc_footprint_FFP_climatology` module, generating a 2D footprint
-    and corresponding spatial grid arrays based on provided meteorological inputs.
-
-    Parameters
-    ----------
-    met : pandas.DataFrame
-        DataFrame containing time series of meteorological variables.
-        Expected columns include:
-        - 'ol' : Obukhov length [m]
-        - 'sigmav' : Standard deviation of lateral velocity [m/s]
-        - 'ustar' : Friction velocity [m/s]
-        - 'wind_dir' : Wind direction [degrees]
-    zm : float, optional
-        Measurement height above displacement height [m]. Default is 2.0.
-    z0 : float, optional
-        Surface roughness length [m]. Default is 0.1.
-    h : float, optional
-        Boundary layer height [m]. Default is 2000.0.
-    domain : list of float or tuple of float, optional
-        Spatial extent of the footprint domain in the format
-        (xmin, xmax, ymin, ymax). Default is (-300, 300, -300, 300).
-    dx : float, optional
-        Grid resolution in both x and y directions [m]. Default is 2.0.
-    **extra_kwargs
-        Additional keyword arguments passed to `FFP_climatology`.
-
-    Returns
-    -------
-    ffp_2d : numpy.ndarray
-        2D array of footprint climatology values.
-    (x, y) : tuple of numpy.ndarray
-        Tuple of 2D coordinate arrays for the x and y spatial grid [m].
-    """
-
-    from .volk import ffp_climatology as _FFP
-
-    ts_len = len(met)
-    out = _FFP(
-        zm=[zm] * ts_len,
-        z0=[z0] * ts_len,
-        umean=None,
-        h=[h] * ts_len,
-        ol=met["ol"].tolist() if "ol" in met else [200.0] * ts_len,
-        sigmav=met.get("sigmav", pd.Series(0.5, index=met.index)).tolist(),
-        ustar=met.get("ustar", pd.Series(0.3, index=met.index)).tolist(),
-        wind_dir=met.get("wind_dir", pd.Series(0.0, index=met.index)).tolist(),
-        domain=list(domain),
-        dx=dx,
-        dy=dx,
-        smooth_data=0,
-        crop=False,
-        verbosity=0,
-        fig=False,
-        **extra_kwargs,
-    )
-    return np.asarray(out["fclim_2d"]), (
-        np.asarray(out["x_2d"]),
-        np.asarray(out["y_2d"]),
-    )
-
-
 # xarray rewrite (ffp_xr.py) ---------------------------------------------------
 
 
 def run_ffp_xr(
     met: pd.DataFrame,
     *,
-    domain: list[float] | Tuple[float, float, float, float] = (-300, 300, -300, 300),
+    domain: list[float] | tuple[float, float, float, float] = (-300, 300, -300, 300),
     dx: float = 2.0,
     logger=None,
     **extra_kwargs,
-) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+) -> dict[str, np.ndarray | tuple[np.ndarray, np.ndarray]]:
     """
     Compute the footprint climatology using the xarray-based FFP implementation.
 
@@ -335,10 +252,10 @@ def run_km(
     *,
     zm: float = 2.0,
     z0: float = 0.1,
-    domain: list[float] | Tuple[float, float, float, float] = (-300, 300, -300, 300),
+    domain: list[float] | tuple[float, float, float, float] = (-300, 300, -300, 300),
     dx: float = 2.0,
     **extra_kwargs,
-) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+) -> dict[str, np.ndarray | tuple[np.ndarray, np.ndarray]]:
     """
     Compute a toy 2D footprint based on a Kormann–Meixner-style analytic solution.
 
@@ -410,8 +327,8 @@ def run_km(
 
 def compare_footprints(
     ref_f: np.ndarray,
-    ref_grid: Tuple[np.ndarray, np.ndarray],
-    others: Dict[str, Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]],
+    ref_grid: tuple[np.ndarray, np.ndarray],
+    others: dict[str, tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]],
     *,
     plot: bool = True,
     cmap="RdBu",
@@ -470,22 +387,20 @@ def compare_footprints(
 def run_all_and_compare(
     met: pd.DataFrame,
     *,
-    domain: Tuple[float, float, float, float] = (-300, 300, -300, 300),
+    domain: tuple[float, float, float, float] = (-300, 300, -300, 300),
     dx: float = 2.0,
     zm: float = 2.0,
     z0: float = 0.1,
-    h: float = 2000.0,
     include_km: bool = True,
-    include_xr: bool = True,
-    include_volk: bool = False,  # placeholder for future
     **extra_kwargs,
 ) -> pd.DataFrame:
     """
     Run multiple footprint models and compare their outputs to a reference.
 
-    Executes several footprint models (FFP, FFP_xr, and optionally KM and Volk)
-    using a common meteorological dataset and spatial domain. Each model's output
-    is compared to the FFP reference using RMSE, peak distance, and 80% overlap metrics.
+    Executes the ``ffp_xr`` model as the reference and, optionally, the KM toy
+    model using a common meteorological dataset and spatial domain. Each
+    alternative model's output is compared to the reference using RMSE, peak
+    distance, and 80% overlap metrics.
 
     Parameters
     ----------
@@ -503,52 +418,29 @@ def run_all_and_compare(
         Measurement height [m]. Default is 2.0.
     z0 : float, optional
         Surface roughness length [m]. Default is 0.1.
-    h : float, optional
-        Boundary layer height [m]. Default is 2000.0.
     include_km : bool, optional
         Whether to include the KM toy model in the comparison. Default is True.
-    include_xr : bool, optional
-        Whether to include the `ffp_xr` model in the comparison. Default is True.
-    include_volk : bool, optional
-        Whether to include a Volk-style model (placeholder). Default is False.
     **extra_kwargs
-        Additional arguments passed to `run_ffp`.
+        Additional arguments passed to `run_ffp_xr`.
 
     Returns
     -------
     df_metrics : pandas.DataFrame
         DataFrame of comparison metrics (RMSE, peak location, 80% overlap)
-        for each alternative model relative to the FFP reference.
+        for each alternative model relative to the `ffp_xr` reference.
 
     Notes
     -----
-    - The "Volk" model is not implemented and is only a placeholder.
     - The function generates a comparison plot using `compare_footprints(plot=True)`.
     """
 
-    ref_f, ref_grid = run_ffp(
-        met, zm=zm, z0=z0, h=h, domain=domain, dx=dx, **extra_kwargs
-    )
+    ref_f, ref_grid = run_ffp_xr(met, domain=domain, dx=dx, **extra_kwargs)
 
-    others: Dict[str, Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]] = {}
-
-    if include_xr:
-        f_xr, grid_xr = run_ffp_xr(met, domain=domain, dx=dx)
-        others["FFP_xr"] = (f_xr, grid_xr)
+    others: dict[str, tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]] = {}
 
     if include_km:
         f_km, grid_km = run_km(met, zm=zm, z0=z0, domain=domain, dx=dx)
         others["KM"] = (f_km, grid_km)
-
-    # A slot for volk.py footprint (if user has a simplified wrapper)
-    if include_volk:
-        try:
-            from volk import some_wrapper_function  # fictitious placeholder
-        except ImportError:
-            print("volk.py not available – skipping")
-        else:
-            f_v, grid_v = some_wrapper_function(met, domain=domain, dx=dx)
-            others["Volk"] = (f_v, grid_v)
 
     df_metrics = compare_footprints(ref_f, ref_grid, others, plot=True)
     return df_metrics

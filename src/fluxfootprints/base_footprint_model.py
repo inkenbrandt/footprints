@@ -5,12 +5,12 @@ base_footprint_model.py
 Base class defining standard interface for all footprint models.
 """
 
+import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, Tuple
+
 import numpy as np
 import pandas as pd
 import xarray as xr
-import logging
 
 
 class BaseFootprintModel(ABC):
@@ -45,13 +45,13 @@ class BaseFootprintModel(ABC):
     def __init__(
         self,
         df: pd.DataFrame,
-        domain: list = [-1000.0, 1000.0, -1000.0, 1000.0],
+        domain: list|None = None,
         dx: float = 10.0,
         dy: float = 10.0,
-        rs: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        rs: list|None = None,
         smooth_data: bool = True,
         verbosity: int = 2,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger|None = None,
         **kwargs
     ):
         """
@@ -74,6 +74,12 @@ class BaseFootprintModel(ABC):
         logger : logging.Logger
             Custom logger instance
         """
+        if domain is None or len(domain) != 4:
+            domain = [-1000.0, 1000.0, -1000.0, 1000.0]
+
+        if rs is None or not isinstance(rs, list) or not all(0 <= r <= 1 for r in rs):
+            rs = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
         self.df = df.copy()
         self.domain = domain
         self.dx = float(dx)
@@ -118,7 +124,7 @@ class BaseFootprintModel(ABC):
         pass
     
     @abstractmethod
-    def run(self, return_result: bool = True) -> Optional[xr.Dataset]:
+    def run(self, return_result: bool = True) -> xr.Dataset|None:
         """
         Execute footprint calculation.
         
@@ -148,7 +154,7 @@ class BaseFootprintModel(ABC):
             raise RuntimeError("Model has not been run. Call run() first.")
         return self.fclim_2d
     
-    def get_footprint_timeseries(self) -> Optional[xr.DataArray]:
+    def get_footprint_timeseries(self) -> xr.DataArray|None:
         """
         Return time-resolved footprint if available.
         
@@ -159,7 +165,7 @@ class BaseFootprintModel(ABC):
         """
         return self.f_2d
     
-    def get_coordinates(self) -> Tuple[np.ndarray, np.ndarray]:
+    def get_coordinates(self) -> tuple[np.ndarray, np.ndarray]:
         """
         Return x and y coordinate arrays.
         

@@ -41,7 +41,7 @@ def tiny_grid():
 
 @pytest.fixture(scope="module")
 def met_df():
-    """Minimal meteorological DataFrame accepted by run_km / run_ffp wrappers."""
+    """Minimal meteorological DataFrame accepted by the run_km wrapper."""
     return pd.DataFrame(
         {
             "ol": [200.0],
@@ -143,10 +143,9 @@ def dummy_model(*args, **kwargs):
 
 def test_run_all_and_compare_monkeypatched(monkeypatch, met_df):
     """
-    Patch run_ffp and run_ffp_xr with lightweight stubs so that
-    run_all_and_compare executes without the real external models.
+    Patch run_ffp_xr with a lightweight stub so that run_all_and_compare
+    executes without the real external model.
     """
-    monkeypatch.setattr(cmp, "run_ffp", dummy_model)
     monkeypatch.setattr(cmp, "run_ffp_xr", dummy_model)
 
     # Keep the real KM toy model
@@ -155,10 +154,8 @@ def test_run_all_and_compare_monkeypatched(monkeypatch, met_df):
         domain=(-1, 1, -1, 1),
         dx=1.0,
         include_km=True,
-        include_xr=True,
-        include_volk=False,
     )
 
-    # Expect two comparison rows (KM vs. reference, FFP_xr vs. reference)
-    assert set(df.index) == {"FFP_xr", "KM"}
+    # Expect one comparison row (KM vs. the ffp_xr reference)
+    assert set(df.index) == {"KM"}
     assert "RMSE" in df.columns
