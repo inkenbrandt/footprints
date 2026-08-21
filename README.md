@@ -4,7 +4,7 @@
 [![Read the Docs](https://img.shields.io/readthedocs/fluxfootprints)](https://fluxfootprints.readthedocs.io/en/latest/)
 [![PyPI - Version](https://img.shields.io/pypi/v/fluxfootprints)](https://pypi.org/project/fluxfootprints/)
 [![Conda Version](https://img.shields.io/conda/vn/conda-forge/fluxfootprints.svg)](https://anaconda.org/conda-forge/fluxfootprints)
-![Coverage](https://githubusercontent.com)
+[![codecov](https://codecov.io/github/inkenbrandt/footprints/graph/badge.svg?token=27J6ExMY9A)](https://codecov.io/github/inkenbrandt/footprints)
 
 
 
