@@ -61,6 +61,7 @@ same ``run()`` / ``get_footprint_climatology()`` API:
    Lagrangian stochastic model <notebooks/Getting_Started_LS_Footprint_Model.ipynb>
    Wang footprint model <notebooks/Getting_Started_Wang_Footprint.ipynb>
    Comparing footprint models <notebooks/footprint_model_comparison.ipynb>
+   Animating footprint time series <notebooks/footprint_animation_example.ipynb>
 
 .. toctree::
    :maxdepth: 1

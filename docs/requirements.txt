@@ -28,3 +28,9 @@ nbsphinx
 # Notebook rendering
 ipykernel
 jupyter
+
+# Optional [animation] extra, used by notebooks/footprint_animation_example.ipynb
+# (that notebook ships with its outputs, so these are only needed if it is
+# re-executed at build time)
+contextily
+imageio-ffmpeg

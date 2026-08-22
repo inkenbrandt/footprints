@@ -145,6 +145,17 @@ fluxfootprints.footprint\_plotting module
    :show-inheritance:
    :undoc-members:
 
+fluxfootprints.footprint\_animation module
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Hourly / daily / monthly videos of footprint raster time series, with
+timestamp overlays and optional georeferenced basemaps.
+
+.. automodule:: fluxfootprints.footprint_animation
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 Meteorological data retrieval
 -----------------------------
 

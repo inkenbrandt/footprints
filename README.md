@@ -57,6 +57,7 @@ Optional extras:
 | Extra      | Installs                                          | For                                        |
 | ---------- | ------------------------------------------------- | ------------------------------------------ |
 | `contours` | `scikit-image`, `scikit-learn`                    | the marching-squares contour export path   |
+| `animation`| `contextily`, `imageio-ffmpeg`                    | basemaps and MP4/WebM footprint videos     |
 | `examples` | `jupyter`, `ipykernel`, `seaborn`, `plotly`       | running the notebooks in `docs/notebooks/` |
 | `docs`     | `sphinx`, `nbsphinx`, `numpydoc`, …               | building the documentation                 |
 | `test`     | `pytest`, `pytest-cov`, `tox`, `black`, `ruff`    | running the test suite and linters         |

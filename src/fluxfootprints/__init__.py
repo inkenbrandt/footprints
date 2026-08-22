@@ -19,6 +19,13 @@ from .ffp_daily_monthly_helper import (
     compute_aerodynamic_params,
 )
 
+from .footprint_animation import (
+    FootprintAnimator,
+    animate_footprint,
+    resample_footprints,
+    resolve_freq,
+)
+
 from .by_row_fetch_tools import (
     polar_to_cartesian_dataframe,
     aggregate_to_daily_centroid,
@@ -75,6 +82,11 @@ __all__ = [
     "export_contours_gpkg",
     "export_rasters_geotiff",
     "export_contour_stats_csv",
+    # Animation
+    "FootprintAnimator",
+    "animate_footprint",
+    "resample_footprints",
+    "resolve_freq",
     # Fetch / geospatial tools
     "polar_to_cartesian_dataframe",
     "aggregate_to_daily_centroid",

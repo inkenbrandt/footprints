@@ -81,7 +81,8 @@ def load_config(ini_path: str | Path) -> dict[str, Any]:
     return cfg
 
 
-def load_amf_df(csv_path: str | Path, cfg: dict[str, Any]) -> pd.DataFrame:
+def load_amf_df(csv_path: str | Path, 
+                cfg: dict[str, Any]) -> pd.DataFrame:
     """Load AMF half-hourly CSV and return a tidy DataFrame indexed by time."""
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -304,21 +305,22 @@ def build_climatology(
     h: FootprintInput = 2000.0,
     dx: float = 10.0,
     dy: float = 10.0,
-    domain: tuple[float, float, float, float] = (
-        -1000.0,
-        1000.0,
-        -1000.0,
-        1000.0,
-    ),
-    rs: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    domain: tuple[float, float, float, float] | None = None,
+    rs: list[float] | None = None,
     smooth_data: bool = True,
     verbosity: int = 2,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
     **model_kwargs,
 ) -> BaseFootprintModel:
     """Prepare inputs, validate per-model requirements, and run the footprint model."""
     if logger is None:
         logger = logging.getLogger(__name__)
+
+    if domain is None or len(domain) != 4:
+        domain = (-1000.0, 1000.0, -1000.0, 1000.0)
+
+    if rs is None or not isinstance(rs, (list, tuple)) or len(rs) == 0:
+        rs = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
     # 1. Model Registry
     models = {
