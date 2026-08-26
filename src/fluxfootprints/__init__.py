@@ -31,6 +31,7 @@ from .openet_masking import (
     MaskedFootprint,
     GridGeometry,
 )
+from .openet_raster_diagnostics import mask_rasters_geotiff_with_diagnostics
 
 from .footprint_animation import (
     FootprintAnimator,
@@ -100,6 +101,7 @@ __all__ = [
     "mask_footprint_dataarray",
     "mask_summaries",
     "mask_rasters_geotiff",
+    "mask_rasters_geotiff_with_diagnostics",
     "index_openet_rasters",
     "openet_mask_on_grid",
     "footprint_grid_geometry",
