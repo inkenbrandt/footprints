@@ -117,6 +117,17 @@ GeoPackage / GeoTIFF / CSV export.
    :show-inheritance:
    :undoc-members:
 
+fluxfootprints.openet\_masking module
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Masking of footprint fields and exported GeoTIFFs by the valid-data masks
+carried in daily OpenET rasters.
+
+.. automodule:: fluxfootprints.openet_masking
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 fluxfootprints.by\_row\_fetch\_tools module
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

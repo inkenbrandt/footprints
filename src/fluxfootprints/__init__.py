@@ -19,6 +19,19 @@ from .ffp_daily_monthly_helper import (
     compute_aerodynamic_params,
 )
 
+from .openet_masking import (
+    apply_openet_mask,
+    mask_footprint_dataarray,
+    mask_summaries,
+    mask_rasters_geotiff,
+    index_openet_rasters,
+    openet_mask_on_grid,
+    footprint_grid_geometry,
+    parse_raster_date,
+    MaskedFootprint,
+    GridGeometry,
+)
+
 from .footprint_animation import (
     FootprintAnimator,
     animate_footprint,
@@ -82,6 +95,17 @@ __all__ = [
     "export_contours_gpkg",
     "export_rasters_geotiff",
     "export_contour_stats_csv",
+    # OpenET masking
+    "apply_openet_mask",
+    "mask_footprint_dataarray",
+    "mask_summaries",
+    "mask_rasters_geotiff",
+    "index_openet_rasters",
+    "openet_mask_on_grid",
+    "footprint_grid_geometry",
+    "parse_raster_date",
+    "MaskedFootprint",
+    "GridGeometry",
     # Animation
     "FootprintAnimator",
     "animate_footprint",
