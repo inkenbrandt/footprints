@@ -76,6 +76,9 @@ __all__ = [
     "symmetry_index",
     "footprint_symmetry",
     "climatology_metrics",
+    "overlap",
+    "seasonal_overlap",
+    "daynight_overlap",
     "seasonal_overlap_index",
     "daynight_overlap_index",
     "footprint_weighted_mean",
@@ -116,6 +119,14 @@ DEFAULT_ALPHA: float = 0.05
 
 #: Sensor location bias threshold |Δ| considered representative, Sect. 2.4 [-].
 DEFAULT_BIAS_THRESHOLD: float = 0.10
+
+#: Default name of the dimension the monthly climatologies of a site-year are
+#: stacked over, for the overlap indices of Eqs. 2-3.
+_MONTH_DIM: str = "month"
+
+#: How far a month's weights may stray from unit sum before the overlap
+#: indices refuse them [-].
+_NORMALIZATION_TOLERANCE: float = 1e-6
 
 
 class Level(str, Enum):
@@ -839,7 +850,7 @@ def climatology_metrics(
         already-truncated `fclim`, whose own fraction is used instead.
     seasonal_overlap, daynight_overlap : float, optional
         Precomputed overlap indices to carry into the result, from
-        :func:`seasonal_overlap_index` and :func:`daynight_overlap_index`.
+        :func:`seasonal_overlap` and :func:`daynight_overlap`.
         Both are site-year properties spanning several climatologies and so
         cannot be derived from `fclim` alone.
 
@@ -904,16 +915,475 @@ def climatology_metrics(
     )
 
 
-def seasonal_overlap_index(climatologies: Sequence[xr.DataArray]) -> float:
+def _clamp_unit(value: float) -> float:
+    """
+    Clip an overlap index into [0, 1].
+
+    Parameters
+    ----------
+    value : float
+        Index value, bounded by 0 and 1 in exact arithmetic for weights that
+        sum to 1.
+
+    Returns
+    -------
+    float
+        `value` clipped into [0, 1].
+
+    Notes
+    -----
+    Only floating-point noise -- of order 1e-16 on a sum of square roots --
+    can push a valid index past the bound, because the callers check that
+    every month sums to 1 before summing anything. The clip keeps the
+    documented range exact rather than papering over an unnormalised input.
+    """
+    return float(min(max(value, 0.0), 1.0))
+
+
+def _weight_values(w: xr.DataArray | np.ndarray, name: str) -> np.ndarray:
+    """
+    Validate one footprint's weights and return them as a float array.
+
+    Parameters
+    ----------
+    w : xarray.DataArray or numpy.ndarray
+        Footprint weights.
+    name : str
+        How to refer to `w` in the error messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        The weights as floats, with the shape of `w`.
+
+    Raises
+    ------
+    ValueError
+        If `w` holds no cells, or if any weight is non-finite or negative.
+    """
+    values = np.asarray(w, dtype=float)
+    if values.size == 0:
+        raise ValueError(f"{name} holds no cells.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(
+            f"{name} holds non-finite weights. Truncation zeroes the cells "
+            f"outside the contour rather than masking them; see "
+            f"truncate_to_contour."
+        )
+    if np.any(values < 0.0):
+        raise ValueError(
+            f"{name} holds negative weights, which are not source weights."
+        )
+    return values
+
+
+def _check_same_grid(
+    a: xr.DataArray | np.ndarray,
+    b: xr.DataArray | np.ndarray,
+    name_a: str,
+    name_b: str,
+) -> None:
+    """
+    Require two footprints to sit on the same grid, cell for cell.
+
+    Parameters
+    ----------
+    a, b : xarray.DataArray or numpy.ndarray
+        Footprints to compare. Dims and coordinates are compared when both are
+        DataArrays; shapes always are.
+    name_a, name_b : str
+        How to refer to `a` and `b` in the error messages.
+
+    Raises
+    ------
+    ValueError
+        If the dims, the shapes, or the coordinates along any dim differ.
+
+    Notes
+    -----
+    The overlap kernel multiplies the two arrays, and xarray would quietly
+    align mismatched coordinates first -- an inner join that drops cells and
+    an outer join that invents NaN ones. Comparing up front turns that into an
+    error instead.
+    """
+    if isinstance(a, xr.DataArray) and isinstance(b, xr.DataArray):
+        if a.dims != b.dims:
+            raise ValueError(
+                f"{name_a} and {name_b} are on different grids: dims "
+                f"{a.dims} and {b.dims}."
+            )
+        for axis in a.dims:
+            in_a, in_b = axis in a.coords, axis in b.coords
+            if not in_a and not in_b:
+                continue
+            if in_a != in_b:
+                raise ValueError(
+                    f"{name_a} and {name_b} disagree over the '{axis}' "
+                    f"coordinate: only one of them carries it."
+                )
+            if not np.array_equal(
+                np.asarray(a.coords[axis].values),
+                np.asarray(b.coords[axis].values),
+            ):
+                raise ValueError(
+                    f"{name_a} and {name_b} are on different grids: their "
+                    f"'{axis}' coordinates differ."
+                )
+    if np.shape(a) != np.shape(b):
+        raise ValueError(
+            f"{name_a} and {name_b} are on different grids: shapes "
+            f"{np.shape(a)} and {np.shape(b)}."
+        )
+
+
+def _check_normalized(w: xr.DataArray | np.ndarray, name: str) -> None:
+    """
+    Require a footprint's weights to sum to one.
+
+    Parameters
+    ----------
+    w : xarray.DataArray or numpy.ndarray
+        Footprint weights, expected to be renormalised.
+    name : str
+        How to refer to `w` in the error message.
+
+    Raises
+    ------
+    ValueError
+        If the weights do not sum to 1 within
+        :data:`_NORMALIZATION_TOLERANCE`.
+
+    Notes
+    -----
+    This is what bounds the overlap indices by 1: for weights summing to 1,
+    Cauchy-Schwarz gives ``sum sqrt(w1 w2) <= sqrt(sum w1 sum w2) = 1``. A
+    non-finite sum compares False and slips through here, to be caught by
+    :func:`_weight_values` with a message about the actual problem.
+    """
+    total = float(np.asarray(w, dtype=float).sum())
+    if abs(total - 1.0) > _NORMALIZATION_TOLERANCE:
+        raise ValueError(
+            f"{name} sums to {total:.6g}, not 1. The overlap indices are "
+            f"defined on climatologies rescaled to unit sum; see "
+            f"truncate_to_contour."
+        )
+
+
+def _months_dim(w: xr.DataArray, dim: str, name: str) -> int:
+    """
+    Require a stacked array to carry the month dimension, and size it.
+
+    Parameters
+    ----------
+    w : xarray.DataArray
+        Monthly climatologies stacked over `dim`.
+    dim : str
+        Name of the stacking dimension.
+    name : str
+        How to refer to `w` in the error messages.
+
+    Returns
+    -------
+    int
+        Number of months, K.
+
+    Raises
+    ------
+    TypeError
+        If `w` is not a DataArray.
+    ValueError
+        If `w` carries no `dim` dimension, or holds no months along it.
+    """
+    if not isinstance(w, xr.DataArray):
+        raise TypeError(
+            f"{name} must be an xarray.DataArray with the months stacked over "
+            f"'{dim}', got {type(w).__name__}."
+        )
+    if dim not in w.dims:
+        raise ValueError(
+            f"{name} carries no '{dim}' dimension to stack the months over; "
+            f"its dims are {w.dims}."
+        )
+    if w.sizes[dim] == 0:
+        raise ValueError(f"{name} holds no months along '{dim}'.")
+    return int(w.sizes[dim])
+
+
+def _stack_months(
+    climatologies: Sequence[xr.DataArray],
+    name: str,
+    dim: str = _MONTH_DIM,
+) -> xr.DataArray:
+    """
+    Stack a sequence of monthly climatologies over a new month dimension.
+
+    Parameters
+    ----------
+    climatologies : sequence of xarray.DataArray
+        Monthly climatologies on a common grid, one per month.
+    name : str
+        How to refer to the sequence in the error messages.
+    dim : str, default "month"
+        Name of the dimension to stack over.
+
+    Returns
+    -------
+    xarray.DataArray
+        The climatologies stacked over `dim`, in the order given.
+
+    Raises
+    ------
+    ValueError
+        If the sequence is empty, if a member already carries `dim` as a
+        dimension, or if the grids differ.
+    """
+    if isinstance(climatologies, xr.DataArray):
+        raise TypeError(
+            f"{name} must be a sequence of DataArrays, one per month; pass a "
+            f"stacked array to seasonal_overlap or daynight_overlap instead."
+        )
+    months = list(climatologies)
+    if not months:
+        raise ValueError(f"{name} holds no climatologies.")
+
+    first = months[0]
+    for index, month in enumerate(months):
+        if isinstance(month, xr.DataArray) and dim in month.dims:
+            raise ValueError(
+                f"{name}[{index}] already carries a '{dim}' dimension; pass "
+                f"the stacked array to seasonal_overlap or daynight_overlap "
+                f"instead of a sequence."
+            )
+        if index:
+            _check_same_grid(first, month, f"{name}[0]", f"{name}[{index}]")
+
+    return xr.concat(months, dim=dim, join="exact")
+
+
+def overlap(
+    w1: xr.DataArray | np.ndarray,
+    w2: xr.DataArray | np.ndarray,
+) -> float:
+    """
+    Compute the overlap of two footprints, the kernel of Eqs. 2-3.
+
+    .. math:: \\sum_{i=1}^{I} \\sqrt{\\varphi^{1}_{i} \\varphi^{2}_{i}}
+
+    The cell-wise geometric mean of two footprints, summed over cells: the
+    Bhattacharyya coefficient of the two weight fields read as discrete
+    distributions. It is Eq. 2 for the special case of two months, and the
+    per-month term of Eq. 3.
+
+    Parameters
+    ----------
+    w1, w2 : xarray.DataArray or numpy.ndarray
+        Footprint weights on a common grid, each summing to 1 -- the output of
+        :func:`truncate_to_contour`. DataArrays are compared cell for cell
+        rather than aligned on their coordinates, so a mismatched grid raises
+        instead of silently joining.
+
+    Returns
+    -------
+    float
+        Overlap in [0, 1] for weights that sum to 1: one when the two
+        footprints are identical, zero when their supports are disjoint.
+
+    Raises
+    ------
+    ValueError
+        If the two grids differ in dims, shape, or coordinates; or if either
+        array is empty or holds a non-finite or negative weight.
+
+    See Also
+    --------
+    seasonal_overlap : Eq. 2, over the K months of a site-year.
+    daynight_overlap : Eq. 3, over paired daytime and nighttime months.
+
+    Notes
+    -----
+    Normalisation is left to the callers rather than checked here, so that the
+    kernel stays usable on any pair of non-negative fields; the upper bound of
+    1 holds only for weights that sum to 1. :func:`seasonal_overlap` and
+    :func:`daynight_overlap` do check it.
+    """
+    _check_same_grid(w1, w2, "w1", "w2")
+    values1 = _weight_values(w1, "w1")
+    values2 = _weight_values(w2, "w2")
+    return float(np.sqrt(values1 * values2).sum())
+
+
+def seasonal_overlap(weights: xr.DataArray, dim: str = _MONTH_DIM) -> float:
     """
     Compute the seasonal footprint overlap index O80_season, Eq. 2.
 
     .. math:: O_{80,season} = \\sum_{i=1}^{I}
               \\left( \\prod_{k=1}^{K} \\varphi_{ik} \\right)^{1/K}
 
-    The cell-wise geometric mean of `K` monthly climatologies, summed over the
-    `I` grid cells. Weights must already be truncated and rescaled to sum to
-    unity, i.e. the output of :func:`truncate_to_contour`.
+    The cell-wise geometric mean of the `K` monthly climatologies in a
+    site-year, summed over the `I` grid cells.
+
+    Parameters
+    ----------
+    weights : xarray.DataArray
+        Monthly climatologies stacked over `dim`, on a common grid and each
+        month already rescaled to sum to 1 -- the output of
+        :func:`truncate_to_contour`. Computed separately for daytime and
+        nighttime in the paper.
+    dim : str, default "month"
+        Name of the dimension the months are stacked over.
+
+    Returns
+    -------
+    float
+        Overlap index in [0, 1]. One indicates perfectly overlapping monthly
+        climatologies; the paper treats values below 0.8 as showing
+        "noticeable monthly variability", which it found at 32-44 % of the
+        studied site-years, concentrated in the cropland, grassland, and
+        wetland sites whose canopy height swings through the growing season.
+
+    Raises
+    ------
+    TypeError
+        If `weights` is not a DataArray.
+    ValueError
+        If `weights` carries no `dim` dimension or holds fewer than two months
+        along it; if any weight is non-finite or negative; or if any month
+        does not sum to 1.
+
+    See Also
+    --------
+    overlap : The two-footprint kernel, which Eq. 2 reduces to at K = 2.
+    seasonal_overlap_index : The same index from a sequence of climatologies.
+    daynight_overlap : The companion index across daytime and nighttime.
+
+    Notes
+    -----
+    The exponent used here is 1/K, a true geometric mean over all K months.
+    Equation 2 as printed in Chu et al. (2021) carries 1/k inside a product
+    running over k = 1..K, which is a typo: the index k has no value outside
+    the product it is bound to, and only the 1/K reading returns 1.0 when
+    every month is identical -- the defining property of an overlap index.
+
+    The geometric mean is computed as ``exp(mean(log(w)))`` over the cells
+    every month covers, and is taken as zero elsewhere, so a zero in any one
+    month propagates to a zero cell rather than a NaN. The index therefore
+    measures the source area common to *all* months, and a single month
+    pointing elsewhere is enough to drive it to zero.
+    """
+    n_months = _months_dim(weights, dim, "weights")
+    if n_months < 2:
+        raise ValueError(
+            f"The seasonal overlap index compares months, so it needs at "
+            f"least two, got {n_months}."
+        )
+
+    values = _weight_values(weights.transpose(dim, ...), "weights")
+    for index in range(n_months):
+        _check_normalized(values[index], f"weights month {index}")
+
+    common = np.all(values > 0.0, axis=0)
+    if not common.any():
+        return 0.0
+    logs = np.log(np.where(common, values, 1.0))
+    geometric_mean = np.where(common, np.exp(logs.mean(axis=0)), 0.0)
+    return _clamp_unit(float(geometric_mean.sum()))
+
+
+def daynight_overlap(
+    day: xr.DataArray,
+    night: xr.DataArray,
+    dim: str = _MONTH_DIM,
+) -> float:
+    """
+    Compute the daytime-nighttime footprint overlap index O80_daynight, Eq. 3.
+
+    .. math:: O_{80,daynight} = \\frac{1}{K} \\sum_{k=1}^{K} \\sum_{i=1}^{I}
+              \\left( \\varphi^{day}_{ik} \\varphi^{night}_{ik} \\right)^{1/2}
+
+    The :func:`overlap` of the paired daytime and nighttime climatologies of
+    each month, averaged over the `K` months of a site-year.
+
+    Parameters
+    ----------
+    day, night : xarray.DataArray
+        Paired monthly daytime and nighttime climatologies stacked over `dim`,
+        on a common grid and each month already rescaled to sum to 1 -- the
+        output of :func:`truncate_to_contour`.
+    dim : str, default "month"
+        Name of the dimension the months are stacked over. The two arrays are
+        paired by position along it; where both carry a coordinate for it, the
+        coordinates must agree.
+
+    Returns
+    -------
+    float
+        Overlap index in [0, 1]. One indicates perfectly overlapping day and
+        night climatologies; around 93 % of the site-years in the paper
+        exceeded 0.8, because a climatology aggregates many half-hours from
+        many wind directions and the day and night source areas share their
+        high-weight core even where the nighttime one reaches farther.
+
+    Raises
+    ------
+    TypeError
+        If `day` or `night` is not a DataArray.
+    ValueError
+        If either array carries no `dim` dimension or holds no months along
+        it; if the two hold different numbers of months or disagree over the
+        `dim` coordinate; if their grids differ; if any weight is non-finite
+        or negative; or if any month does not sum to 1.
+
+    See Also
+    --------
+    overlap : The per-month kernel this averages.
+    daynight_overlap_index : The same index from sequences of climatologies.
+    seasonal_overlap : The companion index across the months of a site-year.
+
+    Notes
+    -----
+    Unlike Eq. 2, this index pairs the two climatologies month by month before
+    averaging, so a month whose day and night footprints diverge lowers the
+    result without zeroing it. Nighttime climatologies reached about 45 %
+    farther and covered about 90 % more area than daytime ones at more than
+    95 % of the site-years in the paper.
+    """
+    n_months = _months_dim(day, dim, "day")
+    n_nights = _months_dim(night, dim, "night")
+    if n_months != n_nights:
+        raise ValueError(
+            f"day and night hold different numbers of months along '{dim}': "
+            f"{n_months} and {n_nights}."
+        )
+    if (
+        dim in day.coords
+        and dim in night.coords
+        and not np.array_equal(
+            np.asarray(day.coords[dim].values), np.asarray(night.coords[dim].values)
+        )
+    ):
+        raise ValueError(
+            f"day and night carry different '{dim}' coordinates, so the "
+            f"months cannot be paired by position."
+        )
+
+    total = 0.0
+    for index in range(n_months):
+        month_day = day.isel({dim: index})
+        month_night = night.isel({dim: index})
+        _check_normalized(month_day, f"day month {index}")
+        _check_normalized(month_night, f"night month {index}")
+        total += overlap(month_day, month_night)
+
+    return _clamp_unit(total / n_months)
+
+
+def seasonal_overlap_index(climatologies: Sequence[xr.DataArray]) -> float:
+    """
+    Compute the seasonal footprint overlap index O80_season, Eq. 2.
+
+    Adapter over :func:`seasonal_overlap` for monthly climatologies held as a
+    sequence rather than stacked over a dimension. See that function for the
+    equation, the 1/K exponent, and the handling of zeros.
 
     Parameters
     ----------
@@ -926,8 +1396,8 @@ def seasonal_overlap_index(climatologies: Sequence[xr.DataArray]) -> float:
     -------
     float
         Overlap index in [0, 1]. One indicates perfectly overlapping monthly
-        climatologies; the paper flags values below 0.8 as showing noticeable
-        monthly variability.
+        climatologies; the paper treats values below 0.8 as showing
+        "noticeable monthly variability".
 
     Raises
     ------
@@ -939,7 +1409,7 @@ def seasonal_overlap_index(climatologies: Sequence[xr.DataArray]) -> float:
     The geometric mean is zero wherever any single month has zero weight, so
     the index is dominated by the area common to *all* months.
     """
-    raise NotImplementedError
+    return seasonal_overlap(_stack_months(climatologies, "climatologies"))
 
 
 def daynight_overlap_index(
@@ -949,8 +1419,9 @@ def daynight_overlap_index(
     """
     Compute the daytime-nighttime footprint overlap index O80_daynight, Eq. 3.
 
-    .. math:: O_{80,daynight} = \\frac{1}{K} \\sum_{k=1}^{K} \\sum_{i=1}^{I}
-              \\left( \\varphi^{day}_{ik} \\varphi^{night}_{ik} \\right)^{1/2}
+    Adapter over :func:`daynight_overlap` for monthly climatologies held as
+    sequences rather than stacked over a dimension. See that function for the
+    equation.
 
     Parameters
     ----------
@@ -970,7 +1441,10 @@ def daynight_overlap_index(
     ValueError
         If the two sequences differ in length, or their grids differ.
     """
-    raise NotImplementedError
+    return daynight_overlap(
+        _stack_months(daytime, "daytime"),
+        _stack_months(nighttime, "nighttime"),
+    )
 
 
 # ------------------------------
