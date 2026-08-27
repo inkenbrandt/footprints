@@ -219,6 +219,23 @@ export_contours_gpkg(model, summaries, df, station_lat, station_lon,
                      "footprints.gpkg", levels=(0.8,))
 ```
 
+#### Masking by OpenET data availability
+
+Footprint weight that lands on cells with no OpenET value cannot be paired with
+an ET estimate. `mask_summaries` reprojects the valid-data mask of each daily
+OpenET raster -- matched to the footprint by the date in its file name -- onto
+the footprint grid, and reports how much weight survives:
+
+```python
+from fluxfootprints import mask_summaries, mask_rasters_geotiff
+
+masked = mask_summaries(summaries, "openet/daily/", station_lat, station_lon)
+print(masked.daily_domain_coverage["openet_retained_frac"])
+
+# ... or mask GeoTIFFs that were already exported
+mask_rasters_geotiff("out/", "openet/daily/")
+```
+
 The package also includes helpers to pull forcing data
 (`fetch_nldas_forcing_dataset`, `call_nldas_time_series`) and to turn per-row
 fetch geometry into daily centroids and density rasters

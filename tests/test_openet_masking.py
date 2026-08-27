@@ -15,11 +15,11 @@ import xarray as xr
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 rasterio = pytest.importorskip("rasterio")
-from pyproj import CRS, Transformer  # noqa: E402
-from rasterio.transform import from_origin  # noqa: E402
+from pyproj import CRS, Transformer
+from rasterio.transform import from_origin
 
-from fluxfootprints import ffp_daily_monthly_helper as helper  # noqa: E402
-from fluxfootprints import openet_masking as om  # noqa: E402
+from fluxfootprints import ffp_daily_monthly_helper as helper
+from fluxfootprints import openet_masking as om
 
 STATION_LAT = 40.0
 STATION_LON = -111.9

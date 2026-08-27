@@ -40,7 +40,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -67,12 +67,9 @@ __all__ = [
 ]
 
 # Anything convertible into a set of dated OpenET rasters.
-OpenETSource = Union[
-    str,
-    Path,
-    Sequence[Union[str, Path]],
-    Mapping[Any, Union[str, Path, Sequence[Union[str, Path]]]],
-]
+OpenETSource = (
+    str | Path | Sequence[str | Path] | Mapping[Any, str | Path | Sequence[str | Path]]
+)
 
 _DAY_RE = re.compile(r"(?<!\d)(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)")
 _MONTH_RE = re.compile(r"(?<!\d)(\d{4})[-_.]?(\d{2})(?!\d)")
@@ -244,8 +241,7 @@ def index_openet_rasters(
                 )
             index.setdefault(date, []).append(path)
 
-    for date in index:
-        index[date] = sorted(set(index[date]))
+    index = {date: sorted(set(paths)) for date, paths in index.items()}
 
     if not index:
         raise ValueError(
@@ -634,8 +630,10 @@ def mask_footprint_dataarray(
     station_lat, station_lon : float
         Tower position in decimal degrees (WGS 84).
     freq : {"auto", "daily", "monthly"}, default "auto"
-        How to interpret the time coordinate.  ``"auto"`` reads a series whose
-        stamps are all first-of-month, one per month, as monthly.
+        How to interpret the time coordinate.  ``"auto"`` reads a series of more
+        than one stamp, all first-of-month and one stamp per month, as monthly,
+        and anything else as daily -- so set it explicitly for a single-slice
+        monthly field.
     grid_crs : str, int, pyproj.CRS, default "auto"
         CRS the footprint grid is georeferenced into; ``"auto"`` uses the local
         UTM zone, matching the GeoTIFF export.
