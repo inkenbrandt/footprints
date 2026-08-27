@@ -45,6 +45,7 @@ fractions of the captured mass.
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ from enum import Enum
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -71,6 +73,9 @@ __all__ = [
     "footprint_contour_mask",
     "truncate_to_contour",
     "target_area_mask",
+    "potential_radiation",
+    "partition_daynight",
+    "monthly_climatologies",
     "footprint_fetch",
     "footprint_area",
     "symmetry_index",
@@ -127,6 +132,31 @@ _MONTH_DIM: str = "month"
 #: How far a month's weights may stray from unit sum before the overlap
 #: indices refuse them [-].
 _NORMALIZATION_TOLERANCE: float = 1e-6
+
+#: Total solar irradiance at one astronomical unit, the scale of the potential
+#: incoming shortwave radiation of Sect. 2.2 [W m-2].
+SOLAR_CONSTANT: float = 1361.0
+
+#: Column searched for a precomputed potential incoming shortwave radiation,
+#: matched case-insensitively. The AmeriFlux BASE name.
+SW_IN_POT_COLUMN: str = "SW_IN_POT"
+
+#: Name of the dimension separating the daytime and nighttime climatologies of
+#: a month.
+_PERIOD_DIM: str = "period"
+
+#: Coordinate labels along :data:`_PERIOD_DIM`.
+DAYTIME: str = "daytime"
+NIGHTTIME: str = "nighttime"
+ALL_HOURS: str = "all"
+
+#: Accepted values of the ``partition`` argument of
+#: :func:`monthly_climatologies`.
+_PARTITIONS: tuple[str, ...] = ("month", "month+daynight")
+
+#: Names a results Dataset may hold its time-resolved footprints under, in
+#: search order.
+_FOOTPRINT_VARIABLES: tuple[str, ...] = ("footprint_2d", "f_2d")
 
 
 class Level(str, Enum):
@@ -229,6 +259,9 @@ class ClimatologyMetrics:
     contour_level : float
         Footprint density [m⁻²] enclosing `fraction` of the total source
         weight; usable directly as a ``levels`` argument to ``ax.contour``.
+        ``nan`` for an already-truncated climatology that no longer carries
+        the level it was cut at, such as one sliced out of the stack that
+        :func:`monthly_climatologies` returns.
     fetch : float
         X80, the maximum distance from the tower to the truncation contour [m].
     area : float
@@ -663,6 +696,941 @@ def target_area_mask(
 
 
 # ------------------------------
+# Day-night partitioning and monthly climatologies (Sect. 2.2)
+# ------------------------------
+
+
+def _as_tzinfo(tz: str | float | dt.tzinfo) -> dt.tzinfo:
+    """
+    Coerce a time-zone specification to a :class:`datetime.tzinfo`.
+
+    Parameters
+    ----------
+    tz : str, float, or datetime.tzinfo
+        A fixed offset from UTC in hours (e.g. ``-7`` for US Mountain Standard
+        Time), an IANA zone name (e.g. ``"America/Denver"``), or a ready-made
+        ``tzinfo``.
+
+    Returns
+    -------
+    datetime.tzinfo
+        The resolved zone.
+
+    Raises
+    ------
+    TypeError
+        If `tz` is none of the accepted types.
+    ValueError
+        If a numeric offset is not finite or exceeds 24 h, or if a string is
+        not a zone name the system time-zone database knows.
+
+    Notes
+    -----
+    A numeric offset and a zone name are *not* interchangeable for flux data.
+    AmeriFlux BASE timestamps are in local standard time all year, with no
+    daylight-saving shift, so the offset is the faithful choice; an IANA name
+    would advance the clock by an hour each summer and displace every sunrise
+    with it.
+    """
+    if isinstance(tz, dt.tzinfo):
+        return tz
+    if isinstance(tz, bool):  # bool is an int; nobody means an offset by it
+        raise TypeError(
+            f"tz must be a UTC offset in hours, an IANA zone name, or a "
+            f"datetime.tzinfo, got {tz!r}."
+        )
+    if isinstance(tz, (int, float, np.integer, np.floating)):
+        hours = float(tz)
+        if not np.isfinite(hours) or abs(hours) > 24.0:
+            raise ValueError(
+                f"A numeric tz is a UTC offset in hours and must be finite and "
+                f"within +/- 24, got {tz!r}."
+            )
+        return dt.timezone(dt.timedelta(hours=hours))
+    if isinstance(tz, str):
+        try:
+            return ZoneInfo(tz)
+        except Exception as exc:
+            raise ValueError(
+                f"tz={tz!r} is not a zone name the time-zone database knows. "
+                f"Pass an IANA name such as 'America/Denver', or -- for "
+                f"AmeriFlux data, which is in local standard time year-round "
+                f"-- a fixed UTC offset in hours such as -7."
+            ) from exc
+    raise TypeError(
+        f"tz must be a UTC offset in hours, an IANA zone name, or a "
+        f"datetime.tzinfo, got {type(tz).__name__}."
+    )
+
+
+def _utc_index(
+    index: pd.DatetimeIndex,
+    tz: str | float | dt.tzinfo | None,
+) -> pd.DatetimeIndex:
+    """
+    Localise a timestamp index and convert it to UTC.
+
+    Parameters
+    ----------
+    index : pandas.DatetimeIndex
+        Measurement timestamps, time-zone naive or aware.
+    tz : str, float, datetime.tzinfo, or None
+        Zone the naive timestamps are in, as accepted by :func:`_as_tzinfo`.
+        Must be None for an already-aware index.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        The same instants, expressed in UTC.
+
+    Raises
+    ------
+    TypeError
+        If `index` is not a DatetimeIndex.
+    ValueError
+        If `index` holds a NaT; if it is naive and `tz` is None; or if it is
+        aware and `tz` was given as well.
+
+    Notes
+    -----
+    Refusing a `tz` alongside an aware index is deliberate: silently ignoring
+    one of two disagreeing zones is how a whole record ends up an hour off.
+    """
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError(
+            f"The timestamps must be a pandas.DatetimeIndex, got "
+            f"{type(index).__name__}. Set the frame's index to its timestamp "
+            f"column first."
+        )
+    if index.hasnans:
+        raise ValueError(
+            "The timestamp index holds NaT, so the solar position is "
+            "undefined there. Drop those rows first."
+        )
+
+    if index.tz is not None:
+        if tz is not None:
+            raise ValueError(
+                f"The timestamp index already carries the time zone "
+                f"{index.tz}, so tz={tz!r} would be a second, possibly "
+                f"conflicting answer. Pass tz=None."
+            )
+        return index.tz_convert("UTC")
+
+    if tz is None:
+        raise ValueError(
+            "The timestamp index is time-zone naive, so the solar position "
+            "cannot be placed on the clock. Pass tz -- a fixed UTC offset in "
+            "hours for AmeriFlux local standard time (e.g. tz=-7), or an IANA "
+            "zone name."
+        )
+    return index.tz_localize(_as_tzinfo(tz)).tz_convert("UTC")
+
+
+def _julian_day(index: pd.DatetimeIndex) -> np.ndarray:
+    """
+    Convert a UTC timestamp index to Julian days.
+
+    Parameters
+    ----------
+    index : pandas.DatetimeIndex
+        Timestamps in UTC.
+
+    Returns
+    -------
+    numpy.ndarray
+        Julian day numbers, i.e. days since noon UTC on 1 January 4713 BC in
+        the proleptic Julian calendar.
+
+    Notes
+    -----
+    ``datetime64[ns]`` counts nanoseconds from the Unix epoch, which is Julian
+    day 2440587.5, so the conversion is exact arithmetic rather than a
+    calendar walk.
+    """
+    naive = index.tz_localize(None) if index.tz is not None else index
+    nanoseconds = np.asarray(naive.values, dtype="datetime64[ns]").astype("int64")
+    return nanoseconds / 86_400_000_000_000.0 + 2_440_587.5
+
+
+def _solar_geometry(
+    julian_day: np.ndarray,
+    latitude: float,
+    longitude: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the solar zenith cosine and the Earth-Sun distance.
+
+    Implements the low-precision solar position algorithm published by NOAA
+    (after Meeus, *Astronomical Algorithms*, 2nd ed., Ch. 25), which places
+    the Sun to within about 0.01 degrees over 1900-2100 -- far finer than the
+    horizon crossing needs.
+
+    Parameters
+    ----------
+    julian_day : numpy.ndarray
+        Julian days of the instants to evaluate, from :func:`_julian_day`.
+    latitude : float
+        Site latitude, positive north [degrees].
+    longitude : float
+        Site longitude, positive east [degrees].
+
+    Returns
+    -------
+    cos_zenith : numpy.ndarray
+        Cosine of the solar zenith angle, negative when the Sun is below the
+        horizon.
+    radius : numpy.ndarray
+        Earth-Sun distance [astronomical units], which varies by about +/- 1.7
+        % over the year and so moves the top-of-atmosphere flux by about
+        +/- 3.4 %.
+
+    Notes
+    -----
+    The zenith angle returned is geometric: no atmospheric refraction and no
+    solar-disc radius are applied. That makes ``cos_zenith > 0`` exactly "the
+    Sun's centre is above the astronomical horizon", the convention behind the
+    potential-radiation day-night split. Refraction would move each crossing
+    earlier or later by a few minutes and, at a half-hourly resolution, would
+    reclassify at most one record per sunrise and sunset.
+    """
+    century = (julian_day - 2451545.0) / 36525.0
+
+    # Geometric mean longitude and mean anomaly of the Sun [rad].
+    mean_longitude = np.deg2rad(
+        np.mod(280.46646 + century * (36000.76983 + century * 0.0003032), 360.0)
+    )
+    mean_anomaly = np.deg2rad(357.52911 + century * (35999.05029 - 0.0001537 * century))
+    eccentricity = 0.016708634 - century * (0.000042037 + 0.0000001267 * century)
+
+    # Equation of the centre, i.e. true minus mean anomaly [rad].
+    centre = np.deg2rad(
+        np.sin(mean_anomaly) * (1.914602 - century * (0.004817 + 0.000014 * century))
+        + np.sin(2.0 * mean_anomaly) * (0.019993 - 0.000101 * century)
+        + np.sin(3.0 * mean_anomaly) * 0.000289
+    )
+    true_longitude = mean_longitude + centre
+    true_anomaly = mean_anomaly + centre
+    radius = (
+        1.000001018
+        * (1.0 - eccentricity**2)
+        / (1.0 + eccentricity * np.cos(true_anomaly))
+    )
+
+    # Apparent longitude and true obliquity, both corrected for nutation.
+    nutation = np.deg2rad(125.04 - 1934.136 * century)
+    apparent_longitude = (
+        true_longitude - np.deg2rad(0.00569) - np.deg2rad(0.00478) * np.sin(nutation)
+    )
+    mean_obliquity = np.deg2rad(
+        23.0
+        + (
+            26.0
+            + (21.448 - century * (46.815 + century * (0.00059 - century * 0.001813)))
+            / 60.0
+        )
+        / 60.0
+    )
+    obliquity = mean_obliquity + np.deg2rad(0.00256) * np.cos(nutation)
+    declination = np.arcsin(np.sin(obliquity) * np.sin(apparent_longitude))
+
+    # Equation of time [minutes]: apparent minus mean solar time.
+    tangent = np.tan(obliquity / 2.0) ** 2
+    equation_of_time = 4.0 * np.rad2deg(
+        tangent * np.sin(2.0 * mean_longitude)
+        - 2.0 * eccentricity * np.sin(mean_anomaly)
+        + 4.0
+        * eccentricity
+        * tangent
+        * np.sin(mean_anomaly)
+        * np.cos(2.0 * mean_longitude)
+        - 0.5 * tangent**2 * np.sin(4.0 * mean_longitude)
+        - 1.25 * eccentricity**2 * np.sin(2.0 * mean_anomaly)
+    )
+
+    # True solar time [minutes past local solar midnight], then hour angle.
+    minutes_utc = np.mod(julian_day + 0.5, 1.0) * 1440.0
+    true_solar_time = np.mod(
+        minutes_utc + equation_of_time + 4.0 * longitude, 1440.0
+    )
+    hour_angle = np.deg2rad(true_solar_time / 4.0 - 180.0)
+
+    phi = np.deg2rad(latitude)
+    cos_zenith = np.sin(phi) * np.sin(declination) + np.cos(phi) * np.cos(
+        declination
+    ) * np.cos(hour_angle)
+    return cos_zenith, radius
+
+
+def _check_site(latitude: float, longitude: float) -> tuple[float, float]:
+    """
+    Validate a site geolocation.
+
+    Parameters
+    ----------
+    latitude : float
+        Site latitude, positive north [degrees].
+    longitude : float
+        Site longitude, positive east [degrees].
+
+    Returns
+    -------
+    tuple of float
+        ``(latitude, longitude)`` as floats.
+
+    Raises
+    ------
+    ValueError
+        If either is missing or non-finite, if the latitude is outside
+        [-90, 90], or if the longitude is outside [-360, 360].
+    """
+    if latitude is None or longitude is None:
+        raise ValueError(
+            "The solar position needs the site geolocation: pass latitude and "
+            "longitude, or supply a precomputed "
+            f"{SW_IN_POT_COLUMN} column."
+        )
+    lat, lon = float(latitude), float(longitude)
+    if not np.isfinite(lat) or abs(lat) > 90.0:
+        raise ValueError(
+            f"latitude must be finite and within +/- 90, got {latitude!r}."
+        )
+    if not np.isfinite(lon) or abs(lon) > 360.0:
+        raise ValueError(
+            f"longitude must be finite and within +/- 360 degrees east, got "
+            f"{longitude!r}. Western longitudes are negative."
+        )
+    return lat, lon
+
+
+def _timestamps(df: pd.DataFrame | pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """
+    Take the timestamp index out of a frame, or pass an index through.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame or pandas.DatetimeIndex
+        Measurement records indexed by time, or the timestamps alone.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        The timestamps.
+
+    Raises
+    ------
+    TypeError
+        If `df` is neither a DataFrame nor a DatetimeIndex.
+    """
+    if isinstance(df, pd.DatetimeIndex):
+        return df
+    if isinstance(df, pd.DataFrame):
+        return df.index
+    raise TypeError(
+        f"Expected a pandas.DataFrame indexed by time or a "
+        f"pandas.DatetimeIndex, got {type(df).__name__}."
+    )
+
+
+def _find_column(df: pd.DataFrame | pd.DatetimeIndex, name: str) -> str | None:
+    """
+    Look up a column by name, ignoring case.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame or pandas.DatetimeIndex
+        Frame to search; an index carries no columns and yields None.
+    name : str
+        Column name to match case-insensitively.
+
+    Returns
+    -------
+    str or None
+        The matching column's actual name, or None if there is no match.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return None
+    target = name.casefold()
+    for column in df.columns:
+        if isinstance(column, str) and column.casefold() == target:
+            return column
+    return None
+
+
+def potential_radiation(
+    df: pd.DataFrame | pd.DatetimeIndex,
+    latitude: float,
+    longitude: float,
+    tz: str | float | dt.tzinfo | None = None,
+) -> pd.Series:
+    """
+    Compute potential (top-of-atmosphere) incoming shortwave radiation.
+
+    .. math:: SW_{IN,POT} = \\frac{S_0}{R^2} \\max(\\cos\\theta_z, 0)
+
+    The flux a horizontal surface would receive with no atmosphere: the solar
+    constant, scaled by the inverse square of the Earth-Sun distance `R` and
+    projected onto the horizontal by the solar zenith angle. This is the
+    quantity Chu et al. (2021), Sect. 2.2, threshold at 0 W m⁻² to separate
+    daytime from nighttime records.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame or pandas.DatetimeIndex
+        Measurement records indexed by timestamp, or the timestamps alone.
+    latitude : float
+        Site latitude, positive north [degrees].
+    longitude : float
+        Site longitude, positive east [degrees]; western longitudes are
+        negative.
+    tz : str, float, datetime.tzinfo, or None, optional
+        Time zone the timestamps are in: a fixed UTC offset in hours
+        (e.g. ``-7``), an IANA zone name (e.g. ``"America/Denver"``), or a
+        ``tzinfo``. Omit it when the index is already time-zone aware.
+
+    Returns
+    -------
+    pandas.Series
+        Potential radiation [W m⁻²] named ``"SW_IN_POT"``, on the index of
+        `df`. Zero whenever the Sun is at or below the horizon.
+
+    Raises
+    ------
+    TypeError
+        If `df` is not a DataFrame or DatetimeIndex, or `tz` is of an
+        unusable type.
+    ValueError
+        If the index holds a NaT; if it is naive and `tz` is None, or aware
+        and `tz` was given; or if the geolocation is out of range.
+
+    See Also
+    --------
+    partition_daynight : The day-night flag this radiation defines.
+
+    Notes
+    -----
+    Timestamps are read as instants, so a period-averaged record is placed at
+    whatever its label says -- the start of the averaging period for
+    AmeriFlux ``TIMESTAMP_START``, the end for ``TIMESTAMP_END``. Only the one
+    half-hour that straddles each horizon crossing can be classified either
+    way by that choice.
+
+    The solar constant used is 1361 W m⁻², the modern total-solar-irradiance
+    value; the flux therefore peaks near 1413 W m⁻² at perihelion in early
+    January and near 1321 W m⁻² at aphelion in early July.
+
+    Examples
+    --------
+    Six-hourly instants over the winter solstice at a mountain-west site, in
+    local standard time: only local noon has the Sun up.
+
+    >>> import pandas as pd
+    >>> times = pd.date_range("2020-12-21", periods=4, freq="6h")
+    >>> potential_radiation(times, 40.0, -111.0, tz=-7).round(1).tolist()
+    [0.0, 0.0, 624.2, 0.0]
+    """
+    lat, lon = _check_site(latitude, longitude)
+    index = _timestamps(df)
+    utc = _utc_index(index, tz)
+
+    cos_zenith, radius = _solar_geometry(_julian_day(utc), lat, lon)
+    flux = SOLAR_CONSTANT / radius**2 * np.clip(cos_zenith, 0.0, None)
+    return pd.Series(flux, index=index, name=SW_IN_POT_COLUMN)
+
+
+def partition_daynight(
+    df: pd.DataFrame | pd.DatetimeIndex,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    tz: str | float | dt.tzinfo | None = None,
+    sw_in_pot: str | None = SW_IN_POT_COLUMN,
+) -> pd.Series:
+    """
+    Split records into daytime and nighttime, after Sect. 2.2.
+
+    Chu et al. (2021) separate daytime from nighttime by the potential
+    incoming radiation computed from the site's geolocation and time zone,
+    calling a record daytime where that radiation exceeds 0 W m⁻² -- i.e.
+    wherever the Sun is above the horizon. Daytime and nighttime footprints
+    are then aggregated into separate climatologies, because the nighttime
+    ones reach about 45 % farther and cover about 90 % more area.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame or pandas.DatetimeIndex
+        Measurement records indexed by timestamp, or the timestamps alone. A
+        frame carrying a potential-radiation column is used as-is; see
+        `sw_in_pot`.
+    latitude : float, optional
+        Site latitude, positive north [degrees]. Required unless the
+        radiation is supplied by column.
+    longitude : float, optional
+        Site longitude, positive east [degrees]; western longitudes are
+        negative. Required unless the radiation is supplied by column.
+    tz : str, float, datetime.tzinfo, or None, optional
+        Time zone the timestamps are in: a fixed UTC offset in hours
+        (e.g. ``-7``), an IANA zone name (e.g. ``"America/Denver"``), or a
+        ``tzinfo``. Omit it when the index is already time-zone aware.
+    sw_in_pot : str or None, default "SW_IN_POT"
+        Column of precomputed potential radiation [W m⁻²] to use instead of
+        the solar geometry, matched case-insensitively; the AmeriFlux BASE
+        name by default. Pass None to always compute the geometry.
+
+    Returns
+    -------
+    pandas.Series
+        Boolean Series named ``"daytime"`` on the index of `df`, True where
+        the Sun is above the horizon.
+
+    Raises
+    ------
+    TypeError
+        If `df` is not a DataFrame or DatetimeIndex, or `tz` is of an
+        unusable type.
+    ValueError
+        If the geolocation is needed but missing or out of range; if the index
+        holds a NaT, or is naive with no `tz` (or aware with one); or if the
+        `sw_in_pot` column has gaps that cannot be filled because no
+        geolocation was given.
+
+    See Also
+    --------
+    potential_radiation : The radiation the threshold is applied to.
+    monthly_climatologies : Uses this split to build the paired climatologies.
+
+    Notes
+    -----
+    A precomputed column is preferred where present, so that the split matches
+    whatever the data provider used; gaps in it are filled from the geometry
+    when a geolocation is available, since a boolean flag has no room for a
+    missing value.
+
+    AmeriFlux BASE timestamps are in local standard time throughout the year.
+    Pass the site's standard-time offset as a number, not an IANA zone name,
+    or every summer sunrise moves an hour.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> times = pd.date_range("2020-12-21", periods=4, freq="6h")
+    >>> partition_daynight(times, 40.0, -111.0, tz=-7).tolist()
+    [False, False, True, False]
+
+    A precomputed column wins over the geometry, and needs no geolocation:
+
+    >>> df = pd.DataFrame({"SW_IN_POT": [0.0, 0.0, 550.0, 0.0]}, index=times)
+    >>> partition_daynight(df).tolist()
+    [False, False, True, False]
+    """
+    index = _timestamps(df)
+    column = _find_column(df, sw_in_pot) if sw_in_pot else None
+
+    if column is None:
+        radiation = potential_radiation(df, latitude, longitude, tz)
+    else:
+        radiation = pd.to_numeric(df[column], errors="coerce").astype(float)
+        missing = radiation.isna()
+        if missing.any():
+            if latitude is None or longitude is None:
+                raise ValueError(
+                    f"The '{column}' column has {int(missing.sum())} missing "
+                    f"values, and a day-night flag has no room for one. Pass "
+                    f"latitude and longitude so the gaps can be filled from "
+                    f"the solar geometry, or drop those rows."
+                )
+            filled = potential_radiation(index[missing], latitude, longitude, tz)
+            radiation = radiation.copy()
+            radiation.loc[missing] = filled.to_numpy()
+
+    daytime = np.asarray(radiation, dtype=float) > 0.0
+    return pd.Series(daytime, index=index, name=DAYTIME)
+
+
+def _resolve_footprints(model_or_ds: Any) -> tuple[xr.DataArray, pd.DataFrame | None]:
+    """
+    Find the time-resolved footprints, and the frame they were computed from.
+
+    Parameters
+    ----------
+    model_or_ds : BaseFootprintModel, xarray.Dataset, or xarray.DataArray
+        A run footprint model, its results Dataset, or the time-resolved
+        footprint array itself.
+
+    Returns
+    -------
+    f_2d : xarray.DataArray
+        Time-resolved footprints, transposed to dims ``(time, x, y)``.
+    df : pandas.DataFrame or None
+        The model's input frame where one is available, so that a precomputed
+        potential-radiation column can be picked up from it.
+
+    Raises
+    ------
+    TypeError
+        If `model_or_ds` is none of the accepted types.
+    ValueError
+        If the model has not been run, if a Dataset carries no recognisable
+        time-resolved footprint variable, or if the array's dims are not
+        ``(time, x, y)``.
+    """
+    source: pd.DataFrame | None = None
+
+    if isinstance(model_or_ds, xr.DataArray):
+        f_2d = model_or_ds
+    elif isinstance(model_or_ds, xr.Dataset):
+        found = [
+            name
+            for name in _FOOTPRINT_VARIABLES
+            if name in model_or_ds and "time" in model_or_ds[name].dims
+        ]
+        if not found:
+            raise ValueError(
+                f"The Dataset carries no time-resolved footprint variable. "
+                f"Looked for {', '.join(_FOOTPRINT_VARIABLES)} with a 'time' "
+                f"dimension; it holds {', '.join(map(str, model_or_ds.data_vars))}."
+            )
+        f_2d = model_or_ds[found[0]]
+    elif hasattr(model_or_ds, "f_2d"):
+        f_2d = model_or_ds.f_2d
+        if f_2d is None:
+            raise ValueError(
+                f"{type(model_or_ds).__name__}.f_2d is None: the model has "
+                f"not been run, or it does not retain the time-resolved "
+                f"footprints. Call run() first."
+            )
+        candidate = getattr(model_or_ds, "df", None)
+        if isinstance(candidate, pd.DataFrame):
+            source = candidate
+    else:
+        raise TypeError(
+            f"Expected a footprint model, an xarray.Dataset of results, or a "
+            f"time-resolved xarray.DataArray, got {type(model_or_ds).__name__}."
+        )
+
+    if not isinstance(f_2d, xr.DataArray):
+        raise TypeError(
+            f"The time-resolved footprints must be an xarray.DataArray, got "
+            f"{type(f_2d).__name__}."
+        )
+    expected = {"time", "x", "y"}
+    if set(f_2d.dims) != expected:
+        raise ValueError(
+            f"The time-resolved footprints must have dims (time, x, y), got "
+            f"{f_2d.dims}."
+        )
+    return f_2d.transpose("time", "x", "y"), source
+
+
+def _daytime_mask(
+    times: pd.DatetimeIndex,
+    daytime: pd.Series | np.ndarray | xr.DataArray | None,
+    source: pd.DataFrame | None,
+    latitude: float | None,
+    longitude: float | None,
+    tz: str | float | dt.tzinfo | None,
+    sw_in_pot: str | None,
+) -> np.ndarray:
+    """
+    Resolve the day-night split for the timestamps of a footprint series.
+
+    Parameters
+    ----------
+    times : pandas.DatetimeIndex
+        Footprint timestamps, from the ``time`` coordinate.
+    daytime : pandas.Series, numpy.ndarray, xarray.DataArray, or None
+        A precomputed flag. A Series is aligned on its index; an array is
+        taken in order and must match the number of timestamps.
+    source : pandas.DataFrame or None
+        The model's input frame, searched for a `sw_in_pot` column.
+    latitude, longitude : float or None
+        Site geolocation [degrees], passed to :func:`partition_daynight`.
+    tz : str, float, datetime.tzinfo, or None
+        Time zone of `times`.
+    sw_in_pot : str or None
+        Precomputed potential-radiation column to prefer.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean array, one flag per timestamp.
+
+    Raises
+    ------
+    ValueError
+        If a supplied `daytime` does not cover every timestamp or is the
+        wrong length, or if the split cannot be computed.
+    """
+    if daytime is not None:
+        if isinstance(daytime, xr.DataArray):
+            daytime = daytime.to_series() if "time" in daytime.dims else daytime.values
+        if isinstance(daytime, pd.Series):
+            aligned = daytime.reindex(times)
+            if aligned.isna().any():
+                raise ValueError(
+                    f"daytime does not cover every footprint timestamp: "
+                    f"{int(aligned.isna().sum())} of {len(times)} are missing."
+                )
+            return np.asarray(aligned, dtype=bool)
+        values = np.asarray(daytime)
+        if values.shape != (len(times),):
+            raise ValueError(
+                f"daytime holds {values.shape} flags for {len(times)} "
+                f"footprint timestamps."
+            )
+        return values.astype(bool)
+
+    frame = pd.DataFrame(index=times)
+    column = _find_column(source, sw_in_pot) if sw_in_pot else None
+    if column is not None and isinstance(source.index, pd.DatetimeIndex):
+        frame[column] = source[column].reindex(times)
+    return np.asarray(
+        partition_daynight(frame, latitude, longitude, tz, sw_in_pot), dtype=bool
+    )
+
+
+def monthly_climatologies(
+    model_or_ds: Any,
+    partition: str = "month+daynight",
+    latitude: float | None = None,
+    longitude: float | None = None,
+    tz: str | float | dt.tzinfo | None = None,
+    daytime: pd.Series | np.ndarray | xr.DataArray | None = None,
+    fraction: float = DEFAULT_CONTOUR_FRACTION,
+    dx: float | None = None,
+    dy: float | None = None,
+    min_times: int = 1,
+    sw_in_pot: str | None = SW_IN_POT_COLUMN,
+) -> xr.Dataset:
+    """
+    Aggregate time-resolved footprints into monthly climatologies, Sect. 2.2.
+
+    Chu et al. (2021) aggregate every half-hourly footprint of a month into a
+    daytime and a nighttime climatology, truncate each at the 80 % contour of
+    source weights, and rescale the retained cells to sum to one. The result
+    is the unit of analysis for everything downstream: the metrics of Eqs. 1-3
+    and the footprint-weighted statistics of Eqs. 5-6.
+
+    Parameters
+    ----------
+    model_or_ds : BaseFootprintModel, xarray.Dataset, or xarray.DataArray
+        A run footprint model, its results Dataset, or the time-resolved
+        footprints themselves with dims ``(time, x, y)``. A model is also
+        searched for a `sw_in_pot` column in its input frame.
+    partition : {"month+daynight", "month"}, default "month+daynight"
+        How to group the timesteps. ``"month+daynight"`` splits each month
+        into daytime and nighttime as in the paper; ``"month"`` aggregates
+        every hour of the month into one climatology, labelled ``"all"``.
+    latitude : float, optional
+        Site latitude, positive north [degrees].
+    longitude : float, optional
+        Site longitude, positive east [degrees]; western longitudes are
+        negative.
+    tz : str, float, datetime.tzinfo, or None, optional
+        Time zone the footprint timestamps are in, as accepted by
+        :func:`partition_daynight`.
+    daytime : pandas.Series, numpy.ndarray, or xarray.DataArray, optional
+        A precomputed day-night flag, used instead of computing one. A Series
+        is aligned on its index and must cover every timestamp; an array is
+        taken in order.
+    fraction : float, default 0.8
+        Source-weight fraction each climatology is truncated at.
+    dx, dy : float, optional
+        Grid spacing [m]. Inferred from the ``x`` and ``y`` coordinates when
+        omitted.
+    min_times : int, default 1
+        Fewest contributing timesteps a group needs before it is aggregated.
+        Thinner groups come back as all-NaN weights with their ``n_times``
+        recorded, rather than as a climatology built from a handful of
+        half-hours.
+    sw_in_pot : str or None, default "SW_IN_POT"
+        Precomputed potential-radiation column to prefer over the solar
+        geometry, matched case-insensitively.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dims ``(month, period, x, y)``, carrying
+
+        ``footprint_climatology``
+            Truncated, renormalised weights [-] summing to one over ``(x, y)``
+            in every aggregated group, and all-NaN in the groups left empty or
+            held back by `min_times`.
+        ``n_times``
+            Timesteps that contributed positive weight to each group.
+        ``contour_level``
+            Source-weight density [m⁻²] at the truncation contour. It varies
+            from group to group, so it lives here rather than in the stacked
+            array's attributes, and :func:`climatology_metrics` reports it as
+            ``nan`` for a slice; read it from here alongside.
+        ``contour_n_cells``
+            Cells retained inside the contour.
+
+        The ``month`` coordinate is the first instant of each calendar month
+        present, and ``period`` is ``["daytime", "nighttime"]`` or ``["all"]``.
+
+    Raises
+    ------
+    TypeError
+        If `model_or_ds` is of an unusable type.
+    ValueError
+        If `partition` is not one of the two accepted values; if `min_times`
+        is below one; if the footprints carry no usable ``time`` coordinate or
+        their dims are not ``(time, x, y)``; or if the day-night split cannot
+        be resolved.
+
+    See Also
+    --------
+    truncate_to_contour : The per-group truncation and renormalisation.
+    seasonal_overlap : Eq. 2, taken over this Dataset's ``month`` dimension.
+    daynight_overlap : Eq. 3, over its two ``period`` slices.
+    climatology_metrics : Fetch, area, and symmetry of one group.
+
+    Notes
+    -----
+    Months are calendar months of a specific year, not months of the year, so
+    a multi-year record yields a separate January per year rather than one
+    blended January. The paper's indices are site-*year* properties; select a
+    year before passing the ``month`` dimension to :func:`seasonal_overlap`.
+
+    Each group is summed over its contributing timesteps and divided by their
+    count, matching the climatology convention of the footprint models. The
+    divisor cancels in the renormalisation, so it affects only the recorded
+    ``contour_level``, which stays comparable across groups because of it.
+
+    A group with no data -- polar night, or a month the tower was down -- is
+    all-NaN rather than all-zero, so that it cannot be mistaken for a
+    footprint that legitimately puts no weight anywhere. Drop those before
+    the overlap indices, which require every month to sum to one:
+    ``ds.where(ds.n_times > 0, drop=True)``.
+
+    Examples
+    --------
+    >>> from fluxfootprints import build_climatology, monthly_climatologies
+    >>> model = build_climatology(df)                        # doctest: +SKIP
+    >>> clim = monthly_climatologies(                        # doctest: +SKIP
+    ...     model, latitude=40.1, longitude=-111.9, tz=-7
+    ... )
+    >>> clim.footprint_climatology.dims                      # doctest: +SKIP
+    ('month', 'period', 'x', 'y')
+    """
+    if partition not in _PARTITIONS:
+        raise ValueError(
+            f"partition must be one of {_PARTITIONS}, got {partition!r}."
+        )
+    if int(min_times) < 1:
+        raise ValueError(f"min_times must be at least 1, got {min_times!r}.")
+    min_times = int(min_times)
+
+    f_2d, source = _resolve_footprints(model_or_ds)
+    if "time" not in f_2d.coords:
+        raise ValueError(
+            "The time-resolved footprints carry no 'time' coordinate, so they "
+            "cannot be grouped into months."
+        )
+    times = pd.DatetimeIndex(f_2d["time"].values)
+    if times.hasnans:
+        raise ValueError(
+            "The 'time' coordinate holds NaT, so those footprints belong to no "
+            "month. Drop them first."
+        )
+
+    if partition == "month+daynight":
+        is_daytime = _daytime_mask(
+            times, daytime, source, latitude, longitude, tz, sw_in_pot
+        )
+        periods = [DAYTIME, NIGHTTIME]
+        selectors = [is_daytime, ~is_daytime]
+    else:
+        periods = [ALL_HOURS]
+        selectors = [np.ones(len(times), dtype=bool)]
+
+    month_of = times.values.astype("datetime64[M]")
+    months = np.unique(month_of)
+
+    shape = (len(months), len(periods), f_2d.sizes["x"], f_2d.sizes["y"])
+    weights = np.full(shape, np.nan)
+    n_times = np.zeros(shape[:2], dtype="int64")
+    levels = np.full(shape[:2], np.nan)
+    n_cells = np.zeros(shape[:2], dtype="int64")
+
+    per_timestep = f_2d.sum(dim=("x", "y"))
+    contributes = np.asarray(per_timestep.values, dtype=float) > 0.0
+
+    for m, month in enumerate(months):
+        in_month = month_of == month
+        for p, selector in enumerate(selectors):
+            chosen = np.flatnonzero(in_month & selector & contributes)
+            n_times[m, p] = chosen.size
+            if chosen.size < min_times:
+                continue
+
+            climatology = f_2d.isel(time=chosen).sum(dim="time") / chosen.size
+            truncated = truncate_to_contour(
+                climatology, dx, dy, fraction=fraction, renormalize=True
+            )
+            weights[m, p] = truncated.values
+            levels[m, p] = float(truncated.attrs["contour_level"])
+            n_cells[m, p] = int(truncated.attrs["contour_n_cells"])
+
+    coords: dict[str, Any] = {
+        _MONTH_DIM: months.astype("datetime64[ns]"),
+        _PERIOD_DIM: periods,
+    }
+    for axis in ("x", "y"):
+        if axis in f_2d.coords:
+            coords[axis] = f_2d.coords[axis]
+
+    dims = (_MONTH_DIM, _PERIOD_DIM, "x", "y")
+    group_dims = (_MONTH_DIM, _PERIOD_DIM)
+    ds = xr.Dataset(
+        {
+            "footprint_climatology": (
+                dims,
+                weights,
+                {
+                    "units": "1",
+                    "long_name": "renormalised footprint climatology",
+                    "contour_fraction": float(fraction),
+                },
+            ),
+            "n_times": (
+                group_dims,
+                n_times,
+                {"long_name": "contributing timesteps"},
+            ),
+            "contour_level": (
+                group_dims,
+                levels,
+                {"units": "m-2", "long_name": "source weight at the contour"},
+            ),
+            "contour_n_cells": (
+                group_dims,
+                n_cells,
+                {"long_name": "cells inside the contour"},
+            ),
+        },
+        coords=coords,
+    )
+    ds.attrs.update(
+        {
+            "partition": partition,
+            "contour_fraction": float(fraction),
+            "min_times": min_times,
+            "n_timesteps": len(times),
+            "description": (
+                "Monthly footprint climatologies truncated at the "
+                f"{fraction:.0%} source-weight contour and renormalised to "
+                "unit sum, after Chu et al. (2021), Sect. 2.2."
+            ),
+            "reference": (
+                "Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350."
+            ),
+        }
+    )
+    return ds
+
+
+# ------------------------------
 # Climatology metrics (Sect. 2.2)
 # ------------------------------
 
@@ -870,6 +1838,12 @@ def climatology_metrics(
     weight was retained is no longer recoverable from the array. Pass the raw
     climatology to get it.
 
+    ``contour_level`` is ``nan`` too where a truncated input has lost that
+    attribute, as a climatology sliced out of the stack from
+    :func:`monthly_climatologies` has: the level varies from group to group,
+    so it is a data variable of that Dataset rather than an attribute of the
+    stacked array. Read it from ``ds.contour_level`` alongside.
+
     Examples
     --------
     >>> from fluxfootprints import build_climatology, climatology_metrics
@@ -881,7 +1855,7 @@ def climatology_metrics(
 
     if "contour_fraction" in fclim.attrs:
         mask = _inside_cells(fclim)
-        level = float(fclim.attrs["contour_level"])
+        level = float(fclim.attrs.get("contour_level", float("nan")))
         fraction = float(fclim.attrs["contour_fraction"])
         enclosed = float("nan")
     else:
