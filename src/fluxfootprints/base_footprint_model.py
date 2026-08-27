@@ -13,6 +13,69 @@ import pandas as pd
 import xarray as xr
 
 
+def _source_weight_threshold(
+    values: np.ndarray | xr.DataArray,
+    cell_area: float,
+    fraction: float,
+) -> float:
+    """
+    Find the footprint density enclosing a fraction of the total source weight.
+
+    Shared kernel behind :meth:`~fluxfootprints.FFPModel.get_source_area_contour`
+    and :func:`~fluxfootprints.representativeness.contour_level_for_fraction`:
+    the grid is sorted in descending order and ``value * cell_area`` is
+    accumulated until `fraction` is reached, so the value returned is the
+    density of the last cell inside the contour.
+
+    Parameters
+    ----------
+    values : numpy.ndarray or xarray.DataArray
+        Footprint weights as densities [m-2]. Flattened, so any shape works.
+    cell_area : float
+        Area of one grid cell, ``dx * dy`` [m2].
+    fraction : float
+        Source-weight fraction to enclose, in (0, 1).
+
+    Returns
+    -------
+    float
+        Footprint density [m-2] at the contour. Cells at or above it enclose at
+        least `fraction` of the total source weight.
+
+    Raises
+    ------
+    ValueError
+        If `cell_area` is not positive and finite, `fraction` lies outside
+        (0, 1), or the grid carries no positive source weight.
+
+    Notes
+    -----
+    Non-finite and non-positive cells are dropped before sorting. NaNs would
+    otherwise sort ahead of every real weight once the order is reversed and
+    poison the cumulative sum, and the smallest *positive* density is the
+    meaningful saturation point for a grid that holds less than `fraction` of
+    the source weight -- as the package's climatologies, which integrate to the
+    mean captured fraction rather than to 1, routinely do.
+    """
+    if not np.isfinite(cell_area) or cell_area <= 0:
+        raise ValueError(f"cell_area must be positive and finite, got {cell_area!r}.")
+    if not np.isfinite(fraction) or not 0.0 < fraction < 1.0:
+        raise ValueError(f"fraction must lie in (0, 1), got {fraction!r}.")
+
+    flat = np.asarray(values, dtype=float).ravel()
+    positive = flat[np.isfinite(flat) & (flat > 0.0)]
+    if positive.size == 0:
+        raise ValueError(
+            "The footprint carries no positive source weight, so no contour "
+            "level is defined."
+        )
+
+    ordered = np.sort(positive)[::-1]
+    enclosed = np.cumsum(ordered) * cell_area
+    idx = min(int(np.searchsorted(enclosed, fraction)), ordered.size - 1)
+    return float(ordered[idx])
+
+
 class BaseFootprintModel(ABC):
     """
     Abstract base class for flux footprint models.

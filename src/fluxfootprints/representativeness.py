@@ -57,11 +57,12 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from .base_footprint_model import BaseFootprintModel
+from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
 from .openet_masking import GridGeometry
 
 __all__ = [
     "TARGET_RADII",
+    "ASYMMETRY_THRESHOLD",
     "Level",
     "ClimatologyMetrics",
     "CategoricalResult",
@@ -73,6 +74,7 @@ __all__ = [
     "footprint_fetch",
     "footprint_area",
     "symmetry_index",
+    "footprint_symmetry",
     "climatology_metrics",
     "seasonal_overlap_index",
     "daynight_overlap_index",
@@ -104,6 +106,10 @@ TARGET_RADII: tuple[int, ...] = (250, 500, 1000, 1500, 2000, 3000)
 #: Source-weight fraction at which footprint climatologies are truncated
 #: (Chu et al., 2021, Sect. 2.2).
 DEFAULT_CONTOUR_FRACTION: float = 0.8
+
+#: Symmetry index below which Chu et al. (2021) call a footprint
+#: climatology relatively asymmetric (Sect. 2.2) [-].
+ASYMMETRY_THRESHOLD: float = 0.30
 
 #: Significance level for the land-cover composition chi-square test.
 DEFAULT_ALPHA: float = 0.05
@@ -218,7 +224,9 @@ class ClimatologyMetrics:
         A80, the area enclosed by the truncation contour [m²].
     symmetry : float
         S80 = A80 / (pi * X80²), Eq. 1. Ranges 0-1; 1 is a perfectly circular
-        climatology centred on the tower.
+        climatology centred on the tower, and below
+        :data:`ASYMMETRY_THRESHOLD` (0.30) the paper calls the climatology
+        relatively asymmetric.
     enclosed_fraction : float
         Source weight actually enclosed by the contour, relative to the total
         mass on the domain. Falls below `fraction` when footprint mass leaves
@@ -356,6 +364,95 @@ class ContinuousResult:
 # ------------------------------
 
 
+def _grid_spacing(
+    da: xr.DataArray,
+    dx: float | None = None,
+    dy: float | None = None,
+) -> tuple[float, float]:
+    """
+    Resolve the grid spacing of a footprint array.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Array carrying ``x`` and ``y`` cell-centre coordinates [m].
+    dx, dy : float, optional
+        Spacing to use as given; only the missing one is inferred.
+
+    Returns
+    -------
+    tuple of float
+        ``(dx, dy)`` in metres, taken as the median coordinate step so that a
+        stray duplicate or trimmed edge cell cannot skew the result.
+
+    Raises
+    ------
+    ValueError
+        If a spacing must be inferred but the corresponding coordinate is
+        missing, shorter than two cells, or not positively spaced; or if a
+        supplied spacing is not positive and finite.
+    """
+    spacings: list[float] = []
+    for axis, given in (("x", dx), ("y", dy)):
+        if given is not None:
+            if not np.isfinite(given) or given <= 0:
+                raise ValueError(f"d{axis} must be positive and finite, got {given!r}.")
+            spacings.append(float(given))
+            continue
+
+        if axis not in da.coords:
+            raise ValueError(
+                f"Cannot infer d{axis}: the array carries no '{axis}' "
+                f"coordinate. Pass d{axis} explicitly."
+            )
+        values = np.asarray(da.coords[axis].values, dtype=float)
+        if values.size < 2:
+            raise ValueError(
+                f"Cannot infer d{axis} from a single '{axis}' cell. "
+                f"Pass d{axis} explicitly."
+            )
+        step = float(np.median(np.abs(np.diff(values))))
+        if not np.isfinite(step) or step <= 0:
+            raise ValueError(
+                f"Cannot infer d{axis}: the '{axis}' coordinate is not "
+                f"regularly spaced. Pass d{axis} explicitly."
+            )
+        spacings.append(step)
+
+    return spacings[0], spacings[1]
+
+
+def _inside_cells(w: xr.DataArray) -> xr.DataArray:
+    """
+    Reduce a contour mask or a truncated climatology to an inside-mask.
+
+    Parameters
+    ----------
+    w : xarray.DataArray
+        Either a boolean mask from :func:`footprint_contour_mask`, or a
+        climatology truncated by :func:`truncate_to_contour`, renormalised
+        or not.
+
+    Returns
+    -------
+    xarray.DataArray
+        Boolean array with the dims and coords of `w`.
+
+    Notes
+    -----
+    A truncated climatology zeroes every cell outside the contour and keeps
+    the retained ones at or above a strictly positive contour level, so
+    "finite and positive" recovers exactly the cells the truncation kept.
+    """
+    values = np.asarray(w.values)
+    if values.dtype == np.bool_:
+        inside = values
+    else:
+        floats = values.astype(float, copy=False)
+        inside = np.isfinite(floats) & (floats > 0.0)
+    return xr.DataArray(inside, coords=w.coords, dims=w.dims)
+
+
 def contour_level_for_fraction(
     fclim: xr.DataArray,
     dx: float | None = None,
@@ -395,7 +492,8 @@ def contour_level_for_fraction(
     rather than to 1, a `fraction` larger than the captured mass saturates at
     the smallest positive density on the grid rather than raising.
     """
-    raise NotImplementedError
+    cell_dx, cell_dy = _grid_spacing(fclim, dx, dy)
+    return _source_weight_threshold(fclim.values, cell_dx * cell_dy, fraction)
 
 
 def footprint_contour_mask(
@@ -426,8 +524,21 @@ def footprint_contour_mask(
     --------
     contour_level_for_fraction : The threshold this mask is built from.
     truncate_to_contour : Mask and renormalise in one step.
+
+    Notes
+    -----
+    Non-finite cells never enter the mask, so a climatology padded with NaN
+    outside its domain is handled like one padded with zeros.
     """
-    raise NotImplementedError
+    level = contour_level_for_fraction(fclim, dx, dy, fraction)
+    mask = (fclim >= level) & np.isfinite(fclim)
+    mask.attrs = {
+        "long_name": f"{fraction:g} source-weight contour mask",
+        "contour_fraction": float(fraction),
+        "contour_level": level,
+    }
+    mask.name = "contour_mask"
+    return mask
 
 
 def truncate_to_contour(
@@ -466,9 +577,42 @@ def truncate_to_contour(
     Notes
     -----
     The rescaling is a sum over cells, not an area integral, matching the
-    paper's ``sum(phi_ik) = 1`` convention.
+    paper's ``sum(phi_ik) = 1`` convention. The retained cells therefore sum to
+    1 regardless of `fraction`: the fraction selects the source area, it does
+    not survive as the mass of the result.
+
+    The mask is applied with ``where(..., 0.0)``, so cells outside the contour
+    -- including any non-finite ones -- come back as zeros rather than NaN, and
+    the weights stay safe to sum.
     """
-    raise NotImplementedError
+    mask = footprint_contour_mask(fclim, dx, dy, fraction)
+    level = float(mask.attrs["contour_level"])
+    n_cells = int(mask.sum())
+
+    truncated = fclim.where(mask, 0.0)
+
+    if renormalize:
+        total = float(truncated.sum())
+        if not np.isfinite(total) or total <= 0:
+            raise ValueError(
+                "The cells inside the contour carry no positive weight, so the "
+                "climatology cannot be renormalised."
+            )
+        truncated = truncated / total
+
+    truncated.attrs = dict(fclim.attrs)
+    truncated.attrs.update(
+        {
+            "contour_fraction": float(fraction),
+            "contour_level": level,
+            "contour_n_cells": n_cells,
+            "contour_renormalized": str(bool(renormalize)).lower(),
+        }
+    )
+    if renormalize:
+        truncated.attrs["units"] = "1"
+    truncated.name = fclim.name
+    return truncated
 
 
 def target_area_mask(
@@ -512,7 +656,10 @@ def target_area_mask(
 # ------------------------------
 
 
-def footprint_fetch(mask: xr.DataArray) -> float:
+def footprint_fetch(
+    mask: xr.DataArray,
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> float:
     """
     Compute the footprint fetch X80, Sect. 2.2.
 
@@ -520,15 +667,44 @@ def footprint_fetch(mask: xr.DataArray) -> float:
     ----------
     mask : xarray.DataArray
         Boolean contour mask with dims ``(x, y)``, as returned by
-        :func:`footprint_contour_mask`.
+        :func:`footprint_contour_mask`. A climatology truncated by
+        :func:`truncate_to_contour` is equally accepted, renormalised or not:
+        its positive cells are exactly the cells inside the contour.
+    origin : tuple of float, default (0.0, 0.0)
+        Tower position ``(x, y)`` in the coordinates of `mask` [m]. The
+        package's grids are tower-centred, so the default holds unless the
+        array carries coordinates that put the tower somewhere else.
 
     Returns
     -------
     float
-        Maximum distance from the tower at the origin to a cell inside the
-        contour [m]. ``nan`` if the mask is empty.
+        Maximum distance from the tower to a cell inside the contour [m].
+        ``nan`` if no cell is inside.
+
+    Raises
+    ------
+    ValueError
+        If `mask` carries no ``x`` or ``y`` coordinate to measure distance from.
+
+    Notes
+    -----
+    Distances are measured to cell *centres*, as in :func:`target_area_mask`,
+    so the fetch understates the true reach of the contour by up to half a cell
+    diagonal.
     """
-    raise NotImplementedError
+    for axis in ("x", "y"):
+        if axis not in mask.coords:
+            raise ValueError(
+                f"Cannot measure fetch: the mask carries no '{axis}' "
+                f"coordinate to measure distance from."
+            )
+
+    inside = _inside_cells(mask)
+    if not bool(inside.any()):
+        return float("nan")
+
+    distance = np.hypot(mask.coords["x"] - origin[0], mask.coords["y"] - origin[1])
+    return float(distance.where(inside).max())
 
 
 def footprint_area(
@@ -542,7 +718,9 @@ def footprint_area(
     Parameters
     ----------
     mask : xarray.DataArray
-        Boolean contour mask with dims ``(x, y)``.
+        Boolean contour mask with dims ``(x, y)``. A climatology truncated by
+        :func:`truncate_to_contour` is equally accepted; see
+        :func:`footprint_fetch`.
     dx, dy : float, optional
         Grid spacing [m]. Inferred from the mask coordinates when omitted.
 
@@ -550,8 +728,16 @@ def footprint_area(
     -------
     float
         Area enclosed by the contour [m²], as the cell count times ``dx * dy``.
+        ``0.0`` if no cell is inside.
+
+    Notes
+    -----
+    Counting whole cells makes the area a step function of the grid spacing:
+    a contour is resolved to within one cell of its true extent, so coarse
+    grids and small source areas do not mix.
     """
-    raise NotImplementedError
+    cell_dx, cell_dy = _grid_spacing(mask, dx, dy)
+    return float(_inside_cells(mask).sum()) * cell_dx * cell_dy
 
 
 def symmetry_index(area: float, fetch: float) -> float:
@@ -571,11 +757,61 @@ def symmetry_index(area: float, fetch: float) -> float:
     -------
     float
         Symmetry index in [0, 1]. One indicates a perfectly circular
-        climatology centred on the tower; the paper treats values below 0.30 as
-        markedly asymmetric, arising from uni- or bimodal prevailing winds.
-        ``nan`` if `fetch` is zero or non-finite.
+        climatology centred on the tower; the paper flags values below
+        :data:`ASYMMETRY_THRESHOLD` (0.30) as relatively asymmetric, arising
+        from uni- or bimodal prevailing winds. ``nan`` if `fetch` is zero or
+        non-finite, or if `area` is non-finite.
+
+    See Also
+    --------
+    footprint_symmetry : The same index straight from a truncated climatology.
+
+    Notes
+    -----
+    The disc of radius X80 the index compares against is the smallest one
+    centred on the tower that contains the contour, so the ratio is bounded
+    above by 1 in the continuum. On a grid it can creep past 1, because the
+    area counts whole cells while the fetch reaches only to cell centres; the
+    result is clipped to [0, 1] rather than reported above one.
     """
-    raise NotImplementedError
+    if not np.isfinite(area) or not np.isfinite(fetch) or fetch <= 0.0:
+        return float("nan")
+    return float(min(max(area / (np.pi * fetch**2), 0.0), 1.0))
+
+
+def footprint_symmetry(
+    w: xr.DataArray,
+    dx: float | None = None,
+    dy: float | None = None,
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> float:
+    """
+    Compute the footprint symmetry index S80 of a truncated climatology, Eq. 1.
+
+    Convenience wrapper that takes the fetch and area off one array and feeds
+    them to :func:`symmetry_index`.
+
+    Parameters
+    ----------
+    w : xarray.DataArray
+        Truncated climatology from :func:`truncate_to_contour`, or the boolean
+        mask from :func:`footprint_contour_mask`.
+    dx, dy : float, optional
+        Grid spacing [m]. Inferred from coordinates when omitted.
+    origin : tuple of float, default (0.0, 0.0)
+        Tower position ``(x, y)`` in the coordinates of `w` [m].
+
+    Returns
+    -------
+    float
+        Symmetry index in [0, 1]; values below :data:`ASYMMETRY_THRESHOLD`
+        (0.30) are the paper's relatively asymmetric climatologies. ``nan`` if
+        `w` holds no cell inside the contour.
+    """
+    return symmetry_index(
+        footprint_area(w, dx, dy),
+        footprint_fetch(w, origin=origin),
+    )
 
 
 def climatology_metrics(
@@ -592,11 +828,15 @@ def climatology_metrics(
     Parameters
     ----------
     fclim : xarray.DataArray
-        Footprint climatology with dims ``(x, y)`` [m⁻²].
+        Footprint climatology with dims ``(x, y)`` [m⁻²]. An array already
+        truncated by :func:`truncate_to_contour` is also accepted and is
+        summarised on the contour it was cut at, rather than being truncated a
+        second time; see Notes.
     dx, dy : float, optional
         Grid spacing [m]. Inferred from coordinates when omitted.
     fraction : float, default 0.8
-        Source-weight fraction defining the truncation contour.
+        Source-weight fraction defining the truncation contour. Ignored for an
+        already-truncated `fclim`, whose own fraction is used instead.
     seasonal_overlap, daynight_overlap : float, optional
         Precomputed overlap indices to carry into the result, from
         :func:`seasonal_overlap_index` and :func:`daynight_overlap_index`.
@@ -606,7 +846,18 @@ def climatology_metrics(
     Returns
     -------
     ClimatologyMetrics
-        Fetch, area, symmetry, contour level, and enclosed mass.
+        Fetch, area, symmetry, cell count, contour level, and enclosed mass.
+        Symmetry below :data:`ASYMMETRY_THRESHOLD` (0.30) is what the paper
+        calls a relatively asymmetric climatology.
+
+    Notes
+    -----
+    Truncated input is recognised by the ``contour_fraction`` attribute that
+    :func:`truncate_to_contour` writes, and its fraction and contour level are
+    read back from there. ``enclosed_fraction`` is then ``nan``: the mass
+    outside the contour has been zeroed, so what share of the domain's source
+    weight was retained is no longer recoverable from the array. Pass the raw
+    climatology to get it.
 
     Examples
     --------
@@ -615,7 +866,42 @@ def climatology_metrics(
     >>> climatology_metrics(model.fclim_2d).symmetry      # doctest: +SKIP
     0.52
     """
-    raise NotImplementedError
+    cell_dx, cell_dy = _grid_spacing(fclim, dx, dy)
+
+    if "contour_fraction" in fclim.attrs:
+        mask = _inside_cells(fclim)
+        level = float(fclim.attrs["contour_level"])
+        fraction = float(fclim.attrs["contour_fraction"])
+        enclosed = float("nan")
+    else:
+        mask = footprint_contour_mask(fclim, cell_dx, cell_dy, fraction)
+        level = float(mask.attrs["contour_level"])
+        finite = fclim.where(np.isfinite(fclim), 0.0)
+        total = float(finite.sum())
+        enclosed = (
+            float(finite.where(mask, 0.0).sum() / total)
+            if total > 0.0
+            else float("nan")
+        )
+
+    fetch = footprint_fetch(mask)
+    area = footprint_area(mask, cell_dx, cell_dy)
+
+    return ClimatologyMetrics(
+        fraction=float(fraction),
+        contour_level=level,
+        fetch=fetch,
+        area=area,
+        symmetry=symmetry_index(area, fetch),
+        enclosed_fraction=enclosed,
+        n_cells=int(mask.sum()),
+        seasonal_overlap=(
+            None if seasonal_overlap is None else float(seasonal_overlap)
+        ),
+        daynight_overlap=(
+            None if daynight_overlap is None else float(daynight_overlap)
+        ),
+    )
 
 
 def seasonal_overlap_index(climatologies: Sequence[xr.DataArray]) -> float:

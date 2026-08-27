@@ -78,6 +78,7 @@ from .wang_footprint import wang2006_fy, reconstruct_gaussian_2d
 
 from .representativeness import (
     TARGET_RADII,
+    ASYMMETRY_THRESHOLD,
     Level,
     ClimatologyMetrics,
     CategoricalResult,
@@ -89,6 +90,7 @@ from .representativeness import (
     footprint_fetch,
     footprint_area,
     symmetry_index,
+    footprint_symmetry,
     climatology_metrics,
     seasonal_overlap_index,
     daynight_overlap_index,
@@ -175,6 +177,7 @@ __all__ = [
     "reconstruct_gaussian_2d",
     # Representativeness (Chu et al., 2021)
     "TARGET_RADII",
+    "ASYMMETRY_THRESHOLD",
     "Level",
     "ClimatologyMetrics",
     "CategoricalResult",
@@ -186,6 +189,7 @@ __all__ = [
     "footprint_fetch",
     "footprint_area",
     "symmetry_index",
+    "footprint_symmetry",
     "climatology_metrics",
     "seasonal_overlap_index",
     "daynight_overlap_index",

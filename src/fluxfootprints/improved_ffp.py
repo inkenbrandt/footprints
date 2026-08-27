@@ -18,7 +18,7 @@ import pandas as pd
 import xarray as xr
 from scipy import signal
 
-from .base_footprint_model import BaseFootprintModel
+from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
 
 
 class FFPModel(BaseFootprintModel):
@@ -409,6 +409,13 @@ class FFPModel(BaseFootprintModel):
         ------
         RuntimeError
             If fclim_2d has not been computed yet (call ``run()`` first).
+        ValueError
+            If *r* lies outside (0, 1), raised by the shared threshold kernel.
+
+        See Also
+        --------
+        fluxfootprints.representativeness.truncate_to_contour : Mask and
+            renormalise a climatology at this contour, after Chu et al. (2021).
         """
         if self.fclim_2d is None or float(self.fclim_2d.max()) < 1e-10:
             raise RuntimeError(
@@ -416,18 +423,9 @@ class FFPModel(BaseFootprintModel):
                 "calc_xr_footprint() before get_source_area_contour()."
             )
 
-        # Flatten and sort grid values in descending order
-        vals = self.fclim_2d.values.flatten()
-        sorted_vals = np.sort(vals)[::-1]
-
-        # Cumulative sum weighted by cell area; should reach ~1 for a normalised grid
-        cumsum = np.cumsum(sorted_vals) * self.dx * self.dy
-
-        # Find the threshold value where the cumulative sum first reaches r
-        idx = np.searchsorted(cumsum, r)
-        if idx >= len(sorted_vals):
-            idx = len(sorted_vals) - 1
-        contour_level = float(sorted_vals[idx])
+        contour_level = _source_weight_threshold(
+            self.fclim_2d.values, self.dx * self.dy, r
+        )
 
         return xr.Dataset(
             {
