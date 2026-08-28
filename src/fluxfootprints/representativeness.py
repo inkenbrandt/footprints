@@ -60,13 +60,15 @@ import pandas as pd
 import xarray as xr
 
 from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
-from .openet_masking import GridGeometry
+from .openet_masking import GridGeometry, footprint_grid_geometry
 
 __all__ = [
     "TARGET_RADII",
     "ASYMMETRY_THRESHOLD",
+    "BIAS_THRESHOLD",
     "Level",
     "ClimatologyMetrics",
+    "WeightedValue",
     "CategoricalResult",
     "ContinuousResult",
     "contour_level_for_fraction",
@@ -86,11 +88,12 @@ __all__ = [
     "daynight_overlap",
     "seasonal_overlap_index",
     "daynight_overlap_index",
-    "footprint_weighted_mean",
+    "footprint_weighted_value",
     "footprint_weighted_composition",
-    "target_area_mean",
+    "target_area_value",
     "target_area_composition",
     "sensor_location_bias",
+    "sensor_location_bias_series",
     "model2_regression",
     "classify_categorical",
     "classify_continuous",
@@ -123,7 +126,8 @@ ASYMMETRY_THRESHOLD: float = 0.30
 DEFAULT_ALPHA: float = 0.05
 
 #: Sensor location bias threshold |Δ| considered representative, Sect. 2.4 [-].
-DEFAULT_BIAS_THRESHOLD: float = 0.10
+#: Chu et al. (2021) adopt the 10 % of Chen et al. (2011) and Kim et al. (2006).
+BIAS_THRESHOLD: float = 0.10
 
 #: Default name of the dimension the monthly climatologies of a site-year are
 #: stacked over, for the overlap indices of Eqs. 2-3.
@@ -298,6 +302,40 @@ class ClimatologyMetrics:
     n_cells: int
     seasonal_overlap: float | None = None
     daynight_overlap: float | None = None
+
+
+@dataclass(frozen=True)
+class WeightedValue:
+    """
+    A field value averaged over a footprint or a target area (Sect. 2.4).
+
+    Returned by :func:`footprint_weighted_value` and :func:`target_area_value`,
+    which differ only in the weights they average under: the footprint's own
+    source weights, or the uniform weights of a target-area disc.
+
+    Attributes
+    ----------
+    value : float
+        The averaged field value -- EVI_footprint of Eq. 5, or EVI_target.
+        ``nan`` when no cell carried both weight and data.
+    retained_weight : float
+        Fraction of the weight that fell on cells holding data, in [0, 1],
+        before the renormalisation that produced `value`. It is 1 for a raster
+        covering the whole source area, and below 1 where the raster is nodata
+        or does not reach -- the cue that `value` describes only part of the
+        intended area. Over a target area, where every cell of the disc weighs
+        the same, it is the fraction of the disc's cells that held data.
+    n_cells : int
+        Number of cells that contributed to `value`.
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4.
+    """
+
+    value: float
+    retained_weight: float
+    n_cells: int
 
 
 @dataclass(frozen=True)
@@ -609,7 +647,7 @@ def truncate_to_contour(
         Source-weight fraction to retain.
     renormalize : bool, default True
         If True, rescale the retained cells so they sum to 1, giving unitless
-        weights suitable for :func:`footprint_weighted_mean`. If False, retain
+        weights suitable for :func:`footprint_weighted_value`. If False, retain
         the original densities [m⁻²].
 
     Returns
@@ -684,7 +722,8 @@ def target_area_mask(
     Raises
     ------
     ValueError
-        If `radius` is not positive.
+        If `radius` is not positive and finite, or if `x` or `y` is not a
+        non-empty 1-D array of cell-centre offsets.
 
     Notes
     -----
@@ -692,7 +731,32 @@ def target_area_mask(
     model domain is silently clipped to the domain. Compare the mask's cell
     count against ``pi * radius**2 / (dx * dy)`` to detect that case.
     """
-    raise NotImplementedError
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError(f"radius must be positive and finite, got {radius!r}.")
+
+    offsets: list[np.ndarray] = []
+    for axis, values in (("x", x), ("y", y)):
+        coords = np.asarray(values, dtype=float)
+        if coords.ndim != 1 or coords.size == 0:
+            raise ValueError(
+                f"{axis} must be a non-empty 1-D array of cell-centre offsets "
+                f"from the tower, as the models produce it, got shape "
+                f"{coords.shape}. Reduce a meshgrid to its axis first."
+            )
+        offsets.append(coords)
+
+    x_values, y_values = offsets
+    inside = np.hypot(x_values[:, None], y_values[None, :]) <= float(radius)
+    return xr.DataArray(
+        inside,
+        coords={"x": x_values, "y": y_values},
+        dims=("x", "y"),
+        name="target_area",
+        attrs={
+            "radius": float(radius),
+            "long_name": f"target area within {float(radius):g} m of the tower",
+        },
+    )
 
 
 # ------------------------------
@@ -2426,114 +2490,406 @@ def daynight_overlap_index(
 # ------------------------------
 
 
-def footprint_weighted_mean(
-    weights: xr.DataArray,
-    field: xr.DataArray,
-) -> float:
+def _retained_weight(
+    weights: np.ndarray,
+    valid: np.ndarray,
+    name: str,
+) -> tuple[float, float]:
     """
-    Compute a footprint-weighted mean of a continuous field, Eq. 5.
+    Split a footprint's weight into the part that fell on cells holding data.
+
+    Parameters
+    ----------
+    weights : numpy.ndarray
+        Validated, non-negative source weights.
+    valid : numpy.ndarray
+        Boolean array of the same shape, True where the field holds data.
+    name : str
+        How to refer to the weights in the error message.
+
+    Returns
+    -------
+    kept : float
+        Weight lying on the valid cells, the denominator of the renormalised
+        weighted mean.
+    retained : float
+        `kept` as a fraction of the footprint's total weight, in [0, 1].
+
+    Raises
+    ------
+    ValueError
+        If the footprint carries no weight at all, leaving nothing to
+        renormalise and no fraction to report.
+    """
+    total = float(weights.sum())
+    if total <= 0.0:
+        raise ValueError(
+            f"{name} carries no source weight -- its cells sum to "
+            f"{total:.6g} -- so there is nothing to average under."
+        )
+    kept = float(weights[valid].sum())
+    return kept, kept / total
+
+
+def _class_codes(codes: np.ndarray) -> np.ndarray:
+    """
+    Return class codes as integers when every one of them is integral.
+
+    Parameters
+    ----------
+    codes : numpy.ndarray
+        Unique class codes, as floats after the raster alignment path.
+
+    Returns
+    -------
+    numpy.ndarray
+        `codes` as int64 if they are all whole numbers, unchanged otherwise.
+
+    Notes
+    -----
+    :func:`sample_raster_on_grid` returns float64 whatever the source dtype,
+    so an NLCD code arrives as ``41.0``; indexing a composition by ``41`` is
+    what a caller holding a class lookup table will try.
+    """
+    values = np.asarray(codes, dtype=float)
+    if np.all(values == np.rint(values)):
+        return values.astype(np.int64)
+    return values
+
+
+def _composition(
+    codes: np.ndarray,
+    weights: np.ndarray | None,
+    name: str,
+    retained_weight: float,
+) -> pd.Series:
+    """
+    Reduce the class codes of the contributing cells to a fraction per class.
+
+    Parameters
+    ----------
+    codes : numpy.ndarray
+        Class code of every contributing cell, flattened, already restricted
+        to the cells holding both a code and weight.
+    weights : numpy.ndarray or None
+        Weight of each cell in `codes`, or None for the uniform weights of an
+        unweighted composition.
+    name : str
+        Name of the returned series.
+    retained_weight : float
+        Fraction of the weight the cells in `codes` carry, recorded in attrs.
+
+    Returns
+    -------
+    pandas.Series
+        Fraction per class, indexed by class code in ascending order and
+        summing to 1; empty when `codes` is.
+    """
+    unique, inverse = np.unique(codes, return_inverse=True)
+    totals = np.bincount(
+        np.ravel(inverse), weights=weights, minlength=unique.size
+    ).astype(float)
+    total = float(totals.sum())
+    fractions = totals / total if total > 0.0 else totals
+    series = pd.Series(
+        fractions,
+        index=pd.Index(_class_codes(unique), name="class"),
+        name=name,
+        dtype=float,
+    )
+    series.attrs["retained_weight"] = float(retained_weight)
+    series.attrs["n_cells"] = int(codes.size)
+    return series
+
+
+def footprint_weighted_value(
+    weights: xr.DataArray | np.ndarray,
+    raster: xr.DataArray | np.ndarray,
+) -> WeightedValue:
+    """
+    Compute the footprint-weighted value of a continuous field, Eq. 5.
 
     .. math:: EVI_{footprint} = \\sum_{j=1}^{J} \\varphi_j EVI_j
 
     Parameters
     ----------
-    weights : xarray.DataArray
-        Truncated, renormalised footprint weights with dims ``(x, y)``, summing
-        to 1. See :func:`truncate_to_contour`.
-    field : xarray.DataArray
-        Continuous land-surface field on the same grid, e.g. Landsat EVI.
+    weights : xarray.DataArray or numpy.ndarray
+        Footprint source weights with dims ``(x, y)``, normally the truncated,
+        renormalised climatology from :func:`truncate_to_contour`. Weights that
+        sum to something other than 1 are accepted and renormalised; the
+        retained fraction is then reported relative to their own total.
+    raster : xarray.DataArray or numpy.ndarray
+        Continuous field on the same grid, e.g. Landsat EVI, NaN where it holds
+        no data. :func:`sample_raster_on_grid` delivers an external product in
+        exactly that form. DataArrays are compared cell for cell rather than
+        aligned on their coordinates, so a mismatched grid raises instead of
+        silently joining.
 
     Returns
     -------
-    float
-        Footprint-weighted mean of `field`. ``nan`` if no cell has both a
-        positive weight and a finite field value.
+    WeightedValue
+        The weighted value, the fraction of the footprint weight that fell on
+        cells holding data, and the number of contributing cells. ``value`` is
+        ``nan`` and ``retained_weight`` 0 when the raster covers no weighted
+        cell.
+
+    Raises
+    ------
+    ValueError
+        If the two arrays are not on the same grid; if `weights` is empty or
+        holds a non-finite or negative weight; or if it carries no weight at
+        all.
+
+    See Also
+    --------
+    target_area_value : The unweighted counterpart over a target disc.
+    sensor_location_bias : Compares the two, Eq. 6.
+    footprint_weighted_composition : The categorical counterpart.
 
     Notes
     -----
-    Cells where `field` is NaN are dropped and the remaining weights are
+    Cells where `raster` is NaN are dropped and the surviving weights
     renormalised, so partial raster coverage biases the result toward the
-    covered portion of the source area rather than returning NaN outright.
+    covered part of the source area rather than returning NaN outright.
+    ``retained_weight`` is what says how far that went: a value carrying 0.6
+    of the footprint weight is a different measurement from one carrying all
+    of it, and Chu et al. (2021) kept only scenes covering the source area.
+
+    Examples
+    --------
+    >>> evi = sample_raster_on_grid("evi.tif", model.x, model.y, lat, lon)  # doctest: +SKIP
+    >>> result = footprint_weighted_value(truncate_to_contour(fclim), evi)  # doctest: +SKIP
+    >>> result.value, result.retained_weight                                # doctest: +SKIP
+    (0.42, 1.0)
     """
-    raise NotImplementedError
+    _check_same_grid(weights, raster, "weights", "raster")
+    phi = _weight_values(weights, "weights")
+    values = np.asarray(raster, dtype=float)
+
+    valid = np.isfinite(values)
+    kept, retained = _retained_weight(phi, valid, "weights")
+    contributing = valid & (phi > 0.0)
+    if kept <= 0.0:
+        return WeightedValue(float("nan"), 0.0, 0)
+
+    value = float((phi[contributing] * values[contributing]).sum() / kept)
+    return WeightedValue(value, retained, int(np.count_nonzero(contributing)))
 
 
 def footprint_weighted_composition(
-    weights: xr.DataArray,
-    classes: xr.DataArray,
-) -> dict[Any, float]:
+    weights: xr.DataArray | np.ndarray,
+    landcover: xr.DataArray | np.ndarray,
+) -> pd.Series:
     """
     Compute the footprint-weighted composition of a categorical field.
 
+    The categorical counterpart of :func:`footprint_weighted_value`: every
+    class takes the share of the footprint weight that falls on it, which is
+    P_footprint of Sect. 2.4 once multiplied by 100.
+
     Parameters
     ----------
-    weights : xarray.DataArray
-        Truncated, renormalised footprint weights with dims ``(x, y)``.
-    classes : xarray.DataArray
-        Categorical land-cover raster on the same grid, typically integer codes
-        such as the consolidated NLCD / Land Cover of Canada groups of Table S6.
+    weights : xarray.DataArray or numpy.ndarray
+        Footprint source weights with dims ``(x, y)``, as for
+        :func:`footprint_weighted_value`.
+    landcover : xarray.DataArray or numpy.ndarray
+        Categorical raster on the same grid, typically the integer codes of
+        the consolidated NLCD / Land Cover of Canada groups of Table S6, NaN
+        where it holds no data.
 
     Returns
     -------
-    dict
-        Class code -> footprint-weighted percentage [%], summing to 100 over
-        the classes present. NaN cells in `classes` are excluded and the
-        remaining weights renormalised.
+    pandas.Series
+        Weight fraction per class, indexed by class code in ascending order
+        (index name ``class``) and summing to 1. Empty when no cell carries
+        both weight and a class code. ``Series.attrs`` holds
+        ``retained_weight`` and ``n_cells``, as on :class:`WeightedValue`.
+
+    Raises
+    ------
+    ValueError
+        As for :func:`footprint_weighted_value`.
 
     See Also
     --------
     target_area_composition : The unweighted counterpart over a target disc.
+
+    Notes
+    -----
+    Integral class codes come back as integers whatever the raster's dtype,
+    since the alignment path returns float64. The fractions are shares of the
+    retained weight, so this composition and a target-area one over the same
+    product are directly comparable class by class -- the comparison
+    :func:`classify_categorical` rests on.
+
+    Examples
+    --------
+    >>> nlcd = sample_raster_on_grid(                       # doctest: +SKIP
+    ...     "nlcd.tif", model.x, model.y, lat, lon, categorical=True
+    ... )
+    >>> footprint_weighted_composition(weights, nlcd)       # doctest: +SKIP
+    class
+    41    0.62
+    81    0.38
+    Name: footprint_fraction, dtype: float64
     """
-    raise NotImplementedError
+    _check_same_grid(weights, landcover, "weights", "landcover")
+    phi = _weight_values(weights, "weights")
+    codes = np.asarray(landcover, dtype=float)
+
+    valid = np.isfinite(codes)
+    _, retained = _retained_weight(phi, valid, "weights")
+    contributing = valid & (phi > 0.0)
+    return _composition(
+        codes[contributing],
+        phi[contributing],
+        "footprint_fraction",
+        retained,
+    )
 
 
-def target_area_mean(
-    field: xr.DataArray,
+def target_area_value(
+    raster: xr.DataArray | np.ndarray,
+    x: np.ndarray | xr.DataArray,
+    y: np.ndarray | xr.DataArray,
     radius: float,
-) -> float:
+) -> WeightedValue:
     """
     Compute the unweighted mean of a continuous field over a target area.
 
+    EVI_target of Sect. 2.4: the field averaged over the disc of radius
+    `radius` around the tower, every cell counting the same, against which the
+    footprint-weighted value of Eq. 5 is compared.
+
     Parameters
     ----------
-    field : xarray.DataArray
-        Continuous land-surface field with dims ``(x, y)`` on the tower-centred
-        grid.
+    raster : xarray.DataArray or numpy.ndarray
+        Continuous field with dims ``(x, y)`` on the tower-centred grid, NaN
+        where it holds no data, as :func:`sample_raster_on_grid` returns it.
+    x, y : numpy.ndarray or xarray.DataArray
+        Cell-centre offsets from the tower [m] (``model.x``, ``model.y``),
+        which is the grid `raster` must be on.
     radius : float
-        Target-area radius [m].
+        Target-area radius [m], e.g. one of :data:`TARGET_RADII`.
 
     Returns
     -------
-    float
-        Arithmetic mean of `field` over cells within `radius` of the tower
-        (EVI_target in the paper), ignoring NaN. ``nan`` if no finite cell falls
-        inside the disc.
+    WeightedValue
+        The arithmetic mean over the disc, the fraction of its cells that held
+        data, and the number of those cells. ``value`` is ``nan`` and
+        ``retained_weight`` 0 when no cell inside the disc holds data.
+
+    Raises
+    ------
+    ValueError
+        If `radius` is not positive and finite; if `raster` is not on the grid
+        `x` and `y` describe; or if the disc is smaller than one grid cell, so
+        that no cell centre falls inside it.
+
+    See Also
+    --------
+    footprint_weighted_value : The footprint-weighted counterpart, Eq. 5.
+    target_area_mask : The disc this averages over.
+
+    Notes
+    -----
+    A disc reaching past the edge of the domain is silently clipped to it, as
+    :func:`target_area_mask` documents, and a raster not covering the whole
+    disc lowers ``retained_weight`` rather than the value going NaN. The two
+    together are what make a target-area value at 3000 m trustworthy or not,
+    and the paper's larger radii are exactly where domains and scenes run out.
     """
-    raise NotImplementedError
+    mask = target_area_mask(x, y, radius)
+    _check_same_grid(mask, raster, "the target area", "raster")
+
+    inside = np.asarray(mask.values)
+    n_inside = int(np.count_nonzero(inside))
+    if n_inside == 0:
+        raise ValueError(
+            f"No cell centre lies within {float(radius):g} m of the tower, so "
+            f"the target area holds no cells. Use a radius of at least half "
+            f"the grid spacing, or a finer grid."
+        )
+
+    values = np.asarray(raster, dtype=float)
+    contributing = inside & np.isfinite(values)
+    n_cells = int(np.count_nonzero(contributing))
+    if n_cells == 0:
+        return WeightedValue(float("nan"), 0.0, 0)
+
+    return WeightedValue(
+        float(values[contributing].mean()),
+        n_cells / n_inside,
+        n_cells,
+    )
 
 
 def target_area_composition(
-    classes: xr.DataArray,
+    landcover: xr.DataArray | np.ndarray,
+    x: np.ndarray | xr.DataArray,
+    y: np.ndarray | xr.DataArray,
     radius: float,
-) -> dict[Any, float]:
+) -> pd.Series:
     """
     Compute the composition of a categorical field over a target area.
 
+    The categorical counterpart of :func:`target_area_value`: every class takes
+    the share of the disc's cells it covers, which is P_target of Sect. 2.4
+    once multiplied by 100.
+
     Parameters
     ----------
-    classes : xarray.DataArray
-        Categorical land-cover raster with dims ``(x, y)`` on the tower-centred
-        grid.
+    landcover : xarray.DataArray or numpy.ndarray
+        Categorical raster with dims ``(x, y)`` on the tower-centred grid, NaN
+        where it holds no data.
+    x, y : numpy.ndarray or xarray.DataArray
+        Cell-centre offsets from the tower [m] (``model.x``, ``model.y``).
     radius : float
         Target-area radius [m].
 
     Returns
     -------
-    dict
-        Class code -> percentage [%] of the target-area cells, summing to 100.
-        NaN cells are excluded from both numerator and denominator.
+    pandas.Series
+        Area fraction per class, indexed by class code in ascending order
+        (index name ``class``) and summing to 1. Empty when no cell inside the
+        disc holds a class code. ``Series.attrs`` holds ``retained_weight``,
+        the fraction of the disc's cells that held one, and ``n_cells``.
+
+    Raises
+    ------
+    ValueError
+        As for :func:`target_area_value`.
+
+    See Also
+    --------
+    footprint_weighted_composition : The footprint-weighted counterpart.
+
+    Notes
+    -----
+    Cells without a class code are dropped from numerator and denominator
+    alike, so the fractions describe the classified part of the disc; how much
+    of it that was is ``attrs["retained_weight"]``.
     """
-    raise NotImplementedError
+    mask = target_area_mask(x, y, radius)
+    _check_same_grid(mask, landcover, "the target area", "landcover")
+
+    inside = np.asarray(mask.values)
+    n_inside = int(np.count_nonzero(inside))
+    if n_inside == 0:
+        raise ValueError(
+            f"No cell centre lies within {float(radius):g} m of the tower, so "
+            f"the target area holds no cells. Use a radius of at least half "
+            f"the grid spacing, or a finer grid."
+        )
+
+    codes = np.asarray(landcover, dtype=float)
+    contributing = inside & np.isfinite(codes)
+    return _composition(
+        codes[contributing],
+        None,
+        "target_fraction",
+        int(np.count_nonzero(contributing)) / n_inside,
+    )
 
 
 # ------------------------------
@@ -2541,40 +2897,358 @@ def target_area_composition(
 # ------------------------------
 
 
-def sensor_location_bias(
-    footprint_value: float | np.ndarray,
-    target_value: float | np.ndarray,
-) -> float | np.ndarray:
+def _relative_bias(footprint_value: float, target_value: float) -> float:
     """
-    Compute the sensor location bias Delta, Eq. 6.
+    Evaluate the sensor location bias of Eq. 6 for one pair of values.
+
+    .. math:: \\Delta = \\frac{EVI_{footprint} - EVI_{target}}{EVI_{target}}
+
+    Parameters
+    ----------
+    footprint_value : float
+        Footprint-weighted value, EVI_footprint of Eq. 5.
+    target_value : float
+        Target-area mean, EVI_target.
+
+    Returns
+    -------
+    float
+        The relative bias as a fraction, or ``nan`` when either value is
+        non-finite or the target-area mean is zero, which leaves the ratio
+        undefined rather than infinite.
+    """
+    footprint = float(footprint_value)
+    target = float(target_value)
+    if not np.isfinite(footprint) or not np.isfinite(target) or target == 0.0:
+        return float("nan")
+    return (footprint - target) / target
+
+
+def _within_threshold(delta: np.ndarray) -> pd.arrays.BooleanArray:
+    """
+    Flag the biases meeting the paper's threshold, keeping the gaps missing.
+
+    Parameters
+    ----------
+    delta : numpy.ndarray
+        Sensor location biases as fractions, possibly holding ``nan``.
+
+    Returns
+    -------
+    pandas.arrays.BooleanArray
+        True where ``|delta| <=`` :data:`BIAS_THRESHOLD`, and ``pd.NA`` where
+        `delta` is not finite.
+
+    Notes
+    -----
+    The missing entries are what keep a period whose bias could not be
+    computed -- a scene not covering the target area -- from counting as a
+    failure when the flags are averaged into the percentages of Fig. 7.
+    """
+    values = np.asarray(delta, dtype=float)
+    within = pd.array(np.abs(values) <= BIAS_THRESHOLD, dtype="boolean")
+    within[~np.isfinite(values)] = pd.NA
+    return within
+
+
+def sensor_location_bias(
+    w: xr.DataArray | np.ndarray,
+    raster: xr.DataArray | np.ndarray,
+    x: np.ndarray | xr.DataArray,
+    y: np.ndarray | xr.DataArray,
+    radii: Sequence[float] = TARGET_RADII,
+) -> pd.DataFrame:
+    """
+    Compute the sensor location bias Delta against each target area, Eq. 6.
 
     .. math:: \\Delta = \\frac{EVI_{footprint} - EVI_{target}}{EVI_{target}}
 
     After Schmid and Lloyd (1999); the time-explicit footprint-to-target-area
-    bias for one period.
+    bias for one period, evaluated against the series of target radii of
+    Sect. 2.1. The footprint-weighted value of Eq. 5 does not depend on the
+    radius, so it is computed once and repeated down the frame; only the
+    target-area mean moves.
 
     Parameters
     ----------
-    footprint_value : float or numpy.ndarray
-        Footprint-weighted value(s) from :func:`footprint_weighted_mean`.
-    target_value : float or numpy.ndarray
-        Target-area mean value(s) from :func:`target_area_mean`.
+    w : xarray.DataArray or numpy.ndarray
+        Footprint source weights with dims ``(x, y)``, normally one period's
+        truncated, renormalised climatology from :func:`truncate_to_contour`
+        or a slice of :func:`monthly_climatologies`. Weights summing to
+        something other than 1 are renormalised, as in
+        :func:`footprint_weighted_value`.
+    raster : xarray.DataArray or numpy.ndarray
+        Continuous field on the same grid, e.g. the Landsat EVI scene matched
+        to this period, NaN where it holds no data.
+    x, y : numpy.ndarray or xarray.DataArray
+        Cell-centre offsets from the tower [m] (``model.x``, ``model.y``),
+        which is the grid both `w` and `raster` must be on.
+    radii : sequence of float, default TARGET_RADII
+        Target-area radii [m], evaluated and reported in the order given.
 
     Returns
     -------
-    float or numpy.ndarray
-        Relative bias as a fraction, not a percentage; multiply by 100 to match
-        the paper's figures. Positive values mean the footprint covered higher
-        values than its surroundings, which held at every target radius in the
-        paper. ``nan`` where `target_value` is zero or non-finite.
+    pandas.DataFrame
+        One row per radius, with columns
+
+        ``radius``
+            Target-area radius [m].
+        ``value_footprint``
+            Footprint-weighted value, Eq. 5. Constant down the frame.
+        ``value_target``
+            Target-area mean over the disc of that radius.
+        ``delta``
+            Sensor location bias as a fraction, not a percentage; multiply by
+            100 to match the paper's figures. Positive values mean the
+            footprint covered higher values than its surroundings, which held
+            at every target radius in the paper. ``nan`` where either value is
+            non-finite or the target-area mean is zero.
+        ``within_threshold``
+            Whether ``|delta| <=`` :data:`BIAS_THRESHOLD`, in pandas' nullable
+            boolean dtype, and ``pd.NA`` where `delta` is undefined.
+
+        ``DataFrame.attrs["bias_threshold"]`` records the threshold applied.
+
+    Raises
+    ------
+    ValueError
+        If `radii` is empty; if any radius is not positive and finite, or is
+        smaller than half the grid spacing so that its disc holds no cell
+        centre; if `w`, `raster`, and the grid `x` and `y` describe are not one
+        and the same; or if `w` holds a non-finite or negative weight, or no
+        weight at all.
+
+    See Also
+    --------
+    sensor_location_bias_series : Maps this over a time-indexed collection.
+    footprint_weighted_value : EVI_footprint, Eq. 5.
+    target_area_value : EVI_target.
+    model2_regression : The site-level counterpart, Eq. 7.
+
+    Notes
+    -----
+    A raster covering only part of the footprint or the disc lowers the
+    retained weight of the underlying averages rather than making them NaN, so
+    a `delta` here can rest on partial coverage. Call
+    :func:`footprint_weighted_value` and :func:`target_area_value` directly
+    when that fraction matters; Chu et al. (2021) kept only scenes that were
+    cloud-free within 3000 m of the tower.
+
+    Examples
+    --------
+    >>> evi = sample_raster_on_grid("evi.tif", model.x, model.y, lat, lon)  # doctest: +SKIP
+    >>> bias = sensor_location_bias(                                       # doctest: +SKIP
+    ...     truncate_to_contour(model.fclim_2d), evi, model.x, model.y
+    ... )
+    >>> bias[["radius", "delta", "within_threshold"]]                      # doctest: +SKIP
+       radius     delta  within_threshold
+    0   250.0  0.021...              True
+    1   500.0  0.064...              True
+    ...
 
     References
     ----------
     Schmid, H. P., and Lloyd, C. R. (1999). Spatial representativeness and the
     location bias of flux footprints over inhomogeneous areas. *Agric. For.
     Meteorol.*, **93**, 195-209.
+
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4.
     """
-    raise NotImplementedError
+    radii_values = [float(radius) for radius in radii]
+    if not radii_values:
+        raise ValueError(
+            "radii holds no target areas, so there is nothing to compare the "
+            "footprint against. Pass at least one radius, e.g. TARGET_RADII."
+        )
+
+    footprint = footprint_weighted_value(w, raster)
+    rows = [
+        {
+            "radius": radius,
+            "value_footprint": footprint.value,
+            "value_target": target.value,
+            "delta": _relative_bias(footprint.value, target.value),
+        }
+        for radius, target in (
+            (radius, target_area_value(raster, x, y, radius))
+            for radius in radii_values
+        )
+    ]
+
+    frame = pd.DataFrame(
+        rows, columns=["radius", "value_footprint", "value_target", "delta"]
+    ).astype(float)
+    frame["within_threshold"] = _within_threshold(frame["delta"].to_numpy())
+    frame.attrs["bias_threshold"] = BIAS_THRESHOLD
+    return frame
+
+
+def _bias_series_items(
+    pairs: Mapping[Any, Any] | pd.Series | Sequence[Any],
+) -> list[tuple[Any, Any, Any]]:
+    """
+    Normalise the accepted period collections into ``(time, w, raster)`` rows.
+
+    Parameters
+    ----------
+    pairs : mapping, pandas.Series, or sequence
+        The collection :func:`sensor_location_bias_series` was handed.
+
+    Returns
+    -------
+    list of tuple
+        One ``(time, climatology, raster)`` triple per period, in the order
+        the collection presented them.
+
+    Raises
+    ------
+    TypeError
+        If `pairs` is not iterable, or an entry is not the pair or triple the
+        form it was passed in calls for.
+    """
+    if isinstance(pairs, (Mapping, pd.Series)):
+        labelled = list(pairs.items())
+    else:
+        try:
+            labelled = [(None, entry) for entry in pairs]
+        except TypeError as exc:
+            raise TypeError(
+                f"pairs must be a mapping of time -> (climatology, raster), a "
+                f"pandas Series of such pairs, or an iterable of "
+                f"(time, climatology, raster) triples, got "
+                f"{type(pairs).__name__}."
+            ) from exc
+
+    items: list[tuple[Any, Any, Any]] = []
+    for label, entry in labelled:
+        parts = entry if isinstance(entry, (tuple, list)) else None
+        if label is None:
+            if parts is not None and len(parts) == 3:
+                items.append((parts[0], parts[1], parts[2]))
+                continue
+            hint = (
+                " A bare (climatology, raster) pair carries no time label; "
+                "pass a mapping keyed by time, or add the time as the first "
+                "element."
+                if parts is not None and len(parts) == 2
+                else ""
+            )
+            raise TypeError(
+                f"Every entry of an iterable of periods must be a "
+                f"(time, climatology, raster) triple, got "
+                f"{type(entry).__name__}.{hint}"
+            )
+        if parts is None or len(parts) != 2:
+            raise TypeError(
+                f"Every value of a mapping of periods must be a "
+                f"(climatology, raster) pair, got {type(entry).__name__} at "
+                f"time {label!r}."
+            )
+        items.append((label, parts[0], parts[1]))
+    return items
+
+
+def sensor_location_bias_series(
+    pairs: Mapping[Any, Any] | pd.Series | Sequence[Any],
+    x: np.ndarray | xr.DataArray,
+    y: np.ndarray | xr.DataArray,
+    radii: Sequence[float] = TARGET_RADII,
+) -> pd.DataFrame:
+    """
+    Compute the sensor location bias of every period of a record, Eq. 6.
+
+    :func:`sensor_location_bias` mapped over a time-indexed collection of
+    matched climatology / field pairs and concatenated: the site-months of
+    Chu et al. (2021), each a monthly footprint climatology paired with the
+    Landsat scene retrieved within it. Grouping the result by ``radius`` and
+    averaging ``within_threshold`` reproduces the percentages within the
+    +/-10 % threshold of Sect. 3.3 and Fig. 7.
+
+    Parameters
+    ----------
+    pairs : mapping, pandas.Series, or sequence
+        The periods, in any of three forms:
+
+        * a mapping of time label -> ``(climatology, raster)``;
+        * a :class:`pandas.Series` indexed by time holding such pairs;
+        * an iterable of ``(time, climatology, raster)`` triples.
+
+        Each climatology and raster is what :func:`sensor_location_bias` takes
+        as `w` and `raster`: a truncated, renormalised climatology and the
+        field matched to that period, both on the grid `x` and `y` describe.
+        Periods are evaluated in the order presented, not sorted.
+    x, y : numpy.ndarray or xarray.DataArray
+        Cell-centre offsets from the tower [m], shared by every period.
+    radii : sequence of float, default TARGET_RADII
+        Target-area radii [m].
+
+    Returns
+    -------
+    pandas.DataFrame
+        The frames of :func:`sensor_location_bias` stacked under a leading
+        ``time`` column, over a fresh :class:`~pandas.RangeIndex`: columns
+        ``time``, ``radius``, ``value_footprint``, ``value_target``, ``delta``,
+        and ``within_threshold``, one row per period and radius.
+        ``DataFrame.attrs["bias_threshold"]`` records the threshold applied.
+
+    Raises
+    ------
+    TypeError
+        If `pairs` is not one of the three accepted forms.
+    ValueError
+        If `pairs` holds no periods, or for any of the reasons
+        :func:`sensor_location_bias` raises, with the offending time label
+        prepended to the message.
+
+    See Also
+    --------
+    sensor_location_bias : The single-period computation this maps.
+    monthly_climatologies : Produces the per-period climatologies.
+    evaluate_vegetation_index : Regresses the same pairs, Eq. 7.
+
+    Notes
+    -----
+    The paper matched a scene to the climatology of the month it was retrieved
+    in, and its Fig. 7 pools 3307 such site-months across 214 sites. Pairing is
+    the caller's job here: this function evaluates the pairs it is given, in
+    the order it is given them.
+
+    Examples
+    --------
+    >>> pairs = {                                        # doctest: +SKIP
+    ...     month: (clim.sel(month=month, period="daytime"), scenes[month])
+    ...     for month in scenes
+    ... }
+    >>> bias = sensor_location_bias_series(pairs, model.x, model.y)  # doctest: +SKIP
+    >>> bias.groupby("radius")["within_threshold"].mean()            # doctest: +SKIP
+    radius
+    250.0     0.73
+    3000.0    0.42
+    Name: within_threshold, dtype: Float64
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 3.3.
+    """
+    items = _bias_series_items(pairs)
+    if not items:
+        raise ValueError(
+            "pairs holds no periods, so there is no series to compute. Pass "
+            "at least one (climatology, raster) pair."
+        )
+
+    frames: list[pd.DataFrame] = []
+    for label, weights, raster in items:
+        try:
+            frame = sensor_location_bias(weights, raster, x, y, radii=radii)
+        except ValueError as exc:
+            raise ValueError(f"At time {label!r}: {exc}") from exc
+        frame.insert(0, "time", label)
+        frames.append(frame)
+
+    series = pd.concat(frames, ignore_index=True)
+    series.attrs["bias_threshold"] = BIAS_THRESHOLD
+    return series
 
 
 def model2_regression(
@@ -2773,7 +3447,7 @@ def evaluate_vegetation_index(
     dy: float | None = None,
     fraction: float = DEFAULT_CONTOUR_FRACTION,
     alpha: float = DEFAULT_ALPHA,
-    bias_threshold: float = DEFAULT_BIAS_THRESHOLD,
+    bias_threshold: float = BIAS_THRESHOLD,
 ) -> list[ContinuousResult]:
     """
     Evaluate continuous-field representativeness across a series of target areas.
@@ -2831,7 +3505,7 @@ def evaluate_representativeness(
     radii: Sequence[float] = TARGET_RADII,
     fraction: float = DEFAULT_CONTOUR_FRACTION,
     alpha: float = DEFAULT_ALPHA,
-    bias_threshold: float = DEFAULT_BIAS_THRESHOLD,
+    bias_threshold: float = BIAS_THRESHOLD,
 ) -> tuple[list[CategoricalResult], list[ContinuousResult]]:
     """
     Run the full representativeness analysis for a fitted footprint model.
@@ -3326,8 +4000,47 @@ def sample_raster_on_grid(
     --------
     fluxfootprints.footprint_grid_geometry : Builds the target :class:`GridGeometry`.
     fluxfootprints.openet_mask_on_grid : The same reprojection for data-availability masks.
+    _align_raster : The reprojection this wraps.
+
+    Notes
+    -----
+    The warp itself happens on the georeferenced grid, whose coordinates are
+    projected metres; the result is handed back on the tower-centred ``(x, y)``
+    grid the rest of this module works in, so that it lines up cell for cell
+    with a climatology and with :func:`target_area_mask`.
+
+    Examples
+    --------
+    >>> evi = sample_raster_on_grid(              # doctest: +SKIP
+    ...     "evi.tif", model.x, model.y, 40.0, -111.9
+    ... )
+    >>> footprint_weighted_value(weights, evi).value   # doctest: +SKIP
+    0.42
     """
-    raise NotImplementedError
+    _require("rioxarray")  # registers the .rio accessor used below
+
+    x_values = np.asarray(x, dtype=float)
+    y_values = np.asarray(y, dtype=float)
+    geometry = footprint_grid_geometry(
+        x_values, y_values, station_lat, station_lon, crs=crs
+    )
+    grid = xr.DataArray(
+        np.zeros((y_values.size, x_values.size)),
+        dims=("y", "x"),
+        coords={
+            "y": geometry.y_origin + y_values,
+            "x": geometry.x_origin + x_values,
+        },
+        name="footprint",
+    ).rio.write_crs(geometry.crs)
+
+    aligned, _ = _align_raster(raster_path, grid, categorical=categorical, band=band)
+    return xr.DataArray(
+        aligned.transpose("x", "y").values,
+        coords={"x": x_values, "y": y_values},
+        dims=("x", "y"),
+        name=aligned.name,
+    )
 
 
 def predict_sigmav(
