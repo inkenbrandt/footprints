@@ -3070,8 +3070,7 @@ def sensor_location_bias(
             "delta": _relative_bias(footprint.value, target.value),
         }
         for radius, target in (
-            (radius, target_area_value(raster, x, y, radius))
-            for radius in radii_values
+            (radius, target_area_value(raster, x, y, radius)) for radius in radii_values
         )
     ]
 
