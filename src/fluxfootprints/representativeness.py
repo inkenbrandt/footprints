@@ -2921,6 +2921,358 @@ def representativeness_summary(
 # ------------------------------
 
 
+def _spatial_dims(da: xr.DataArray, name: str) -> tuple[str, str]:
+    """
+    Resolve the y and x dimension names rioxarray recognises on an array.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Array expected to carry georeferenced spatial dims.
+    name : str
+        How to refer to `da` in the error message, phrased to sit mid-sentence,
+        e.g. ``"the footprint grid"``.
+
+    Returns
+    -------
+    tuple of str
+        ``(y_dim, x_dim)``.
+
+    Raises
+    ------
+    ValueError
+        If rioxarray cannot identify the spatial dims, with the array's own
+        dims in the message.
+    """
+    rioxarray = _require("rioxarray")
+    try:
+        return str(da.rio.y_dim), str(da.rio.x_dim)
+    except rioxarray.exceptions.MissingSpatialDimensionError as exc:
+        raise ValueError(
+            f"Cannot find the spatial dimensions of {name}: its dims are "
+            f"{tuple(da.dims)}. Name them 'x' and 'y' (or 'longitude' and "
+            f"'latitude'), or call .rio.set_spatial_dims() first."
+        ) from exc
+
+
+def _raster_crs(da: xr.DataArray, name: str, hint: str) -> Any:
+    """
+    Read an array's CRS, or raise saying how to attach one.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Array to read ``.rio.crs`` from.
+    name : str
+        How to refer to `da` in the error message, phrased to sit mid-sentence,
+        e.g. ``"the footprint grid"``.
+    hint : str
+        Sentence appended to the error, pointing at where the CRS should have
+        come from.
+
+    Returns
+    -------
+    rasterio.crs.CRS
+        The array's CRS.
+
+    Raises
+    ------
+    ValueError
+        If the array carries no CRS, so it cannot be reprojected.
+    """
+    _spatial_dims(da, name)
+    crs = da.rio.crs
+    if crs is None:
+        raise ValueError(f"Cannot reproject {name}: it carries no CRS. {hint}")
+    return crs
+
+
+def _check_metric_crs(crs: Any, name: str) -> None:
+    """
+    Require a CRS whose axes are metres, as the footprint grid assumes.
+
+    Parameters
+    ----------
+    crs : rasterio.crs.CRS
+        CRS to check.
+    name : str
+        How to refer to the array carrying `crs` in the error messages, phrased
+        to sit mid-sentence, e.g. ``"the footprint grid"``.
+
+    Raises
+    ------
+    ValueError
+        If the CRS is geographic, or is otherwise not a projected CRS.
+
+    Notes
+    -----
+    Every length in this module -- fetch, area, target-area radii, cell area --
+    is metres. On a geographic grid a cell is degrees wide, so those quantities
+    would come out in degrees and vary with latitude, which is a wrong answer
+    rather than a failure: hence the up-front check.
+    """
+    if crs.is_geographic:
+        raise ValueError(
+            f"Cannot align onto {name}: it is in the geographic CRS "
+            f"{crs.to_string()}, whose units are degrees, not metres. The "
+            f"representativeness metrics are defined on a metric grid; "
+            f"reproject it to a projected CRS such as its local UTM zone "
+            f"(see footprint_grid_geometry)."
+        )
+    if not crs.is_projected:
+        raise ValueError(
+            f"Cannot align onto {name}: it is in {crs.to_string()}, which is "
+            f"not a projected CRS. The representativeness metrics need a "
+            f"projected, metric grid (see footprint_grid_geometry)."
+        )
+
+
+def _select_band(source: xr.DataArray, band: int, origin: str) -> xr.DataArray:
+    """
+    Reduce a raster to the requested band, if it carries several.
+
+    Parameters
+    ----------
+    source : xarray.DataArray
+        Raster as opened, possibly with a leading ``band`` dim.
+    band : int
+        One-based band index, as rasterio numbers them.
+    origin : str
+        How to refer to `source` in the error message.
+
+    Returns
+    -------
+    xarray.DataArray
+        A single-band array, with the ``band`` dim dropped.
+
+    Raises
+    ------
+    ValueError
+        If `band` is not a positive integer within the raster's band count.
+    """
+    if "band" not in source.dims:
+        return source
+    count = int(source.sizes["band"])
+    if not 1 <= band <= count:
+        raise ValueError(
+            f"band {band} is out of range for {origin}, which has "
+            f"{count} band(s); bands are numbered from 1."
+        )
+    return source.isel(band=band - 1, drop=True)
+
+
+def _source_nodata(source: xr.DataArray) -> float | None:
+    """
+    Read a raster's declared nodata value, encoded or in memory.
+
+    Parameters
+    ----------
+    source : xarray.DataArray
+        Raster to inspect.
+
+    Returns
+    -------
+    float or None
+        The nodata value, or None if the raster declares none or already
+        represents it as NaN, which needs no substitution.
+    """
+    for value in (source.rio.nodata, source.rio.encoded_nodata):
+        if value is None:
+            continue
+        value = float(value)
+        if np.isfinite(value):
+            return value
+    return None
+
+
+def _on_footprint_grid(aligned: xr.DataArray, footprint: xr.DataArray) -> xr.DataArray:
+    """
+    Put a warped raster on the footprint's own dims and coords.
+
+    Parameters
+    ----------
+    aligned : xarray.DataArray
+        Output of ``reproject_match``, on the footprint's grid but carrying the
+        source's dim names and coordinates recomputed from the transform.
+    footprint : xarray.DataArray
+        Grid that was matched.
+
+    Returns
+    -------
+    xarray.DataArray
+        `aligned` renamed, transposed, and re-coordinated to the footprint, so
+        that the two compare equal cell for cell rather than merely closely.
+
+    Notes
+    -----
+    ``reproject_match`` rebuilds the destination coordinates from the affine
+    transform, which can leave them a float ULP away from the footprint's own.
+    xarray aligns on coordinate values, so that difference is enough to turn a
+    later multiplication into an empty inner join; copying the footprint's
+    coordinates across rules it out.
+    """
+    src_y, src_x = _spatial_dims(aligned, "the reprojected raster")
+    dst_y, dst_x = _spatial_dims(footprint, "the footprint grid")
+
+    renames = {src: dst for src, dst in ((src_y, dst_y), (src_x, dst_x)) if src != dst}
+    if renames:
+        aligned = aligned.rename(renames)
+
+    order = [dim for dim in footprint.dims if dim in (dst_y, dst_x)]
+    aligned = aligned.transpose(*order)
+    return aligned.assign_coords(
+        {dim: footprint.coords[dim] for dim in order if dim in footprint.coords}
+    )
+
+
+def _align_raster(
+    raster: xr.DataArray | str | Path,
+    footprint: xr.DataArray,
+    categorical: bool = False,
+    nodata: float | None = None,
+    band: int = 1,
+) -> tuple[xr.DataArray, xr.DataArray]:
+    """
+    Reproject an external raster onto the footprint grid, cell for cell.
+
+    Wraps :meth:`rioxarray.raster_array.RasterArray.reproject_match` so that a
+    land-cover or vegetation-index product can be compared against a
+    climatology without an intermediate resampling step of the caller's own.
+    Continuous fields are resampled bilinearly and categorical ones with
+    nearest neighbour, which is the only resampling that leaves class codes
+    intact.
+
+    Parameters
+    ----------
+    raster : xarray.DataArray, str, or pathlib.Path
+        Source raster, either already opened with a ``.rio`` accessor or a path
+        to anything rasterio can read. Multi-band sources are reduced to one
+        band by `band`.
+    footprint : xarray.DataArray
+        Georeferenced footprint grid to align onto; only its grid is used, not
+        its values. It must carry a projected CRS, as written by
+        ``.rio.write_crs()`` from
+        :func:`~fluxfootprints.footprint_grid_geometry`.
+    categorical : bool, default False
+        If True, resample with ``Resampling.nearest`` to preserve class codes;
+        if False, resample with ``Resampling.bilinear`` for a continuous field.
+    nodata : float, optional
+        A further value in the source to treat as missing, for rasters that
+        use a fill value they do not declare. The source's own declared nodata
+        is honoured whether or not this is given.
+    band : int, default 1
+        One-based band index to align, used only when the source carries a
+        ``band`` dimension.
+
+    Returns
+    -------
+    aligned : xarray.DataArray
+        Source values on the footprint's grid, as float64 with the footprint's
+        dims and coords, and NaN wherever no valid source data reached the
+        cell. Class codes survive the float conversion exactly.
+    valid : xarray.DataArray
+        Boolean array on the same grid, True where `aligned` holds real data
+        and False where the source was nodata or did not cover the cell.
+
+    Raises
+    ------
+    ImportError
+        If ``rioxarray`` is not installed.
+    TypeError
+        If `raster` is a Dataset rather than a single-variable DataArray, or
+        `footprint` is not a DataArray.
+    ValueError
+        If either array carries no CRS, if their spatial dims cannot be
+        identified, if the footprint grid is geographic (degrees) rather than
+        projected (metres), or if `band` is out of range.
+
+    Notes
+    -----
+    Nodata is resolved once in the source's own grid and turned into NaN before
+    the warp, so it is the warper that decides how missing data spreads: cells
+    the source does not reach come back as NaN, and a bilinear cell touching a
+    mix of valid and missing source pixels is interpolated from the valid ones
+    alone. Resolving it up front rather than leaning on the source's own
+    declaration is also what makes a path and an already-opened DataArray
+    behave alike, since :func:`rioxarray.open_rasterio` has usually applied
+    the declared nodata already.
+
+    `valid` is exactly ``aligned.notnull()``, returned alongside so that callers
+    weighting by footprint mass can renormalise over the covered cells instead
+    of silently treating a gap as a zero.
+
+    See Also
+    --------
+    fluxfootprints.footprint_grid_geometry : Georeferences a footprint grid.
+    fluxfootprints.openet_mask_on_grid : The same warp for data-availability masks.
+
+    Examples
+    --------
+    >>> aligned, valid = _align_raster("evi.tif", grid)  # doctest: +SKIP
+    >>> float(aligned.where(valid).mean())               # doctest: +SKIP
+    0.42
+    """
+    rioxarray = _require("rioxarray")
+    from rasterio.enums import Resampling
+
+    if isinstance(footprint, xr.Dataset):
+        raise TypeError(
+            "footprint must be a DataArray carrying the target grid, not a "
+            "Dataset. Select the variable holding the climatology first."
+        )
+    if not isinstance(footprint, xr.DataArray):
+        raise TypeError(
+            f"footprint must be an xarray.DataArray, got {type(footprint).__name__}."
+        )
+
+    if isinstance(raster, (str, Path)):
+        # Read eagerly and close: reproject_match would pull the whole source
+        # into memory anyway, and a caller aligning a directory of tiles should
+        # not be holding a descriptor open for every one of them.
+        with rioxarray.open_rasterio(raster, masked=True) as opened:
+            source = opened.load()
+        origin = f"raster {Path(raster).name}"
+    else:
+        source = raster
+        origin = "raster"
+    if isinstance(source, xr.Dataset):
+        raise TypeError(
+            f"{origin} holds {len(source.data_vars)} variables; pass a single "
+            f"DataArray, e.g. ds['evi'], so there is one field to align."
+        )
+
+    source = _select_band(source, band, origin)
+
+    dst_crs = _raster_crs(
+        footprint,
+        "the footprint grid",
+        "Georeference it with footprint_grid_geometry() and write the CRS "
+        "onto it with .rio.write_crs().",
+    )
+    _check_metric_crs(dst_crs, "the footprint grid")
+    _raster_crs(
+        source,
+        f"the source {origin}",
+        "Set one with .rio.write_crs(), or use a file that carries its own.",
+    )
+
+    values = source.astype("float64")
+    for fill in (_source_nodata(source), nodata):
+        if fill is not None:
+            values = values.where(values != fill)
+    values.rio.write_nodata(np.nan, inplace=True)
+
+    resampling = Resampling.nearest if categorical else Resampling.bilinear
+    aligned = values.rio.reproject_match(
+        footprint, resampling=resampling, nodata=np.nan
+    )
+
+    aligned = _on_footprint_grid(aligned, footprint)
+    aligned.name = getattr(source, "name", None) or "aligned"
+    valid = aligned.notnull().rename("valid")
+    return aligned, valid
+
+
 def sample_raster_on_grid(
     raster_path: str | Path,
     x: np.ndarray,
