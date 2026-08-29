@@ -106,11 +106,16 @@ __all__ = [
     "continuous_representativeness",
     "evaluate_landcover",
     "evaluate_vegetation_index",
-    "evaluate_representativeness",
     "representativeness_summary",
     "sample_raster_on_grid",
     "predict_sigmav",
     "export_representativeness_gpkg",
+    "RESULT_INDEX",
+    "RESULT_COLUMNS",
+    "CHU_TABLE_COLUMNS",
+    "assess_representativeness",
+    "representativeness_table",
+    "export_representativeness_tables",
 ]
 
 
@@ -425,8 +430,10 @@ class ContinuousResult:
         Mean absolute error between footprint-weighted and target-area values.
     n : int
         Number of matched footprint / field periods entering the regression.
-    level : Level
-        Three-level representativeness index from :func:`classify_continuous`.
+    level : Level or None
+        Three-level representativeness index from :func:`classify_continuous`,
+        or None where fewer than three periods survived at this radius and no
+        regression could be fitted.
     bias : numpy.ndarray
         Per-period sensor location bias Delta (Eq. 6), as a fraction rather
         than a percentage. Length `n`.
@@ -447,7 +454,7 @@ class ContinuousResult:
     rmse: float
     mae: float
     n: int
-    level: Level
+    level: Level | None
     bias: np.ndarray
     within_threshold: float
 
@@ -2991,7 +2998,10 @@ def _relative_bias(footprint_value: float, target_value: float) -> float:
     return (footprint - target) / target
 
 
-def _within_threshold(delta: np.ndarray) -> pd.arrays.BooleanArray:
+def _within_threshold(
+    delta: np.ndarray,
+    threshold: float = BIAS_THRESHOLD,
+) -> pd.arrays.BooleanArray:
     """
     Flag the biases meeting the paper's threshold, keeping the gaps missing.
 
@@ -2999,12 +3009,16 @@ def _within_threshold(delta: np.ndarray) -> pd.arrays.BooleanArray:
     ----------
     delta : numpy.ndarray
         Sensor location biases as fractions, possibly holding ``nan``.
+    threshold : float, default BIAS_THRESHOLD
+        ``|delta|`` at or below which a period counts as representative.
+        Chu et al. (2021) adopt 0.10, following Chen et al. (2011) and Kim
+        et al. (2006); 0.05 also appears in that literature.
 
     Returns
     -------
     pandas.arrays.BooleanArray
-        True where ``|delta| <=`` :data:`BIAS_THRESHOLD`, and ``pd.NA`` where
-        `delta` is not finite.
+        True where ``|delta| <= threshold``, and ``pd.NA`` where `delta` is
+        not finite.
 
     Notes
     -----
@@ -3013,7 +3027,7 @@ def _within_threshold(delta: np.ndarray) -> pd.arrays.BooleanArray:
     failure when the flags are averaged into the percentages of Fig. 7.
     """
     values = np.asarray(delta, dtype=float)
-    within = pd.array(np.abs(values) <= BIAS_THRESHOLD, dtype="boolean")
+    within = pd.array(np.abs(values) <= float(threshold), dtype="boolean")
     within[~np.isfinite(values)] = pd.NA
     return within
 
@@ -4286,6 +4300,112 @@ def continuous_representativeness(
 # ------------------------------
 
 
+def _ensure_truncated(
+    fclim: xr.DataArray,
+    dx: float | None,
+    dy: float | None,
+    fraction: float,
+) -> xr.DataArray:
+    """
+    Return a climatology as unit-sum weights, truncating it only if needed.
+
+    Parameters
+    ----------
+    fclim : xarray.DataArray
+        A raw climatology with dims ``(x, y)`` [m⁻²], or one already cut by
+        :func:`truncate_to_contour`.
+    dx, dy : float or None
+        Grid spacing [m]. Inferred from coordinates when omitted.
+    fraction : float
+        Source-weight fraction to truncate a raw climatology at.
+
+    Returns
+    -------
+    xarray.DataArray
+        Weights summing to 1 over the retained cells.
+
+    Raises
+    ------
+    ValueError
+        If the array carries no positive weight to rescale.
+
+    Notes
+    -----
+    Truncated input is recognised by the ``contour_fraction`` attribute, as in
+    :func:`climatology_metrics`, and is rescaled rather than cut a second
+    time: a second pass would take 80 % of an already-80 % source area and
+    quietly shrink it. A slice of :func:`monthly_climatologies` arrives
+    already truncated *and* already summing to 1, and comes back untouched.
+    """
+    if "contour_fraction" not in fclim.attrs:
+        return truncate_to_contour(fclim, dx, dy, fraction=fraction, renormalize=True)
+
+    finite = fclim.where(np.isfinite(fclim), 0.0)
+    total = float(finite.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError(
+            "The truncated climatology carries no positive weight, so it "
+            "cannot be renormalised."
+        )
+    if abs(total - 1.0) <= _NORMALIZATION_TOLERANCE:
+        return fclim
+    return (finite / total).assign_attrs(fclim.attrs)
+
+
+def _evaluation_grid(fclim: xr.DataArray, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Read the tower-centred cell-centre offsets off a climatology.
+
+    Parameters
+    ----------
+    fclim : xarray.DataArray
+        Climatology carrying ``x`` and ``y`` coordinates [m].
+    name : str
+        How to name the array in the error message.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(x, y)``, one-dimensional and in metres from the tower.
+
+    Raises
+    ------
+    ValueError
+        If either coordinate is missing, since the target-area discs are laid
+        out on them.
+    """
+    for axis in ("x", "y"):
+        if axis not in fclim.coords:
+            raise ValueError(
+                f"{name} carries no '{axis}' coordinate, so the target areas "
+                f"cannot be placed on it. Pass a climatology with the "
+                f"tower-centred ({{'x'}}, {{'y'}}) coordinates the models produce."
+            )
+    return (
+        np.asarray(fclim.coords["x"].values, dtype=float),
+        np.asarray(fclim.coords["y"].values, dtype=float),
+    )
+
+
+def _as_percentages(composition: pd.Series) -> dict[Any, float]:
+    """
+    Convert a composition of weight fractions into the paper's percentages.
+
+    Parameters
+    ----------
+    composition : pandas.Series
+        Class code -> share in [0, 1], from
+        :func:`footprint_weighted_composition` or
+        :func:`target_area_composition`.
+
+    Returns
+    -------
+    dict
+        The same mapping in percent, as :class:`CategoricalResult` reports it.
+    """
+    return {code: 100.0 * float(share) for code, share in composition.items()}
+
+
 def evaluate_landcover(
     fclim: xr.DataArray,
     classes: xr.DataArray,
@@ -4321,12 +4441,25 @@ def evaluate_landcover(
     Returns
     -------
     list of CategoricalResult
-        One entry per radius, in the order given.
+        One entry per radius, in the order given. The shares and both
+        compositions are percentages, as the paper reports them, not the
+        fractions :func:`categorical_representativeness` returns.
 
     Raises
     ------
     ValueError
-        If `fclim` and `classes` are not on the same grid.
+        If `fclim` and `classes` are not on the same grid; if `fclim` carries
+        no ``x`` or ``y`` coordinate to lay the discs out on; if `radii` is
+        empty or holds an unusable radius; or if no cell carries both source
+        weight and a class code.
+
+    See Also
+    --------
+    categorical_representativeness : The per-radius comparison this wraps.
+    assess_representativeness : The whole-record driver, which reports the
+        same comparison as tidy rows for every month and period.
+    evaluate_vegetation_index : The continuous-field counterpart.
+    representativeness_summary : Flattens these results into a table.
 
     Notes
     -----
@@ -4335,8 +4468,53 @@ def evaluate_landcover(
     sites where the land-cover product disagreed with the site's own IGBP
     metadata, so a disagreement between this result and site metadata is worth
     checking against the product before trusting it.
+
+    A raw climatology is truncated here at `fraction` and rescaled to unit
+    sum; one already cut by :func:`truncate_to_contour` is rescaled but not
+    cut again, so a slice of :func:`monthly_climatologies` can be passed
+    straight in.
+
+    Examples
+    --------
+    >>> nlcd = sample_raster_on_grid(                        # doctest: +SKIP
+    ...     "nlcd.tif", model.x, model.y, lat, lon, categorical=True
+    ... )
+    >>> results = evaluate_landcover(model.fclim_2d, nlcd)   # doctest: +SKIP
+    >>> [(entry.radius, entry.level) for entry in results]   # doctest: +SKIP
+    [(250.0, <Level.HIGH: 'high'>), (500.0, <Level.MEDIUM: 'medium'>), ...]
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4.
     """
-    raise NotImplementedError
+    x, y = _evaluation_grid(fclim, "fclim")
+    weights = _ensure_truncated(fclim, dx, dy, fraction)
+
+    frame = categorical_representativeness(
+        weights, classes, x, y, radii=radii, alpha=alpha
+    )
+    footprint = _as_percentages(frame.attrs["footprint_composition"])
+
+    results: list[CategoricalResult] = []
+    for record in frame.itertuples(index=False):
+        # categorical_representativeness reports the dominant class's share
+        # but not the whole disc, which CategoricalResult carries.
+        target = target_area_composition(classes, x, y, record.radius)
+        results.append(
+            CategoricalResult(
+                radius=float(record.radius),
+                dominant_class=record.dominant_class,
+                p_footprint=100.0 * float(record.p_footprint),
+                p_target=100.0 * float(record.p_target),
+                chi2=float(record.chi2),
+                p_value=float(record.p_value),
+                dof=int(record.dof),
+                level=Level(record.level),
+                footprint_composition=dict(footprint),
+                target_composition=_as_percentages(target),
+            )
+        )
+    return results
 
 
 def evaluate_vegetation_index(
@@ -4380,82 +4558,153 @@ def evaluate_vegetation_index(
     Returns
     -------
     list of ContinuousResult
-        One entry per radius, in the order given.
+        One entry per radius, in the order given. ``bias`` holds the biases of
+        the periods that entered that radius's regression, and ``level`` is
+        None where fewer than three of them survived -- a raster covering only
+        part of the larger discs can leave a radius unfittable while the
+        smaller ones are fine.
 
     Raises
     ------
     ValueError
-        If the two sequences differ in length, or fewer than three pairs are
-        supplied.
+        If the two sequences differ in length; if fewer than three pairs are
+        supplied; if the first climatology carries no ``x`` or ``y``
+        coordinate; or if a climatology and its field are not on one grid.
+
+    See Also
+    --------
+    sensor_location_bias : Eq. 6, computed once per pair here.
+    continuous_representativeness : The per-radius regression this wraps.
+    assess_representativeness : The whole-record driver, which matches scenes
+        to months itself and reports the per-period biases alongside the fit.
+    evaluate_landcover : The categorical counterpart.
+    representativeness_summary : Flattens these results into a table.
 
     Notes
     -----
     The paper required at least six matched pairs for a site-level regression,
     with a median of 13 per site. Fewer pairs will fit but the resulting level
     should not be trusted.
-    """
-    raise NotImplementedError
 
+    Pairing is the caller's job: the two sequences are matched element by
+    element, in the order given. The paper pairs each Landsat scene with the
+    climatology of the month it was retrieved in.
 
-def evaluate_representativeness(
-    model: BaseFootprintModel,
-    landcover: xr.DataArray | None = None,
-    vegetation_index: Sequence[xr.DataArray] | None = None,
-    climatologies: Sequence[xr.DataArray] | None = None,
-    radii: Sequence[float] = TARGET_RADII,
-    fraction: float = DEFAULT_CONTOUR_FRACTION,
-    alpha: float = DEFAULT_ALPHA,
-    bias_threshold: float = BIAS_THRESHOLD,
-) -> tuple[list[CategoricalResult], list[ContinuousResult]]:
-    """
-    Run the full representativeness analysis for a fitted footprint model.
-
-    Convenience driver over :func:`evaluate_landcover` and
-    :func:`evaluate_vegetation_index`, taking grid geometry and the climatology
-    from `model` in the same style as
-    :func:`~fluxfootprints.summarize_periods`.
-
-    Parameters
-    ----------
-    model : BaseFootprintModel
-        A model on which ``run()`` has already been called, supplying
-        ``fclim_2d``, ``x``, ``y``, ``dx``, and ``dy``.
-    landcover : xarray.DataArray, optional
-        Categorical land-cover raster on the model grid. Skipped when omitted.
-    vegetation_index : sequence of xarray.DataArray, optional
-        Continuous fields, one per period. Skipped when omitted.
-    climatologies : sequence of xarray.DataArray, optional
-        Per-period climatologies matched to `vegetation_index`. Defaults to
-        repeating ``model.fclim_2d`` for every field, which is correct only
-        when the fields all share one source period.
-    radii : sequence of float, default TARGET_RADII
-        Target-area radii [m].
-    fraction : float, default 0.8
-        Source-weight fraction defining the truncation contour.
-    alpha : float, default 0.05
-        Significance level for both classifications.
-    bias_threshold : float, default 0.10
-        Sensor location bias threshold.
-
-    Returns
-    -------
-    categorical : list of CategoricalResult
-        Land-cover results, empty when `landcover` is omitted.
-    continuous : list of ContinuousResult
-        Continuous-field results, empty when `vegetation_index` is omitted.
-
-    Raises
-    ------
-    RuntimeError
-        If `model` has not been run, i.e. ``fclim_2d`` is None.
+    ``within_threshold`` averages the flags of the periods whose bias is
+    defined, so a scene that did not reach the disc lowers the count of
+    periods rather than counting as a failure -- the convention behind the
+    percentages of Sect. 3.3 and Fig. 7.
 
     Examples
     --------
-    >>> from fluxfootprints import build_climatology, evaluate_representativeness
-    >>> model = build_climatology(df, model_type="ffp")          # doctest: +SKIP
-    >>> cat, cont = evaluate_representativeness(model, landcover=nlcd)  # doctest: +SKIP
+    >>> results = evaluate_vegetation_index(clims, scenes)   # doctest: +SKIP
+    >>> [(entry.radius, round(entry.slope, 2)) for entry in results]
+    [(250.0, 0.96), (500.0, 0.91), ...]                      # doctest: +SKIP
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4,
+    Table 1.
     """
-    raise NotImplementedError
+    clims = list(climatologies)
+    rasters = list(fields)
+    if len(clims) != len(rasters):
+        raise ValueError(
+            f"climatologies and fields must be matched element for element, "
+            f"got {len(clims)} climatologies and {len(rasters)} fields."
+        )
+    if len(clims) < 3:
+        raise ValueError(
+            f"A regression needs at least three matched pairs, got "
+            f"{len(clims)}. Chu et al. (2021) used six."
+        )
+
+    x, y = _evaluation_grid(clims[0], "The first climatology")
+
+    frames: list[pd.DataFrame] = []
+    for index, (fclim, field) in enumerate(zip(clims, rasters)):
+        weights = _ensure_truncated(fclim, dx, dy, fraction)
+        try:
+            frame = sensor_location_bias(weights, field, x, y, radii=radii)
+        except ValueError as exc:
+            raise ValueError(f"At pair {index}: {exc}") from exc
+        frame.insert(0, "time", index)
+        frames.append(frame)
+
+    pairs = pd.concat(frames, ignore_index=True)
+    # min_matches=3 so every radius is fitted; the docstring, not the fit,
+    # carries the paper's warning about resting on fewer than six.
+    fits = continuous_representativeness(pairs, radii=radii, min_matches=3, alpha=alpha)
+
+    pair_radii = pairs["radius"].to_numpy(dtype=float)
+    footprint_values = pairs["value_footprint"].to_numpy(dtype=float)
+    target_values = pairs["value_target"].to_numpy(dtype=float)
+    deltas = pairs["delta"].to_numpy(dtype=float)
+
+    results: list[ContinuousResult] = []
+    for record in fits.itertuples(index=False):
+        here = (
+            np.isclose(pair_radii, record.radius, rtol=1e-9, atol=0.0)
+            & np.isfinite(footprint_values)
+            & np.isfinite(target_values)
+        )
+        bias = deltas[here]
+        flags = _within_threshold(bias, bias_threshold)
+        within = float(pd.Series(flags).mean()) if bias.size else float("nan")
+
+        results.append(
+            ContinuousResult(
+                radius=float(record.radius),
+                intercept=float(record.intercept),
+                slope=float(record.slope),
+                r_squared=float(record.r_squared),
+                p_value=float(record.p_value),
+                rmse=float(record.rmse),
+                mae=float(record.mae),
+                n=int(record.n),
+                level=None if pd.isna(record.level) else Level(record.level),
+                bias=bias,
+                within_threshold=within,
+            )
+        )
+    return results
+
+
+#: Columns of the frame :func:`representativeness_summary` returns, in order.
+SUMMARY_COLUMNS: tuple[str, ...] = (
+    "site_id",
+    "radius",
+    "dominant_class",
+    "p_footprint",
+    "p_target",
+    "chi2",
+    "chi2_p_value",
+    "dof",
+    "landcover_level",
+    "n",
+    "slope",
+    "intercept",
+    "r_squared",
+    "regression_p_value",
+    "rmse",
+    "mae",
+    "mean_bias",
+    "median_bias",
+    "bias_within_threshold",
+    "continuous_level",
+    "contour_fraction",
+    "contour_level",
+    "fetch",
+    "area",
+    "symmetry",
+    "enclosed_fraction",
+    "n_cells",
+    "seasonal_overlap",
+    "daynight_overlap",
+)
+
+#: Summary columns held as pandas' nullable integer.
+_SUMMARY_INT_COLUMNS: tuple[str, ...] = ("dof", "n", "n_cells")
 
 
 def representativeness_summary(
@@ -4467,6 +4716,10 @@ def representativeness_summary(
     """
     Flatten representativeness results into a tidy table.
 
+    Joins the two halves of the analysis on their target-area radius, so that
+    a site's land-cover and vegetation-index verdicts can be read on one line
+    per radius, and written or concatenated across sites.
+
     Parameters
     ----------
     categorical : sequence of CategoricalResult, optional
@@ -4477,17 +4730,175 @@ def representativeness_summary(
         Climatology metrics, repeated across every row when supplied.
     site_id : str, optional
         Site identifier written to a ``site_id`` column, e.g. ``"US-MOz"``.
+        The column is always present, and missing when no identifier is given.
 
     Returns
     -------
     pandas.DataFrame
-        One row per target radius, with columns for the land-cover statistics
-        and level, the regression statistics and level, and the climatology
-        metrics. Missing halves are filled with NaN, so the frame can be
-        concatenated across sites and written with
+        One row per target radius over a fresh :class:`~pandas.RangeIndex`,
+        carrying :data:`SUMMARY_COLUMNS` in that order:
+
+        ``site_id``, ``radius``
+            Row identity. Radii come in the order `categorical` presents them,
+            followed by any radius only `continuous` holds.
+        ``dominant_class``, ``p_footprint``, ``p_target``, ``chi2``,
+        ``chi2_p_value``, ``dof``, ``landcover_level``
+            The land-cover half, with the two shares as percentages.
+        ``n``, ``slope``, ``intercept``, ``r_squared``,
+        ``regression_p_value``, ``rmse``, ``mae``, ``mean_bias``,
+        ``median_bias``, ``bias_within_threshold``, ``continuous_level``
+            The continuous half. The three bias columns summarise the
+            per-period Deltas of Eq. 6 as fractions; the rest is the model II
+            regression of Eq. 7.
+        ``contour_fraction`` through ``daynight_overlap``
+            The climatology metrics of Sect. 2.2, repeated down the frame
+            because they describe the footprint rather than any one disc.
+
+        Missing halves are filled with NaN, so the frame can be concatenated
+        across sites and written with
         :func:`~fluxfootprints.export_contour_stats_csv` conventions.
+
+    Raises
+    ------
+    ValueError
+        If both `categorical` and `continuous` are omitted or empty, leaving
+        no radius to build rows from, or if either holds two results for the
+        same radius.
+
+    See Also
+    --------
+    evaluate_landcover : Produces the land-cover half.
+    evaluate_vegetation_index : Produces the continuous half.
+    assess_representativeness : The whole-record driver, whose tidy frame
+        carries the same statistics per month and period rather than pooled.
+    export_representativeness_gpkg : Draws this table as nested discs.
+
+    Notes
+    -----
+    The two ``*_level`` columns hold a :class:`Level`'s *value* -- ``"high"``,
+    ``"medium"``, or ``"low"`` -- rather than the member, because ``str()`` of
+    a member renders as ``"Level.HIGH"`` and would reach a CSV that way. They
+    still compare equal to the members.
+
+    A radius present in one half and not the other still gets a row, with the
+    other half's columns missing. That is the case worth seeing rather than
+    hiding: the land cover and the vegetation index need not have been
+    evaluated over the same series of discs.
+
+    Examples
+    --------
+    >>> table = representativeness_summary(                  # doctest: +SKIP
+    ...     evaluate_landcover(model.fclim_2d, nlcd),
+    ...     evaluate_vegetation_index(clims, scenes),
+    ...     climatology_metrics(model.fclim_2d),
+    ...     site_id="US-MOz",
+    ... )
+    >>> table[["radius", "landcover_level", "continuous_level"]]  # doctest: +SKIP
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4.
     """
-    raise NotImplementedError
+    landcover = list(categorical or [])
+    vegetation = list(continuous or [])
+    if not landcover and not vegetation:
+        raise ValueError(
+            "Both result sequences are empty, so there is no radius to build "
+            "a row from. Pass the output of evaluate_landcover, "
+            "evaluate_vegetation_index, or both."
+        )
+
+    by_radius: dict[float, CategoricalResult] = {}
+    for entry in landcover:
+        radius = float(entry.radius)
+        if radius in by_radius:
+            raise ValueError(
+                f"categorical holds two results for the {radius:g} m target "
+                f"area; a summary carries one row per radius."
+            )
+        by_radius[radius] = entry
+
+    fits: dict[float, ContinuousResult] = {}
+    for entry in vegetation:
+        radius = float(entry.radius)
+        if radius in fits:
+            raise ValueError(
+                f"continuous holds two results for the {radius:g} m target "
+                f"area; a summary carries one row per radius."
+            )
+        fits[radius] = entry
+
+    radii = list(by_radius)
+    radii.extend(radius for radius in fits if radius not in by_radius)
+
+    rows: list[dict[str, Any]] = []
+    for radius in radii:
+        row: dict[str, Any] = {column: float("nan") for column in SUMMARY_COLUMNS}
+        row.update(
+            site_id=pd.NA if site_id is None else str(site_id),
+            radius=radius,
+            dominant_class=pd.NA,
+            landcover_level=pd.NA,
+            continuous_level=pd.NA,
+        )
+        row.update({column: pd.NA for column in _SUMMARY_INT_COLUMNS})
+
+        entry = by_radius.get(radius)
+        if entry is not None:
+            row.update(
+                dominant_class=entry.dominant_class,
+                p_footprint=float(entry.p_footprint),
+                p_target=float(entry.p_target),
+                chi2=float(entry.chi2),
+                chi2_p_value=float(entry.p_value),
+                dof=int(entry.dof),
+                landcover_level=_level_label(entry.level),
+            )
+
+        fit = fits.get(radius)
+        if fit is not None:
+            bias = np.asarray(fit.bias, dtype=float)
+            finite = bias[np.isfinite(bias)]
+            row.update(
+                n=int(fit.n),
+                slope=float(fit.slope),
+                intercept=float(fit.intercept),
+                r_squared=float(fit.r_squared),
+                regression_p_value=float(fit.p_value),
+                rmse=float(fit.rmse),
+                mae=float(fit.mae),
+                mean_bias=float(finite.mean()) if finite.size else float("nan"),
+                median_bias=float(np.median(finite)) if finite.size else float("nan"),
+                bias_within_threshold=float(fit.within_threshold),
+                continuous_level=_level_label(fit.level),
+            )
+
+        if metrics is not None:
+            row.update(
+                contour_fraction=float(metrics.fraction),
+                contour_level=float(metrics.contour_level),
+                fetch=float(metrics.fetch),
+                area=float(metrics.area),
+                symmetry=float(metrics.symmetry),
+                enclosed_fraction=float(metrics.enclosed_fraction),
+                n_cells=int(metrics.n_cells),
+                seasonal_overlap=(
+                    float("nan")
+                    if metrics.seasonal_overlap is None
+                    else float(metrics.seasonal_overlap)
+                ),
+                daynight_overlap=(
+                    float("nan")
+                    if metrics.daynight_overlap is None
+                    else float(metrics.daynight_overlap)
+                ),
+            )
+        rows.append(row)
+
+    frame = pd.DataFrame(rows, columns=list(SUMMARY_COLUMNS))
+    for column in _SUMMARY_INT_COLUMNS:
+        frame[column] = pd.array(frame[column], dtype="Int64")
+    return frame
 
 
 # ------------------------------
@@ -5006,8 +5417,9 @@ def export_representativeness_gpkg(
     Parameters
     ----------
     results : pandas.DataFrame
-        Tidy results from :func:`representativeness_summary`, carrying a
-        ``radius`` column.
+        Tidy results carrying a ``radius`` column, from
+        :func:`representativeness_summary` or from
+        :func:`assess_representativeness` with its index reset.
     geometry : GridGeometry
         Georeferencing for the footprint grid, from
         :func:`~fluxfootprints.footprint_grid_geometry`.
@@ -5035,3 +5447,1645 @@ def export_representativeness_gpkg(
     representativeness levels.
     """
     raise NotImplementedError
+
+
+# ------------------------------
+# Top-level driver (Sects. 2.2-2.4)
+# ------------------------------
+
+#: Index levels of the tidy frame :func:`assess_representativeness` returns.
+RESULT_INDEX: tuple[str, ...] = (
+    "site",
+    "year",
+    "month",
+    "period",
+    "radius",
+    "variable",
+)
+
+#: Aggregation level a result row describes, the ``scope`` column.
+PERIOD_SCOPE: str = "period"
+SITE_YEAR_SCOPE: str = "site_year"
+SITE_SCOPE: str = "site"
+
+#: Analysis a result row came from, the ``kind`` column.
+CLIMATOLOGY_KIND: str = "climatology"
+CATEGORICAL_KIND: str = "categorical"
+CONTINUOUS_KIND: str = "continuous"
+
+#: Value of the ``variable`` index level on rows describing the footprint
+#: itself rather than a land-surface field.
+FOOTPRINT_VARIABLE: str = "footprint"
+
+#: Columns of the tidy frame, in order. Every row carries all of them; the
+#: ones an analysis does not produce are missing rather than absent, so that
+#: frames from different analyses concatenate without realigning.
+RESULT_COLUMNS: tuple[str, ...] = (
+    "scope",
+    "kind",
+    "time",
+    "value_footprint",
+    "value_target",
+    "bias",
+    "within_threshold",
+    "dominant_class",
+    "chi2",
+    "dof",
+    "p_value",
+    "level",
+    "slope",
+    "slope_lower",
+    "slope_upper",
+    "intercept",
+    "intercept_lower",
+    "intercept_upper",
+    "r_squared",
+    "rmse",
+    "mae",
+    "n",
+    "sufficient",
+    "retained_footprint",
+    "retained_target",
+    "fetch",
+    "area",
+    "symmetry",
+    "contour_level",
+    "enclosed_fraction",
+    "n_cells",
+    "n_times",
+    "seasonal_overlap",
+    "daynight_overlap",
+)
+
+#: Result columns held as float64.
+_FLOAT_COLUMNS: tuple[str, ...] = (
+    "value_footprint",
+    "value_target",
+    "bias",
+    "chi2",
+    "p_value",
+    "slope",
+    "slope_lower",
+    "slope_upper",
+    "intercept",
+    "intercept_lower",
+    "intercept_upper",
+    "r_squared",
+    "rmse",
+    "mae",
+    "retained_footprint",
+    "retained_target",
+    "fetch",
+    "area",
+    "symmetry",
+    "contour_level",
+    "enclosed_fraction",
+    "seasonal_overlap",
+    "daynight_overlap",
+)
+
+#: Result columns held as pandas' nullable integer, so that a count missing
+#: from an analysis stays missing rather than becoming a float.
+_INT_COLUMNS: tuple[str, ...] = ("dof", "n", "n_cells", "n_times")
+
+#: Result columns held as pandas' nullable boolean.
+_BOOL_COLUMNS: tuple[str, ...] = ("within_threshold", "sufficient")
+
+
+def _blank_row() -> dict[str, Any]:
+    """
+    Build a result row with every column present and missing.
+
+    Returns
+    -------
+    dict
+        Keys :data:`RESULT_INDEX` + :data:`RESULT_COLUMNS`, all set to the
+        missing value of their eventual dtype. Callers overwrite the entries
+        their analysis produces and leave the rest, which is what keeps the
+        heterogeneous rows of the tidy frame column-aligned.
+    """
+    row: dict[str, Any] = {
+        "site": pd.NA,
+        "year": pd.NA,
+        "month": pd.NaT,
+        "period": pd.NA,
+        "radius": float("nan"),
+        "variable": pd.NA,
+        "time": pd.NaT,
+        "scope": pd.NA,
+        "kind": pd.NA,
+        "level": pd.NA,
+        "dominant_class": pd.NA,
+    }
+    row.update({column: float("nan") for column in _FLOAT_COLUMNS})
+    row.update({column: pd.NA for column in _INT_COLUMNS})
+    row.update({column: pd.NA for column in _BOOL_COLUMNS})
+    return row
+
+
+def _result_frame(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    """
+    Assemble result rows into the tidy frame, typed and indexed.
+
+    Parameters
+    ----------
+    rows : sequence of mapping
+        Rows built from :func:`_blank_row`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by :data:`RESULT_INDEX` and carrying :data:`RESULT_COLUMNS`
+        in order. An empty `rows` yields an empty frame of the same shape, so
+        that a run with nothing to evaluate still concatenates.
+    """
+    columns = list(RESULT_INDEX) + list(RESULT_COLUMNS)
+    frame = pd.DataFrame(list(rows), columns=columns)
+
+    frame["year"] = pd.array(frame["year"], dtype="Int64")
+    frame["month"] = pd.to_datetime(frame["month"])
+    frame["time"] = pd.to_datetime(frame["time"])
+    frame["radius"] = frame["radius"].astype(float)
+    for column in _FLOAT_COLUMNS:
+        frame[column] = frame[column].astype(float)
+    for column in _INT_COLUMNS:
+        frame[column] = pd.array(frame[column], dtype="Int64")
+    for column in _BOOL_COLUMNS:
+        frame[column] = pd.array(frame[column], dtype="boolean")
+
+    return frame.set_index(list(RESULT_INDEX))[list(RESULT_COLUMNS)]
+
+
+def _climatology_dataset(source: Any, **kwargs: Any) -> xr.Dataset:
+    """
+    Resolve the driver's first argument to a monthly-climatology Dataset.
+
+    Parameters
+    ----------
+    source : xarray.Dataset, BaseFootprintModel, or xarray.DataArray
+        A Dataset already carrying ``footprint_climatology`` -- the output of
+        :func:`monthly_climatologies` -- is taken as it stands. Anything else
+        is passed to :func:`monthly_climatologies` to be aggregated.
+    **kwargs
+        Forwarded to :func:`monthly_climatologies` when aggregation is needed.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dims ``(month, period, x, y)``.
+
+    Raises
+    ------
+    ValueError
+        If a supplied climatology Dataset lacks the dims or coords the
+        analysis indexes over.
+    """
+    if isinstance(source, xr.Dataset) and "footprint_climatology" in source:
+        clim = source
+        expected = {_MONTH_DIM, _PERIOD_DIM, "x", "y"}
+        missing = expected - set(clim["footprint_climatology"].dims)
+        if missing:
+            raise ValueError(
+                f"The climatology Dataset's 'footprint_climatology' is missing "
+                f"the dimension(s) {sorted(missing)}; monthly_climatologies "
+                f"returns it with dims {tuple(sorted(expected))}."
+            )
+        for axis in ("x", "y", _MONTH_DIM, _PERIOD_DIM):
+            if axis not in clim.coords:
+                raise ValueError(
+                    f"The climatology Dataset carries no '{axis}' coordinate, "
+                    f"so its rows cannot be labelled or placed on a grid."
+                )
+        return clim.transpose(_MONTH_DIM, _PERIOD_DIM, "x", "y", ...)
+
+    return monthly_climatologies(source, **kwargs)
+
+
+def _grid_axes(clim: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Read the tower-centred cell-centre offsets off a climatology Dataset.
+
+    Parameters
+    ----------
+    clim : xarray.Dataset
+        Climatology Dataset with ``x`` and ``y`` coordinates [m].
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(x, y)``, one-dimensional and in metres from the tower.
+    """
+    return (
+        np.asarray(clim.coords["x"].values, dtype=float),
+        np.asarray(clim.coords["y"].values, dtype=float),
+    )
+
+
+def _field_on_grid(
+    source: Any,
+    x: np.ndarray,
+    y: np.ndarray,
+    station_lat: float | None,
+    station_lon: float | None,
+    crs: str | int | None,
+    categorical: bool,
+    label: str,
+) -> xr.DataArray:
+    """
+    Bring one land-surface raster onto the tower-centred footprint grid.
+
+    Parameters
+    ----------
+    source : xarray.DataArray, xarray.Dataset, str, or pathlib.Path
+        An array already on the grid, a single-variable Dataset holding one,
+        or a path handed to :func:`sample_raster_on_grid`.
+    x, y : numpy.ndarray
+        Cell-centre offsets from the tower [m].
+    station_lat, station_lon : float or None
+        Tower position [degrees], required only to reproject a path.
+    crs : str, int, or None
+        Target CRS for that reprojection.
+    categorical : bool
+        Whether to resample with nearest neighbour, preserving class codes.
+    label : str
+        How to name `source` in error messages, e.g. ``"landcover"``.
+
+    Returns
+    -------
+    xarray.DataArray
+        Dims ``(x, y)`` on the footprint grid.
+
+    Raises
+    ------
+    TypeError
+        If a Dataset holds no single usable variable.
+    ValueError
+        If an array is not on the footprint grid, or a path was given without
+        a tower position to georeference it against.
+    """
+    if isinstance(source, xr.Dataset):
+        names = list(source.data_vars)
+        if len(names) != 1:
+            raise TypeError(
+                f"{label} is a Dataset holding {len(names)} variables "
+                f"({', '.join(map(str, names))}); pass the one to evaluate as "
+                f"a DataArray."
+            )
+        source = source[names[0]]
+
+    if isinstance(source, xr.DataArray):
+        field = source.transpose("x", "y") if set(source.dims) == {"x", "y"} else source
+        if field.shape != (x.size, y.size):
+            raise ValueError(
+                f"{label} has shape {field.shape} but the footprint grid is "
+                f"({x.size}, {y.size}) in (x, y). Bring it onto the grid with "
+                f"sample_raster_on_grid first."
+            )
+        return field
+
+    if station_lat is None or station_lon is None:
+        raise ValueError(
+            f"{label} was given as a path, which has to be reprojected onto "
+            f"the footprint grid, but no tower position was supplied. Pass "
+            f"station_lat and station_lon, or hand in a DataArray already on "
+            f"the grid."
+        )
+    return sample_raster_on_grid(
+        source, x, y, station_lat, station_lon, crs=crs, categorical=categorical
+    )
+
+
+def _continuous_items(continuous: Any) -> list[tuple[pd.Timestamp, Any]]:
+    """
+    Normalise the accepted continuous-field collections into timed entries.
+
+    Parameters
+    ----------
+    continuous : mapping, pandas.Series, xarray.DataArray, xarray.Dataset, sequence, or None
+        The time series of continuous rasters, in any of the forms
+        :func:`assess_representativeness` documents.
+
+    Returns
+    -------
+    list of tuple
+        ``(timestamp, source)`` pairs in the order presented. Empty when
+        `continuous` is None.
+
+    Raises
+    ------
+    TypeError
+        If `continuous` is of an unusable type, or a sequence entry is not a
+        ``(time, raster)`` pair.
+    ValueError
+        If an array or Dataset carries no usable ``time`` dimension, or a
+        timestamp cannot be parsed.
+    """
+    if continuous is None:
+        return []
+
+    if isinstance(continuous, xr.Dataset):
+        names = [
+            name for name in continuous.data_vars if "time" in continuous[name].dims
+        ]
+        if len(names) != 1:
+            raise ValueError(
+                f"The continuous Dataset holds {len(names)} variables with a "
+                f"'time' dimension; pass the one to evaluate as a DataArray."
+            )
+        continuous = continuous[names[0]]
+
+    if isinstance(continuous, xr.DataArray):
+        if "time" not in continuous.dims:
+            raise ValueError(
+                f"The continuous DataArray has dims {continuous.dims} and so "
+                f"carries no time series; pass a mapping of time -> raster "
+                f"instead, or add a 'time' dimension."
+            )
+        stamps = pd.DatetimeIndex(continuous["time"].values)
+        return [
+            (stamps[index], continuous.isel(time=index, drop=True))
+            for index in range(stamps.size)
+        ]
+
+    if isinstance(continuous, (Mapping, pd.Series)):
+        labelled = list(continuous.items())
+    else:
+        try:
+            labelled = [(entry[0], entry[1]) for entry in continuous]
+        except (TypeError, IndexError, KeyError) as exc:
+            raise TypeError(
+                f"continuous must be a mapping of time -> raster, a pandas "
+                f"Series of rasters indexed by time, a DataArray or Dataset "
+                f"with a 'time' dimension, or an iterable of (time, raster) "
+                f"pairs, got {type(continuous).__name__}."
+            ) from exc
+
+    items: list[tuple[pd.Timestamp, Any]] = []
+    for label, entry in labelled:
+        stamp = pd.Timestamp(label)
+        if pd.isna(stamp):
+            raise ValueError(
+                f"The continuous field labelled {label!r} carries no usable "
+                f"timestamp, so it cannot be matched to a month."
+            )
+        items.append((stamp, entry))
+    return items
+
+
+def _month_start(stamp: pd.Timestamp) -> np.datetime64:
+    """
+    Reduce a timestamp to the first instant of its calendar month.
+
+    Parameters
+    ----------
+    stamp : pandas.Timestamp
+        Any instant.
+
+    Returns
+    -------
+    numpy.datetime64
+        The month start, matching the ``month`` coordinate that
+        :func:`monthly_climatologies` writes.
+    """
+    return np.datetime64(stamp.to_period("M").to_timestamp(), "ns")
+
+
+def _pooled_climatology(
+    weights: xr.DataArray,
+    indices: Sequence[int],
+) -> xr.DataArray | None:
+    """
+    Average a period's monthly climatologies into one pooled footprint.
+
+    Chu et al. (2021) take the dominant land-cover type from "all available
+    monthly footprint climatologies" of a site rather than from any single
+    month, which is what this pooled field stands for.
+
+    Parameters
+    ----------
+    weights : xarray.DataArray
+        Monthly climatologies for one period, dims ``(month, x, y)``, each
+        month summing to 1.
+    indices : sequence of int
+        Positions along ``month`` that were actually aggregated.
+
+    Returns
+    -------
+    xarray.DataArray or None
+        The mean of the selected months, rescaled to sum to 1, with dims
+        ``(x, y)``. ``None`` when `indices` is empty or the mean carries no
+        positive weight.
+
+    Notes
+    -----
+    Months are weighted equally, not by their contributing half-hours: the
+    paper's climatologies are the unit of analysis, and a sparse month is one
+    of them. The result is a mean of unit-sum fields and so already sums to
+    one; it is rescaled anyway to absorb rounding.
+    """
+    if not len(indices):
+        return None
+    pooled = weights.isel({_MONTH_DIM: list(indices)}).mean(dim=_MONTH_DIM)
+    total = float(pooled.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return None
+    return pooled / total
+
+
+def _categorical_rows(
+    w: xr.DataArray,
+    landcover: xr.DataArray,
+    x: np.ndarray,
+    y: np.ndarray,
+    radii: Sequence[float],
+    alpha: float,
+    template: Mapping[str, Any],
+    scope: str,
+    variable: str,
+    label: str,
+) -> list[dict[str, Any]]:
+    """
+    Turn one categorical evaluation into result rows, one per radius.
+
+    Parameters
+    ----------
+    w : xarray.DataArray
+        Footprint weights with dims ``(x, y)``, summing to 1.
+    landcover : xarray.DataArray
+        Categorical raster on the same grid.
+    x, y : numpy.ndarray
+        Cell-centre offsets from the tower [m].
+    radii : sequence of float
+        Target-area radii [m].
+    alpha : float
+        Significance level for the chi-square test.
+    template : mapping
+        A :func:`_blank_row` with the index levels above ``radius`` filled in.
+    scope : str
+        Aggregation level to stamp on the rows.
+    variable : str
+        Name of the land-cover product, written to the ``variable`` level.
+    label : str
+        Prefix for error messages, identifying the climatology evaluated.
+
+    Returns
+    -------
+    list of dict
+        One row per radius.
+
+    Raises
+    ------
+    ValueError
+        As :func:`categorical_representativeness` does, with `label` prepended.
+    """
+    try:
+        frame = categorical_representativeness(
+            w, landcover, x, y, radii=radii, alpha=alpha
+        )
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
+
+    composition = frame.attrs.get("footprint_composition")
+    retained = (
+        float(composition.attrs.get("retained_weight", float("nan")))
+        if composition is not None
+        else float("nan")
+    )
+
+    rows: list[dict[str, Any]] = []
+    for record in frame.itertuples(index=False):
+        dominant = record.dominant_class
+        row = dict(template)
+        row.update(
+            radius=float(record.radius),
+            variable=variable,
+            scope=scope,
+            kind=CATEGORICAL_KIND,
+            dominant_class=(
+                int(dominant) if isinstance(dominant, (int, np.integer)) else dominant
+            ),
+            value_footprint=float(record.p_footprint),
+            value_target=float(record.p_target),
+            bias=_relative_bias(record.p_footprint, record.p_target),
+            chi2=float(record.chi2),
+            dof=int(record.dof),
+            p_value=float(record.p_value),
+            level=record.level,
+            retained_footprint=retained,
+        )
+        rows.append(row)
+    return rows
+
+
+def _continuous_rows(
+    w: xr.DataArray,
+    field: xr.DataArray,
+    x: np.ndarray,
+    y: np.ndarray,
+    radii: Sequence[float],
+    bias_threshold: float,
+    template: Mapping[str, Any],
+    variable: str,
+    stamp: pd.Timestamp,
+    label: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Turn one matched climatology / field pair into result rows and fit pairs.
+
+    Computes Eq. 5 once and Eq. 6 per radius, exactly as
+    :func:`sensor_location_bias` does, and additionally carries the retained
+    weight of both sides so that partial raster coverage stays visible.
+
+    Parameters
+    ----------
+    w : xarray.DataArray
+        Footprint weights with dims ``(x, y)``, summing to 1.
+    field : xarray.DataArray
+        Continuous field on the same grid.
+    x, y : numpy.ndarray
+        Cell-centre offsets from the tower [m].
+    radii : sequence of float
+        Target-area radii [m].
+    bias_threshold : float
+        ``|Delta|`` at or below which the period counts as representative.
+    template : mapping
+        A :func:`_blank_row` with the index levels above ``radius`` filled in.
+    variable : str
+        Name of the continuous field, written to the ``variable`` level.
+    stamp : pandas.Timestamp
+        Retrieval time of `field`, written to the ``time`` column.
+    label : str
+        Prefix for error messages.
+
+    Returns
+    -------
+    rows : list of dict
+        One result row per radius.
+    pairs : list of dict
+        The same matches in the four columns
+        :func:`continuous_representativeness` consumes.
+
+    Raises
+    ------
+    ValueError
+        As :func:`footprint_weighted_value` and :func:`target_area_value` do,
+        with `label` prepended.
+    """
+    try:
+        footprint = footprint_weighted_value(w, field)
+        targets = [(radius, target_area_value(field, x, y, radius)) for radius in radii]
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
+
+    rows: list[dict[str, Any]] = []
+    pairs: list[dict[str, Any]] = []
+    for radius, target in targets:
+        delta = _relative_bias(footprint.value, target.value)
+        row = dict(template)
+        row.update(
+            radius=float(radius),
+            variable=variable,
+            scope=PERIOD_SCOPE,
+            kind=CONTINUOUS_KIND,
+            time=stamp,
+            value_footprint=footprint.value,
+            value_target=target.value,
+            bias=delta,
+            within_threshold=(
+                bool(abs(delta) <= float(bias_threshold))
+                if np.isfinite(delta)
+                else pd.NA
+            ),
+            retained_footprint=footprint.retained_weight,
+            retained_target=target.retained_weight,
+            n_cells=int(target.n_cells),
+        )
+        rows.append(row)
+        pairs.append(
+            {
+                "time": stamp,
+                "radius": float(radius),
+                "value_footprint": footprint.value,
+                "value_target": target.value,
+            }
+        )
+    return rows, pairs
+
+
+def assess_representativeness(
+    model_or_climatology: Any,
+    station_lat: float | None = None,
+    station_lon: float | None = None,
+    site_id: str | None = None,
+    landcover: Any = None,
+    continuous: Any = None,
+    radii: Sequence[float] = TARGET_RADII,
+    landcover_name: str = "land_cover",
+    continuous_name: str = "EVI",
+    crs: str | int | None = "auto",
+    fraction: float = DEFAULT_CONTOUR_FRACTION,
+    alpha: float = DEFAULT_ALPHA,
+    bias_threshold: float = BIAS_THRESHOLD,
+    min_matches: int = MIN_MATCHES,
+    partition: str = "month+daynight",
+    tz: str | float | dt.tzinfo | None = None,
+    daytime: pd.Series | np.ndarray | xr.DataArray | None = None,
+    min_times: int = 1,
+    sw_in_pot: str | None = SW_IN_POT_COLUMN,
+    ci_level: float = 0.95,
+    ci_method: str = "analytical",
+) -> pd.DataFrame:
+    """
+    Run the whole footprint-to-target-area analysis and return one tidy table.
+
+    The driver over the rest of this module: it aggregates monthly footprint
+    climatologies (Sect. 2.2), summarises each with the metrics of Eqs. 1-3,
+    compares them against a series of target-area discs for a categorical and
+    a continuous land-surface field (Sect. 2.4), and classifies every
+    comparison HIGH, MEDIUM, or LOW. Either field may be omitted, so the same
+    call serves a land-cover-only, a vegetation-index-only, or a full
+    analysis.
+
+    Parameters
+    ----------
+    model_or_climatology : BaseFootprintModel, xarray.Dataset, or xarray.DataArray
+        Either a run footprint model or its time-resolved footprints, which
+        are aggregated here with :func:`monthly_climatologies`, or a Dataset
+        that function has already produced, which is used as it stands. The
+        second form is the one to reach for when several analyses share one
+        set of climatologies, since the aggregation is by far the slowest step.
+    station_lat, station_lon : float, optional
+        Tower position in decimal degrees (WGS 84). Needed to split day from
+        night when the climatologies have to be aggregated here without a
+        precomputed `daytime` or potential-radiation column, and to
+        georeference any raster passed as a path.
+    site_id : str, optional
+        Site identifier, e.g. ``"US-MOz"``, written to the ``site`` index
+        level so that frames from several sites concatenate. Missing when
+        omitted.
+    landcover : xarray.DataArray, xarray.Dataset, str, or pathlib.Path, optional
+        Categorical land-cover raster -- the consolidated NLCD / Land Cover of
+        Canada codes of Table S6 in the paper. A path is reprojected onto the
+        footprint grid with :func:`sample_raster_on_grid` using nearest
+        neighbour; a DataArray must already be on that grid. Omit to skip the
+        categorical analysis.
+    continuous : mapping, pandas.Series, xarray.DataArray, xarray.Dataset, or sequence, optional
+        Time series of continuous rasters -- the Landsat EVI scenes of the
+        paper -- in any of
+
+        * a mapping of retrieval time -> raster (a DataArray or a path);
+        * a :class:`pandas.Series` of rasters indexed by retrieval time;
+        * a :class:`~xarray.DataArray` with dims ``(time, x, y)``, or a
+          Dataset holding exactly one such variable;
+        * an iterable of ``(time, raster)`` pairs.
+
+        Each scene is matched to the climatologies of the calendar month it
+        was retrieved in, as in Sect. 2.4. Omit to skip the continuous
+        analysis.
+    radii : sequence of float, default TARGET_RADII
+        Target-area radii [m], evaluated and reported in the order given.
+    landcover_name, continuous_name : str, default "land_cover", "EVI"
+        Labels written to the ``variable`` index level, so that a frame can
+        carry more than one field.
+    crs : str, int, or None, default "auto"
+        Target CRS used when reprojecting a raster given as a path;
+        ``"auto"`` picks the local WGS 84 UTM zone.
+    fraction : float, default 0.8
+        Source-weight fraction each climatology is truncated at. Ignored when
+        `model_or_climatology` is an already-aggregated Dataset, whose own
+        fraction is used.
+    alpha : float, default 0.05
+        Significance level for the chi-square test and the regression.
+    bias_threshold : float, default 0.10
+        ``|Delta|`` at or below which a period counts as representative,
+        reported as ``within_threshold``.
+    min_matches : int, default 6
+        Fewest matched scenes a site-level regression may be fitted on.
+    partition : {"month+daynight", "month"}, default "month+daynight"
+        How to group timesteps when aggregating, passed to
+        :func:`monthly_climatologies`.
+    tz : str, float, datetime.tzinfo, or None, optional
+        Time zone of the footprint timestamps, for the day-night split.
+    daytime : pandas.Series, numpy.ndarray, or xarray.DataArray, optional
+        A precomputed day-night flag, used instead of computing one.
+    min_times : int, default 1
+        Fewest contributing timesteps a month-period group needs before it is
+        aggregated and evaluated.
+    sw_in_pot : str or None, default "SW_IN_POT"
+        Precomputed potential-radiation column to prefer over solar geometry.
+    ci_level : float, default 0.95
+        Confidence level of the regression interval limits.
+    ci_method : {'analytical', 'bootstrap'}, default 'analytical'
+        Interval estimator, passed through to :func:`rma_regression`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A tidy frame indexed by :data:`RESULT_INDEX` --
+        ``(site, year, month, period, radius, variable)`` -- carrying
+        :data:`RESULT_COLUMNS`. Rows are of three scopes, told apart by the
+        ``scope`` column, and of three kinds, told apart by ``kind``:
+
+        ``scope="period"``, ``kind="climatology"``
+            One row per aggregated month and period, carrying `fetch`,
+            `area`, `symmetry`, `contour_level`, `n_cells`, and `n_times`.
+            ``radius`` is missing and ``variable`` is ``"footprint"``.
+        ``scope="period"``, ``kind="categorical"``
+            One row per month, period, and radius: `dominant_class`,
+            `value_footprint` and `value_target` (P_footprint and P_target as
+            fractions), `chi2`, `dof`, `p_value`, and `level`.
+        ``scope="period"``, ``kind="continuous"``
+            One row per matched scene, period, and radius: `time`,
+            `value_footprint` (Eq. 5), `value_target`, `bias` (Delta, Eq. 6,
+            as a fraction), and `within_threshold`. These rows are the paper's
+            Dataset S5.
+        ``scope="site_year"``, ``kind="climatology"``
+            One row per year and period, with `fetch`, `area`, and `symmetry`
+            averaged over that year's months as in Fig. 3, and the overlap
+            indices `seasonal_overlap` (Eq. 2) and `daynight_overlap` (Eq. 3).
+            ``month`` is missing.
+        ``scope="site"``, ``kind="categorical"``
+            One row per period and radius, from the climatologies of every
+            month pooled -- the paper's Dataset S4, and the level reported in
+            its Fig. 5. ``year`` and ``month`` are missing.
+        ``scope="site"``, ``kind="continuous"``
+            One row per period and radius, holding the site-level model II
+            regression of Eq. 7: `slope`, `intercept`, their confidence
+            limits, `r_squared`, `p_value`, `rmse`, `mae`, `n`, `sufficient`,
+            and `level`. The paper's Dataset S6 and Table 1.
+
+        Columns an analysis does not produce are missing, so the frame is
+        sparse by construction; select a slice with the ``scope`` and ``kind``
+        columns before reading values off it. ``DataFrame.attrs`` records the
+        settings the run used, including ``unmatched_fields``, the retrieval
+        times of continuous rasters that fell in no aggregated month.
+
+    Raises
+    ------
+    TypeError
+        If `model_or_climatology`, `landcover`, or `continuous` is of an
+        unusable type.
+    ValueError
+        If `radii` is empty or holds a radius that is not positive and finite;
+        if a raster is not on the footprint grid, or was given as a path
+        without a tower position; if the climatologies carry no aggregated
+        month at all; or for any of the reasons the underlying evaluations
+        raise, with the offending month and period prepended.
+    ImportError
+        If a raster given as a path needs ``rioxarray`` and it is not
+        installed.
+
+    See Also
+    --------
+    monthly_climatologies : The aggregation of Sect. 2.2 this drives.
+    categorical_representativeness : The per-climatology land-cover step.
+    sensor_location_bias : The per-period continuous step, Eq. 6.
+    continuous_representativeness : The site-level regression, Eq. 7.
+    export_representativeness_tables : Writes this frame in the published
+        column schema of Datasets S4-S6.
+
+    Notes
+    -----
+    The index is unique as long as at most one continuous raster is matched to
+    each month, which is the paper's case -- it kept the cloud-free Landsat
+    scenes overlapping each site's measurement periods, a median of 13 matches
+    per site over several years. Two scenes in one month repeat the index and
+    are told apart by the ``time`` column, so prefer ``.query`` or boolean
+    masks over ``.loc`` on a frame that may hold them.
+
+    The site-level rows pool every year, following the paper, whose Datasets
+    S4 and S6 are site properties; only the overlap indices and the averaged
+    fetch and area are site-*year* properties, and those are the
+    ``scope="site_year"`` rows. Restrict the input to one year to get
+    single-year site rows.
+
+    The percentages of Sect. 3.3 come out of the per-period continuous rows
+    directly::
+
+        period = results.query("scope == 'period' and kind == 'continuous'")
+        period.groupby("radius")["within_threshold"].mean()
+
+    `bias` is filled for the categorical rows too, as the relative difference
+    between the dominant class's footprint and target-area shares. Chu et al.
+    (2021) apply the +/-10 % threshold only to the continuous field, so
+    ``within_threshold`` is left missing there.
+
+    The `level` column holds the *value* of a :class:`Level` -- ``"high"``,
+    ``"medium"``, or ``"low"`` -- rather than the member itself, because
+    pandas stores a string column as strings. Since ``Level`` is a ``str``
+    enum, ``results["level"] == Level.HIGH`` and ``== "high"`` both select the
+    same rows; only ``is Level.HIGH`` does not.
+
+    Examples
+    --------
+    >>> from fluxfootprints import build_climatology, assess_representativeness
+    >>> model = build_climatology(df)                          # doctest: +SKIP
+    >>> results = assess_representativeness(                   # doctest: +SKIP
+    ...     model,
+    ...     station_lat=40.1,
+    ...     station_lon=-111.9,
+    ...     site_id="US-Utj",
+    ...     landcover="nlcd_2019.tif",
+    ...     continuous={"2019-07-04": "evi_20190704.tif"},
+    ...     tz=-7,
+    ... )
+    >>> results.query("scope == 'site' and kind == 'continuous'")[
+    ...     ["slope", "r_squared", "level"]
+    ... ]                                                      # doctest: +SKIP
+
+    References
+    ----------
+    Chu, H., et al. (2021). Representativeness of Eddy-Covariance flux
+    footprints for areas surrounding AmeriFlux sites. *Agric. For. Meteorol.*,
+    **301-302**, 108350. https://doi.org/10.1016/j.agrformet.2021.108350
+    """
+    radii_values = [float(radius) for radius in radii]
+    if not radii_values:
+        raise ValueError(
+            "radii holds no target areas, so there is nothing to compare the "
+            "footprint against. Pass at least one radius, e.g. TARGET_RADII."
+        )
+    for radius in radii_values:
+        if not np.isfinite(radius) or radius <= 0.0:
+            raise ValueError(
+                f"Every target radius must be positive and finite, got "
+                f"{radius!r}."
+            )
+
+    clim = _climatology_dataset(
+        model_or_climatology,
+        partition=partition,
+        latitude=station_lat,
+        longitude=station_lon,
+        tz=tz,
+        daytime=daytime,
+        fraction=fraction,
+        min_times=min_times,
+        sw_in_pot=sw_in_pot,
+    )
+    x, y = _grid_axes(clim)
+    weights_all = clim["footprint_climatology"]
+    months = pd.DatetimeIndex(clim[_MONTH_DIM].values)
+    periods = [str(period) for period in np.atleast_1d(clim[_PERIOD_DIM].values)]
+    fraction_used = float(
+        weights_all.attrs.get("contour_fraction", clim.attrs.get("contour_fraction", fraction))
+    )
+    site = pd.NA if site_id is None else str(site_id)
+
+    landcover_field = None
+    if landcover is not None:
+        landcover_field = _field_on_grid(
+            landcover, x, y, station_lat, station_lon, crs, True, "landcover"
+        )
+
+    fields_by_month: dict[Any, list[tuple[pd.Timestamp, xr.DataArray]]] = {}
+    for stamp, source in _continuous_items(continuous):
+        field = _field_on_grid(
+            source,
+            x,
+            y,
+            station_lat,
+            station_lon,
+            crs,
+            False,
+            f"the continuous field at {stamp}",
+        )
+        fields_by_month.setdefault(_month_start(stamp), []).append((stamp, field))
+
+    rows: list[dict[str, Any]] = []
+    populated: dict[str, list[int]] = {period: [] for period in periods}
+    pairs: dict[str, list[dict[str, Any]]] = {period: [] for period in periods}
+    monthly_metrics: dict[tuple[int, str], ClimatologyMetrics] = {}
+    matched_months: set[Any] = set()
+
+    for mi, month in enumerate(months):
+        month_key = np.datetime64(month.to_datetime64(), "ns")
+        for pi, period in enumerate(periods):
+            selector = {_MONTH_DIM: mi, _PERIOD_DIM: pi}
+            n_times = int(clim["n_times"].isel(selector)) if "n_times" in clim else 1
+            w = weights_all.isel(selector)
+            values = np.asarray(w.values, dtype=float)
+            if n_times < 1 or not np.isfinite(values).any() or np.nansum(values) <= 0.0:
+                continue
+            if "contour_fraction" not in w.attrs:
+                w = w.assign_attrs(contour_fraction=fraction_used)
+
+            populated[period].append(mi)
+            metrics = climatology_metrics(w, fraction=fraction_used)
+            monthly_metrics[(mi, period)] = metrics
+
+            template = _blank_row()
+            template.update(
+                site=site, year=int(month.year), month=month, period=period
+            )
+            label = f"At {month:%Y-%m} {period}"
+
+            row = dict(template)
+            row.update(
+                variable=FOOTPRINT_VARIABLE,
+                scope=PERIOD_SCOPE,
+                kind=CLIMATOLOGY_KIND,
+                fetch=metrics.fetch,
+                area=metrics.area,
+                symmetry=metrics.symmetry,
+                enclosed_fraction=metrics.enclosed_fraction,
+                contour_level=(
+                    float(clim["contour_level"].isel(selector))
+                    if "contour_level" in clim
+                    else metrics.contour_level
+                ),
+                n_cells=int(metrics.n_cells),
+                n_times=n_times,
+            )
+            rows.append(row)
+
+            if landcover_field is not None:
+                rows.extend(
+                    _categorical_rows(
+                        w,
+                        landcover_field,
+                        x,
+                        y,
+                        radii_values,
+                        alpha,
+                        template,
+                        PERIOD_SCOPE,
+                        landcover_name,
+                        label,
+                    )
+                )
+
+            for stamp, field in fields_by_month.get(month_key, []):
+                matched_months.add(month_key)
+                scene_rows, scene_pairs = _continuous_rows(
+                    w,
+                    field,
+                    x,
+                    y,
+                    radii_values,
+                    bias_threshold,
+                    template,
+                    continuous_name,
+                    stamp,
+                    f"{label}, field at {stamp}",
+                )
+                rows.extend(scene_rows)
+                pairs[period].extend(scene_pairs)
+
+    if not any(populated.values()):
+        raise ValueError(
+            "No month-period group carries an aggregated climatology, so "
+            "there is nothing to evaluate. Check that the footprints span at "
+            "least one month and that min_times is not set above the number "
+            "of available timesteps."
+        )
+
+    rows.extend(
+        _site_year_rows(weights_all, months, periods, populated, monthly_metrics, site)
+    )
+    rows.extend(
+        _site_rows(
+            weights_all,
+            periods,
+            populated,
+            pairs,
+            landcover_field,
+            x,
+            y,
+            radii_values,
+            alpha,
+            fraction_used,
+            landcover_name,
+            continuous_name,
+            min_matches,
+            ci_level,
+            ci_method,
+            site,
+        )
+    )
+
+    results = _result_frame(rows)
+    results.attrs.update(
+        {
+            "site_id": site_id,
+            "contour_fraction": fraction_used,
+            "radii": tuple(radii_values),
+            "alpha": float(alpha),
+            "bias_threshold": float(bias_threshold),
+            "min_matches": int(min_matches),
+            "ci_level": float(ci_level),
+            "ci_method": ci_method,
+            "partition": str(clim.attrs.get("partition", partition)),
+            "landcover_variable": None if landcover is None else landcover_name,
+            "continuous_variable": None if continuous is None else continuous_name,
+            "unmatched_fields": tuple(
+                str(stamp)
+                for key, entries in sorted(fields_by_month.items())
+                for stamp, _ in entries
+                if key not in matched_months
+            ),
+            "reference": (
+                "Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350."
+            ),
+        }
+    )
+    return results
+
+
+def _site_year_rows(
+    weights_all: xr.DataArray,
+    months: pd.DatetimeIndex,
+    periods: Sequence[str],
+    populated: Mapping[str, Sequence[int]],
+    monthly_metrics: Mapping[tuple[int, str], ClimatologyMetrics],
+    site: Any,
+) -> list[dict[str, Any]]:
+    """
+    Build the site-year climatology rows: averaged metrics and the overlaps.
+
+    Parameters
+    ----------
+    weights_all : xarray.DataArray
+        Every climatology, dims ``(month, period, x, y)``.
+    months : pandas.DatetimeIndex
+        The ``month`` coordinate, one entry per calendar month.
+    periods : sequence of str
+        The ``period`` coordinate.
+    populated : mapping
+        Period -> positions along ``month`` that were aggregated.
+    monthly_metrics : mapping
+        ``(month position, period)`` -> the metrics already computed for it.
+    site : Any
+        Site label for the index.
+
+    Returns
+    -------
+    list of dict
+        One row per year and period holding at least one aggregated month.
+
+    Notes
+    -----
+    Fetch, area, and symmetry are averaged over the year's months, as Fig. 3
+    of the paper does -- symmetry as the mean of the monthly indices, not as
+    Eq. 1 applied to the mean area and fetch, which is not the same number.
+    The seasonal overlap of Eq. 2 needs at least two months and is missing
+    below that; the day-night overlap of Eq. 3 needs a month whose daytime and
+    nighttime climatologies were both aggregated, and is written to both
+    period rows of the year since it belongs to neither alone.
+    """
+    years = sorted(
+        {int(months[index].year) for entries in populated.values() for index in entries}
+    )
+
+    rows: list[dict[str, Any]] = []
+    for year in years:
+        in_year = {
+            period: [index for index in populated[period] if months[index].year == year]
+            for period in periods
+        }
+
+        daynight = float("nan")
+        if DAYTIME in periods and NIGHTTIME in periods:
+            shared = sorted(set(in_year[DAYTIME]) & set(in_year[NIGHTTIME]))
+            if shared:
+                daynight = daynight_overlap(
+                    weights_all.isel(
+                        {_PERIOD_DIM: periods.index(DAYTIME), _MONTH_DIM: shared}
+                    ),
+                    weights_all.isel(
+                        {_PERIOD_DIM: periods.index(NIGHTTIME), _MONTH_DIM: shared}
+                    ),
+                )
+
+        for pi, period in enumerate(periods):
+            indices = in_year[period]
+            if not indices:
+                continue
+            metrics = [monthly_metrics[(index, period)] for index in indices]
+
+            row = _blank_row()
+            row.update(
+                site=site,
+                year=year,
+                period=period,
+                variable=FOOTPRINT_VARIABLE,
+                scope=SITE_YEAR_SCOPE,
+                kind=CLIMATOLOGY_KIND,
+                fetch=float(np.mean([entry.fetch for entry in metrics])),
+                area=float(np.mean([entry.area for entry in metrics])),
+                symmetry=float(np.mean([entry.symmetry for entry in metrics])),
+                n_cells=int(round(float(np.mean([entry.n_cells for entry in metrics])))),
+                seasonal_overlap=(
+                    seasonal_overlap(
+                        weights_all.isel({_PERIOD_DIM: pi, _MONTH_DIM: indices})
+                    )
+                    if len(indices) > 1
+                    else float("nan")
+                ),
+                daynight_overlap=daynight,
+            )
+            rows.append(row)
+    return rows
+
+
+def _site_rows(
+    weights_all: xr.DataArray,
+    periods: Sequence[str],
+    populated: Mapping[str, Sequence[int]],
+    pairs: Mapping[str, Sequence[Mapping[str, Any]]],
+    landcover_field: xr.DataArray | None,
+    x: np.ndarray,
+    y: np.ndarray,
+    radii: Sequence[float],
+    alpha: float,
+    fraction: float,
+    landcover_name: str,
+    continuous_name: str,
+    min_matches: int,
+    ci_level: float,
+    ci_method: str,
+    site: Any,
+) -> list[dict[str, Any]]:
+    """
+    Build the site-level rows: the pooled land cover and the regression.
+
+    Parameters
+    ----------
+    weights_all : xarray.DataArray
+        Every climatology, dims ``(month, period, x, y)``.
+    periods : sequence of str
+        The ``period`` coordinate.
+    populated : mapping
+        Period -> positions along ``month`` that were aggregated.
+    pairs : mapping
+        Period -> the matched rows :func:`continuous_representativeness` takes.
+    landcover_field : xarray.DataArray or None
+        Categorical raster on the footprint grid, or None to skip.
+    x, y : numpy.ndarray
+        Cell-centre offsets from the tower [m].
+    radii : sequence of float
+        Target-area radii [m].
+    alpha : float
+        Significance level for both classifications.
+    fraction : float
+        Source-weight fraction the climatologies were truncated at.
+    landcover_name, continuous_name : str
+        Labels for the ``variable`` index level.
+    min_matches : int
+        Fewest matched scenes a regression may be fitted on.
+    ci_level : float
+        Confidence level of the interval limits.
+    ci_method : str
+        Interval estimator.
+    site : Any
+        Site label for the index.
+
+    Returns
+    -------
+    list of dict
+        The Dataset S4 and S6 rows, ``year`` and ``month`` missing on both.
+    """
+    rows: list[dict[str, Any]] = []
+    for pi, period in enumerate(periods):
+        indices = list(populated[period])
+        if not indices:
+            continue
+
+        template = _blank_row()
+        template.update(site=site, period=period)
+
+        if landcover_field is not None:
+            pooled = _pooled_climatology(weights_all.isel({_PERIOD_DIM: pi}), indices)
+            if pooled is not None:
+                rows.extend(
+                    _categorical_rows(
+                        pooled.assign_attrs(contour_fraction=fraction),
+                        landcover_field,
+                        x,
+                        y,
+                        radii,
+                        alpha,
+                        template,
+                        SITE_SCOPE,
+                        landcover_name,
+                        f"Pooled over every {period} climatology",
+                    )
+                )
+
+        if not pairs[period]:
+            continue
+        fits = continuous_representativeness(
+            pd.DataFrame(list(pairs[period])),
+            radii=radii,
+            min_matches=min_matches,
+            alpha=alpha,
+            ci_level=ci_level,
+            ci_method=ci_method,
+        )
+        for record in fits.itertuples(index=False):
+            row = dict(template)
+            row.update(
+                radius=float(record.radius),
+                variable=continuous_name,
+                scope=SITE_SCOPE,
+                kind=CONTINUOUS_KIND,
+                slope=float(record.slope),
+                slope_lower=float(record.slope_lower),
+                slope_upper=float(record.slope_upper),
+                intercept=float(record.intercept),
+                intercept_lower=float(record.intercept_lower),
+                intercept_upper=float(record.intercept_upper),
+                r_squared=float(record.r_squared),
+                p_value=float(record.p_value),
+                rmse=float(record.rmse),
+                mae=float(record.mae),
+                n=int(record.n),
+                sufficient=bool(record.sufficient),
+                level=record.level,
+            )
+            rows.append(row)
+    return rows
+
+
+# ------------------------------
+# Publication tables (Datasets S4-S6)
+# ------------------------------
+
+#: Column order of each reconstructed supplementary table, keyed by the
+#: dataset number Chu et al. (2021) publish it under. See
+#: :func:`representativeness_table` for what each holds.
+CHU_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "S4": (
+        "SITE_ID",
+        "PERIOD",
+        "TARGET_AREA",
+        "PRODUCT",
+        "DOM_LC",
+        "P_FOOTPRINT",
+        "P_TARGET",
+        "P_DIFF",
+        "CHI2",
+        "DF",
+        "P_VALUE",
+        "REP_LC",
+    ),
+    "S5": (
+        "SITE_ID",
+        "YEAR",
+        "MONTH",
+        "PERIOD",
+        "TARGET_AREA",
+        "VARIABLE",
+        "TIMESTAMP",
+        "EVI_FOOTPRINT",
+        "EVI_TARGET",
+        "DELTA",
+        "WITHIN_THRESHOLD",
+    ),
+    "S6": (
+        "SITE_ID",
+        "PERIOD",
+        "TARGET_AREA",
+        "VARIABLE",
+        "N",
+        "INTERCEPT",
+        "INTERCEPT_LCL",
+        "INTERCEPT_UCL",
+        "SLOPE",
+        "SLOPE_LCL",
+        "SLOPE_UCL",
+        "R2",
+        "RMSE",
+        "MAE",
+        "REP_EVI",
+    ),
+}
+
+#: File formats :func:`export_representativeness_tables` writes.
+_TABLE_FORMATS: dict[str, str] = {"csv": ".csv", "parquet": ".parquet"}
+
+
+def _table_s4(results: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reshape the site-level land-cover rows into the Dataset S4 layout.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        Output of :func:`assess_representativeness`, index reset.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``CHU_TABLE_COLUMNS["S4"]``, with the shares as percentages.
+    """
+    rows = results[
+        (results["scope"] == SITE_SCOPE) & (results["kind"] == CATEGORICAL_KIND)
+    ]
+    table = pd.DataFrame(index=rows.index)
+    table["SITE_ID"] = rows["site"]
+    table["PERIOD"] = rows["period"]
+    table["TARGET_AREA"] = rows["radius"]
+    table["PRODUCT"] = rows["variable"]
+    table["DOM_LC"] = rows["dominant_class"]
+    table["P_FOOTPRINT"] = 100.0 * rows["value_footprint"]
+    table["P_TARGET"] = 100.0 * rows["value_target"]
+    table["P_DIFF"] = table["P_FOOTPRINT"] - table["P_TARGET"]
+    table["CHI2"] = rows["chi2"]
+    table["DF"] = rows["dof"]
+    table["P_VALUE"] = rows["p_value"]
+    table["REP_LC"] = rows["level"].map(_level_label)
+    return table.reset_index(drop=True)
+
+
+def _table_s5(results: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reshape the per-period continuous rows into the Dataset S5 layout.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        Output of :func:`assess_representativeness`, index reset.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``CHU_TABLE_COLUMNS["S5"]``, with the bias as a percentage
+        and the month as its number in the year.
+    """
+    rows = results[
+        (results["scope"] == PERIOD_SCOPE) & (results["kind"] == CONTINUOUS_KIND)
+    ]
+    table = pd.DataFrame(index=rows.index)
+    table["SITE_ID"] = rows["site"]
+    table["YEAR"] = rows["year"]
+    table["MONTH"] = pd.to_datetime(rows["month"]).dt.month.astype("Int64")
+    table["PERIOD"] = rows["period"]
+    table["TARGET_AREA"] = rows["radius"]
+    table["VARIABLE"] = rows["variable"]
+    table["TIMESTAMP"] = rows["time"]
+    table["EVI_FOOTPRINT"] = rows["value_footprint"]
+    table["EVI_TARGET"] = rows["value_target"]
+    table["DELTA"] = 100.0 * rows["bias"]
+    table["WITHIN_THRESHOLD"] = rows["within_threshold"]
+    return table.reset_index(drop=True)
+
+
+def _table_s6(results: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reshape the site-level regression rows into the Dataset S6 layout.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        Output of :func:`assess_representativeness`, index reset.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``CHU_TABLE_COLUMNS["S6"]``, in the order of Table 1.
+    """
+    rows = results[
+        (results["scope"] == SITE_SCOPE) & (results["kind"] == CONTINUOUS_KIND)
+    ]
+    table = pd.DataFrame(index=rows.index)
+    table["SITE_ID"] = rows["site"]
+    table["PERIOD"] = rows["period"]
+    table["TARGET_AREA"] = rows["radius"]
+    table["VARIABLE"] = rows["variable"]
+    table["N"] = rows["n"]
+    table["INTERCEPT"] = rows["intercept"]
+    table["INTERCEPT_LCL"] = rows["intercept_lower"]
+    table["INTERCEPT_UCL"] = rows["intercept_upper"]
+    table["SLOPE"] = rows["slope"]
+    table["SLOPE_LCL"] = rows["slope_lower"]
+    table["SLOPE_UCL"] = rows["slope_upper"]
+    table["R2"] = rows["r_squared"]
+    table["RMSE"] = rows["rmse"]
+    table["MAE"] = rows["mae"]
+    table["REP_EVI"] = rows["level"].map(_level_label)
+    return table.reset_index(drop=True)
+
+
+#: The reshapers, keyed by dataset number.
+_TABLE_BUILDERS = {"S4": _table_s4, "S5": _table_s5, "S6": _table_s6}
+
+
+def _level_label(level: Any) -> Any:
+    """
+    Render a representativeness level as the plain string a table carries.
+
+    Parameters
+    ----------
+    level : Level, str, or pandas.NA
+        A cell of the ``level`` column.
+
+    Returns
+    -------
+    str or pandas.NA
+        ``"high"``, ``"medium"``, ``"low"``, or the missing value unchanged.
+    """
+    if isinstance(level, Level):
+        return level.value
+    return level if isinstance(level, str) else pd.NA
+
+
+def representativeness_table(results: pd.DataFrame, dataset: str) -> pd.DataFrame:
+    """
+    Reshape a tidy result frame into one of the published table layouts.
+
+    Chu et al. (2021) release their per-site statistics as Datasets S4-S6 on
+    Zenodo (doi:10.5281/zenodo.4015350). This puts the corresponding rows of
+    :func:`assess_representativeness` into the same shape and units, so that a
+    local analysis can be read next to, or concatenated with, the published
+    tables.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        Output of :func:`assess_representativeness`, indexed or with the index
+        already reset.
+    dataset : {"S4", "S5", "S6"}
+        Which table to build, case-insensitively:
+
+        ``"S4"``
+            Land-cover statistics: the dominant class, P_footprint, P_target,
+            their difference, and the chi-square test, per period and target
+            area. Built from the ``scope="site"`` categorical rows.
+        ``"S5"``
+            Site-month vegetation-index statistics: the footprint-weighted and
+            target-area values and the sensor location bias Delta, per matched
+            scene, period, and target area. Built from the ``scope="period"``
+            continuous rows.
+        ``"S6"``
+            Site-level model II regressions in the layout of Table 1:
+            intercept and slope with their confidence limits, R², RMSE, and
+            MAE. Built from the ``scope="site"`` continuous rows.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The requested table over a fresh :class:`~pandas.RangeIndex`, with the
+        columns of ``CHU_TABLE_COLUMNS[dataset]`` in that order. Empty, but
+        still carrying every column, when `results` holds no rows of that
+        kind -- an analysis run without a land-cover raster has an empty S4.
+
+    Raises
+    ------
+    KeyError
+        If `dataset` is not one of the three.
+    ValueError
+        If `results` is missing the columns of a tidy result frame.
+
+    See Also
+    --------
+    assess_representativeness : Produces the frame this reshapes.
+    export_representativeness_tables : Writes these tables to disk.
+
+    Notes
+    -----
+    The shares of S4 and the bias of S5 are converted to the percentages the
+    paper reports, while the tidy frame keeps them as fractions like the rest
+    of this module. Units are the only transformation: no row is dropped,
+    reordered, or recomputed.
+
+    The column *names* are reconstructed from the paper's text -- Sects. 2.4
+    and 3.3, and Table 1 -- rather than copied from the Zenodo archive, which
+    this package does not ship or read. Treat them as a faithful layout rather
+    than a byte-for-byte match, and check against the archive before merging
+    on column names. Two columns have no counterpart in the paper's own tables
+    and are added because a local analysis needs them: ``PRODUCT`` and
+    ``VARIABLE``, naming the raster each row came from, and ``TIMESTAMP``, the
+    retrieval time of the matched scene, which the paper resolves only to the
+    month.
+
+    Examples
+    --------
+    >>> table = representativeness_table(results, "S6")   # doctest: +SKIP
+    >>> table[["TARGET_AREA", "SLOPE", "R2", "REP_EVI"]]  # doctest: +SKIP
+    """
+    key = str(dataset).upper()
+    if key not in _TABLE_BUILDERS:
+        raise KeyError(
+            f"dataset must be one of {sorted(_TABLE_BUILDERS)}, got "
+            f"{dataset!r}."
+        )
+
+    flat = results.reset_index() if results.index.nlevels > 1 else results.copy()
+    missing = [
+        column
+        for column in list(RESULT_INDEX) + ["scope", "kind"]
+        if column not in flat.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"results is missing the column(s) {missing}; pass the frame "
+            f"assess_representativeness returns, indexed or reset."
+        )
+
+    table = _TABLE_BUILDERS[key](flat)
+    return table.reindex(columns=list(CHU_TABLE_COLUMNS[key]))
+
+
+def export_representativeness_tables(
+    results: pd.DataFrame,
+    directory: str | Path,
+    datasets: Sequence[str] = ("S4", "S5", "S6"),
+    fmt: str = "csv",
+    prefix: str = "representativeness",
+    write_empty: bool = False,
+    **kwargs: Any,
+) -> dict[str, Path]:
+    """
+    Write the published-schema tables of a result frame to CSV or Parquet.
+
+    A thin writer over :func:`representativeness_table`: it builds each
+    requested table and writes it as ``<prefix>_<dataset>.<ext>``, so that the
+    outputs sit next to Chu et al.'s Datasets S4-S6 (Zenodo,
+    doi:10.5281/zenodo.4015350) with matching columns and units.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        Output of :func:`assess_representativeness`. Frames from several sites
+        may be concatenated first; the ``SITE_ID`` column keeps them apart.
+    directory : str or pathlib.Path
+        Directory to write into. Created, parents included, if it does not
+        exist.
+    datasets : sequence of str, default ("S4", "S5", "S6")
+        Which tables to write, from ``"S4"``, ``"S5"``, and ``"S6"``.
+    fmt : {"csv", "parquet"}, default "csv"
+        Output format. Parquet needs ``pyarrow`` or ``fastparquet``, and
+        preserves the nullable integer and boolean dtypes that CSV flattens
+        to text.
+    prefix : str, default "representativeness"
+        Leading part of each file name.
+    write_empty : bool, default False
+        Whether to write a header-only file for a table with no rows -- an S4
+        from a run without a land-cover raster, say. When False such a table
+        is skipped and simply does not appear in the returned mapping.
+    **kwargs
+        Passed through to :meth:`pandas.DataFrame.to_csv` or
+        :meth:`~pandas.DataFrame.to_parquet`. ``index=False`` is set for CSV
+        unless overridden.
+
+    Returns
+    -------
+    dict of str to pathlib.Path
+        Dataset number -> the path written, in the order requested. Datasets
+        skipped as empty are absent.
+
+    Raises
+    ------
+    KeyError
+        If `datasets` names a table that is not one of the three.
+    ValueError
+        If `fmt` is neither ``"csv"`` nor ``"parquet"``, or if `results` is
+        not a tidy result frame.
+    ImportError
+        If Parquet was asked for and no Parquet engine is installed.
+
+    See Also
+    --------
+    representativeness_table : Builds one table without writing it.
+    assess_representativeness : Produces the frame this writes.
+    export_representativeness_gpkg : Writes the same results as target-area
+        discs for mapping.
+
+    Notes
+    -----
+    The tidy frame itself is the thing to keep for further analysis -- these
+    tables drop the climatology metrics and the per-month land-cover rows,
+    which have no counterpart in the published supplement. Write it alongside
+    with ``results.to_parquet(...)`` when the full record matters.
+
+    Examples
+    --------
+    >>> written = export_representativeness_tables(      # doctest: +SKIP
+    ...     results, "out/", fmt="parquet", prefix="US-Utj"
+    ... )
+    >>> sorted(written)                                  # doctest: +SKIP
+    ['S4', 'S5', 'S6']
+    """
+    if fmt not in _TABLE_FORMATS:
+        raise ValueError(
+            f"fmt must be one of {sorted(_TABLE_FORMATS)}, got {fmt!r}."
+        )
+
+    target = Path(directory)
+    target.mkdir(parents=True, exist_ok=True)
+
+    written: dict[str, Path] = {}
+    for dataset in datasets:
+        key = str(dataset).upper()
+        table = representativeness_table(results, key)
+        if table.empty and not write_empty:
+            continue
+
+        path = target / f"{prefix}_{key}{_TABLE_FORMATS[fmt]}"
+        if fmt == "csv":
+            table.to_csv(path, **{"index": False, **kwargs})
+        else:
+            table.to_parquet(path, **kwargs)
+        written[key] = path
+    return written
