@@ -58,7 +58,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy.stats import chisquare
+from scipy.stats import chisquare, pearsonr
+from scipy.stats import t as _student_t
 
 from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
 from .openet_masking import GridGeometry, footprint_grid_geometry
@@ -67,11 +68,13 @@ __all__ = [
     "TARGET_RADII",
     "ASYMMETRY_THRESHOLD",
     "BIAS_THRESHOLD",
+    "MIN_MATCHES",
     "Level",
     "ClimatologyMetrics",
     "WeightedValue",
     "CategoricalResult",
     "ContinuousResult",
+    "RMAFit",
     "contour_level_for_fraction",
     "footprint_contour_mask",
     "truncate_to_contour",
@@ -95,10 +98,12 @@ __all__ = [
     "target_area_composition",
     "sensor_location_bias",
     "sensor_location_bias_series",
+    "rma_regression",
     "model2_regression",
     "classify_categorical",
     "classify_continuous",
     "categorical_representativeness",
+    "continuous_representativeness",
     "evaluate_landcover",
     "evaluate_vegetation_index",
     "evaluate_representativeness",
@@ -130,6 +135,10 @@ DEFAULT_ALPHA: float = 0.05
 #: Sensor location bias threshold |Δ| considered representative, Sect. 2.4 [-].
 #: Chu et al. (2021) adopt the 10 % of Chen et al. (2011) and Kim et al. (2006).
 BIAS_THRESHOLD: float = 0.10
+
+#: Matched periods Chu et al. (2021) required before fitting a site-level
+#: regression, Sect. 2.4; 166 of the 214 sites cleared it.
+MIN_MATCHES: int = 6
 
 #: Default name of the dimension the monthly climatologies of a site-year are
 #: stacked over, for the overlap indices of Eqs. 2-3.
@@ -441,6 +450,62 @@ class ContinuousResult:
     level: Level
     bias: np.ndarray
     within_threshold: float
+
+
+@dataclass(frozen=True)
+class RMAFit:
+    """
+    A reduced major axis fit and its confidence intervals.
+
+    What :func:`rma_regression` returns: the model II regression of Eq. 7,
+    with the interval estimates the paper's ``lmodel2`` reports alongside the
+    point estimates of Table 1.
+
+    Attributes
+    ----------
+    slope : float
+        beta_1, the RMA slope. ``nan`` when either variable is constant.
+    intercept : float
+        beta_0, ``mean(y) - slope * mean(x)``.
+    r_squared : float
+        Squared Pearson correlation of the two inputs. Note that this is a
+        property of the correlation alone: it does not describe the scatter
+        about the RMA line, and it is the same whichever variable is called
+        the predictor.
+    p_value : float
+        Two-sided significance of that correlation, testing rho = 0. The RMA
+        slope has no null of its own -- it cannot be zero -- so this is the
+        test the paper's MEDIUM criterion uses.
+    n : int
+        Number of finite pairs the fit rests on.
+    slope_ci : tuple of float
+        Lower and upper confidence limits on `slope`, in that order.
+    intercept_ci : tuple of float
+        Lower and upper confidence limits on `intercept`, in that order.
+    ci_level : float
+        Confidence level the two intervals were computed at, e.g. 0.95.
+    ci_method : str
+        ``"analytical"`` or ``"bootstrap"``, the estimator used for them.
+
+    See Also
+    --------
+    rma_regression : Produces this fit.
+    classify_continuous : Turns it into the three-level index of Sect. 2.4.
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Eq. 7.
+    """
+
+    slope: float
+    intercept: float
+    r_squared: float
+    p_value: float
+    n: int
+    slope_ci: tuple[float, float]
+    intercept_ci: tuple[float, float]
+    ci_level: float
+    ci_method: str
 
 
 # ------------------------------
@@ -3252,6 +3317,258 @@ def sensor_location_bias_series(
     return series
 
 
+def _finite_pairs(
+    x: np.ndarray | Sequence[float],
+    y: np.ndarray | Sequence[float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Drop the pairs either variable is missing from.
+
+    Parameters
+    ----------
+    x, y : array_like
+        The two variables, of equal length.
+
+    Returns
+    -------
+    x, y : numpy.ndarray
+        The pairs where both values are finite, in their original order.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length.
+    """
+    xs = np.asarray(x, dtype=float).ravel()
+    ys = np.asarray(y, dtype=float).ravel()
+    if xs.size != ys.size:
+        raise ValueError(
+            f"x and y must pair up one for one, got {xs.size} and {ys.size} "
+            f"values. A regression of Eq. 7 runs over matched periods, so "
+            f"drop the unmatched ones before fitting."
+        )
+    keep = np.isfinite(xs) & np.isfinite(ys)
+    return xs[keep], ys[keep]
+
+
+def _rma_slope_intercept(
+    x: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Evaluate the RMA slope and intercept, vectorised over resamples.
+
+    Parameters
+    ----------
+    x, y : numpy.ndarray
+        Finite values with the pairs along the last axis. A 2-D input is read
+        as one resample per row.
+
+    Returns
+    -------
+    slope, intercept : numpy.ndarray
+        One estimate per row, ``nan`` where a row leaves the slope undefined:
+        either variable constant, or a correlation of exactly zero, which
+        fixes the magnitude of the RMA slope but not its sign.
+    """
+    mean_x = x.mean(axis=-1)
+    mean_y = y.mean(axis=-1)
+    dx = x - mean_x[..., None]
+    dy = y - mean_y[..., None]
+    # Population moments; the ddof cancels in every ratio taken below.
+    sd_x = np.sqrt((dx**2).mean(axis=-1))
+    sd_y = np.sqrt((dy**2).mean(axis=-1))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = (dx * dy).mean(axis=-1) / (sd_x * sd_y)
+        slope = np.sign(r) * sd_y / sd_x
+    slope = np.where(np.isfinite(r) & (r != 0.0), slope, np.nan)
+    return slope, mean_y - slope * mean_x
+
+
+def rma_regression(
+    x: np.ndarray | Sequence[float],
+    y: np.ndarray | Sequence[float],
+    ci_level: float = 0.95,
+    ci_method: str = "analytical",
+    n_boot: int = 2000,
+    random_state: int | np.random.Generator | None = None,
+) -> RMAFit:
+    """
+    Fit the reduced major axis (model II) regression of Eq. 7.
+
+    .. math:: y \\sim \\beta_0 + \\beta_1 x
+
+    The reduced major axis -- equivalently the standard major axis, the
+    ``"SMA"`` row of R's ``lmodel2`` -- minimises the triangular areas between
+    the points and the line rather than the vertical residuals alone. Its
+    slope is the ordinary least squares slope divided by the Pearson
+    correlation coefficient, i.e. ``sign(r) * sd(y) / sd(x)``.
+
+    Parameters
+    ----------
+    x : array_like
+        Predictor. In Eq. 7 the footprint-weighted values of Eq. 5.
+    y : array_like
+        Response, of the same length as `x`. In Eq. 7 the target-area means.
+    ci_level : float, default 0.95
+        Confidence level of the reported intervals, strictly between 0 and 1.
+    ci_method : {'analytical', 'bootstrap'}, default 'analytical'
+        How to bracket the slope. ``'analytical'`` uses the closed form of
+        McArdle (1988) that ``lmodel2`` reports; ``'bootstrap'`` takes
+        percentile limits over `n_boot` paired resamples, which does not
+        assume bivariate normality but needs a decent `n`.
+    n_boot : int, default 2000
+        Number of resamples, used only when ``ci_method='bootstrap'``.
+    random_state : int, numpy.random.Generator, or None, optional
+        Seed or generator for the bootstrap, for reproducible limits.
+
+    Returns
+    -------
+    RMAFit
+        The slope, intercept, R-squared, p-value, and the two confidence
+        intervals.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length; if fewer than three finite pairs
+        remain, leaving no residual degrees of freedom; if `ci_level` is not
+        strictly between 0 and 1; if `ci_method` is neither of the two
+        accepted values; or if `n_boot` is not positive.
+
+    See Also
+    --------
+    model2_regression : The four-value form of this fit.
+    continuous_representativeness : Applies it per target radius.
+    classify_continuous : Turns slope, intercept, and R-squared into a Level.
+
+    Notes
+    -----
+    **Ordinary least squares must not be substituted here.** OLS assumes the
+    predictor is measured without error and minimises only the vertical
+    residuals, so its slope is ``r`` times this one: with the R-squared of
+    0.94 down to 0.71 that Chu et al. (2021) report across target radii, an
+    OLS slope would sit roughly 3 % to 16 % below the RMA slope on the same
+    data -- always shallower, never steeper. Both variables here are spatial
+    averages of the same noisy raster and both carry error, so that
+    attenuation is a bias, not a difference of convention. It runs the wrong
+    way for this analysis twice over: it deepens the apparent
+    footprint-to-target-area bias of Sect. 3.3, and it pushes sites out of the
+    ``0.9 <= slope <= 1.1`` HIGH criterion of Sect. 2.4 for no reason but the
+    scatter. Table 1 is reproducible only against ``lmodel2``'s RMA.
+
+    R-squared and the p-value are those of the Pearson correlation. They are
+    symmetric in `x` and `y` and say nothing about the RMA line's own
+    residuals; the RMA slope cannot be zero, so the correlation's null is the
+    only meaningful one to test, which is what ``lmodel2`` reports.
+
+    Pairs where either value is non-finite are dropped before fitting. The
+    slope is returned as ``nan`` when either variable is constant, or when the
+    correlation is exactly zero and its sign cannot be taken -- ``lmodel2``
+    likewise refuses an SMA slope it cannot orient. R-squared and the p-value
+    are still reported in the second case.
+
+    Examples
+    --------
+    >>> footprint = [0.21, 0.35, 0.52, 0.66, 0.71, 0.44]
+    >>> target = [0.19, 0.33, 0.49, 0.62, 0.70, 0.41]
+    >>> fit = rma_regression(footprint, target)
+    >>> fit.slope_ci[0] < fit.slope < fit.slope_ci[1]
+    True
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Eq. 7.
+
+    Legendre, P. (2014). lmodel2: Model II Regression. R package version 1.7-2.
+
+    McArdle, B. H. (1988). The structural relationship: regression in biology.
+    *Canadian Journal of Zoology*, **66**, 2329-2339. Source of the analytical
+    interval.
+    """
+    if not 0.0 < float(ci_level) < 1.0:
+        raise ValueError(
+            f"ci_level must lie strictly between 0 and 1, got {ci_level!r}. "
+            f"Pass 0.95 for the 95 % intervals of Table 1."
+        )
+    if ci_method not in ("analytical", "bootstrap"):
+        raise ValueError(
+            f"ci_method must be 'analytical' or 'bootstrap', got {ci_method!r}."
+        )
+    if ci_method == "bootstrap" and int(n_boot) < 1:
+        raise ValueError(f"n_boot must be positive, got {n_boot!r}.")
+
+    xs, ys = _finite_pairs(x, y)
+    n = int(xs.size)
+    if n < 3:
+        raise ValueError(
+            f"A model II regression needs at least three finite pairs, got "
+            f"{n}. Chu et al. (2021) required six matched months before "
+            f"fitting a site at all; see continuous_representativeness."
+        )
+
+    level = float(ci_level)
+    if xs.std() == 0.0 or ys.std() == 0.0:
+        # No correlation is defined against a constant, so scipy would warn
+        # and hand back nan; say so directly instead.
+        r = float("nan")
+        p_value = float("nan")
+    else:
+        correlation = pearsonr(xs, ys)
+        r = float(correlation[0])
+        p_value = float(correlation[1])
+
+    slope_array, intercept_array = _rma_slope_intercept(xs, ys)
+    slope = float(slope_array)
+    intercept = float(intercept_array)
+    r_squared = float(r**2) if np.isfinite(r) else float("nan")
+
+    if not np.isfinite(slope):
+        slope_ci = (float("nan"), float("nan"))
+        intercept_ci = (float("nan"), float("nan"))
+    elif ci_method == "analytical":
+        # McArdle (1988), as reported by lmodel2: the slope limits are the
+        # point estimate scaled by sqrt(B + 1) -/+ sqrt(B).
+        t_crit = float(_student_t.ppf(0.5 + level / 2.0, n - 2))
+        b = t_crit**2 * (1.0 - r_squared) / (n - 2)
+        scale = np.array(
+            [np.sqrt(b + 1.0) - np.sqrt(b), np.sqrt(b + 1.0) + np.sqrt(b)]
+        )
+        limits = np.sort(slope * scale)
+        slope_ci = (float(limits[0]), float(limits[1]))
+        # The intercept is monotone in the slope through the centroid, so its
+        # limits are the slope's, reordered when the centroid flips them.
+        bounds = np.sort(ys.mean() - limits * xs.mean())
+        intercept_ci = (float(bounds[0]), float(bounds[1]))
+    else:
+        rng = np.random.default_rng(random_state)
+        draws = rng.integers(0, n, size=(int(n_boot), n))
+        boot_slope, boot_intercept = _rma_slope_intercept(xs[draws], ys[draws])
+        tail = 100.0 * (1.0 - level) / 2.0
+        if np.count_nonzero(np.isfinite(boot_slope)) < 2:
+            # Every resample was degenerate -- a near-constant variable, or
+            # too few distinct values to resample away from one.
+            slope_ci = (float("nan"), float("nan"))
+            intercept_ci = (float("nan"), float("nan"))
+        else:
+            low, high = np.nanpercentile(boot_slope, [tail, 100.0 - tail])
+            slope_ci = (float(low), float(high))
+            low, high = np.nanpercentile(boot_intercept, [tail, 100.0 - tail])
+            intercept_ci = (float(low), float(high))
+
+    return RMAFit(
+        slope=slope,
+        intercept=intercept,
+        r_squared=r_squared,
+        p_value=p_value,
+        n=n,
+        slope_ci=slope_ci,
+        intercept_ci=intercept_ci,
+        ci_level=level,
+        ci_method=ci_method,
+    )
+
+
 def model2_regression(
     footprint_values: np.ndarray | Sequence[float],
     target_values: np.ndarray | Sequence[float],
@@ -3294,8 +3611,13 @@ def model2_regression(
     Pairs where either value is non-finite are dropped before fitting. The RMA
     slope is undefined in sign when the correlation is zero; the sign is taken
     from the correlation, as ``lmodel2`` does.
+
+    This is :func:`rma_regression` reduced to four values; call that directly
+    for the confidence intervals of Table 1, and read its note on why ordinary
+    least squares cannot stand in for the fit.
     """
-    raise NotImplementedError
+    fit = rma_regression(footprint_values, target_values)
+    return fit.intercept, fit.slope, fit.r_squared, fit.p_value
 
 
 # ------------------------------
@@ -3385,8 +3707,16 @@ def classify_continuous(
     The intercept tolerance is absolute and calibrated to EVI's 0-1 range. A
     field on a different scale, e.g. land surface temperature in kelvin, needs
     a rescaled criterion before this classification is meaningful.
+
+    A degenerate fit -- too few distinct values to orient a slope, say --
+    arrives here as non-finite statistics, which fail every comparison below
+    and so fall through to LOW.
     """
-    raise NotImplementedError
+    if r_squared >= 0.8 and 0.9 <= slope <= 1.1 and -0.1 <= intercept <= 0.1:
+        return Level.HIGH
+    if r_squared >= 0.6 and p_value < alpha:
+        return Level.MEDIUM
+    return Level.LOW
 
 
 def _composition_chi_square(
@@ -3666,6 +3996,289 @@ def categorical_representativeness(
     frame.attrs["alpha"] = float(alpha)
     frame.attrs["footprint_composition"] = footprint
     return frame
+
+
+#: Columns :func:`continuous_representativeness` expects on its input frame.
+_PAIR_COLUMNS: tuple[str, ...] = ("time", "radius", "value_footprint", "value_target")
+
+
+def continuous_representativeness(
+    pairs: pd.DataFrame,
+    radii: Sequence[float] = TARGET_RADII,
+    min_matches: int = MIN_MATCHES,
+    alpha: float = DEFAULT_ALPHA,
+    ci_level: float = 0.95,
+    ci_method: str = "analytical",
+    n_boot: int = 2000,
+    random_state: int | np.random.Generator | None = None,
+) -> pd.DataFrame:
+    """
+    Evaluate continuous-field representativeness per target area, Sect. 2.4.
+
+    The continuous counterpart of :func:`categorical_representativeness`, and
+    the site-level step that follows :func:`sensor_location_bias_series`: the
+    matched periods of one site are regressed against each target radius by
+    Eq. 7 and classified HIGH, MEDIUM, or LOW by :func:`classify_continuous`.
+
+    .. math:: EVI_{target} \\sim \\beta_0 + \\beta_1 EVI_{footprint}
+
+    Parameters
+    ----------
+    pairs : pandas.DataFrame
+        Tidy frame of matched periods, one row per period and radius, with
+        columns
+
+        ``time``
+            Period label, carried only to identify the matches; the fit does
+            not use it and does not sort by it.
+        ``radius``
+            Target-area radius [m].
+        ``value_footprint``
+            Footprint-weighted value, EVI_footprint of Eq. 5.
+        ``value_target``
+            Target-area mean over the disc of that radius, EVI_target.
+
+        Exactly the frame :func:`sensor_location_bias_series` returns; any
+        further columns, ``delta`` and ``within_threshold`` among them, are
+        ignored.
+    radii : sequence of float, default TARGET_RADII
+        Target-area radii [m] to report, in the order given. Radii of `pairs`
+        not listed here are ignored.
+    min_matches : int, default 6
+        Fewest matched periods a radius may be fitted on. Below it the row is
+        reported with ``sufficient = False`` and a missing `level` rather than
+        a fitted one, following the paper, which regressed only the 166 of 214
+        sites holding at least six matches. Must be at least 3.
+    alpha : float, default 0.05
+        Significance level for the MEDIUM criterion.
+    ci_level : float, default 0.95
+        Confidence level of the reported interval limits.
+    ci_method : {'analytical', 'bootstrap'}, default 'analytical'
+        Interval estimator, passed to :func:`rma_regression`.
+    n_boot : int, default 2000
+        Number of resamples, used only when ``ci_method='bootstrap'``.
+    random_state : int, numpy.random.Generator, or None, optional
+        Seed or generator for the bootstrap.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per requested radius, in the order given, with columns
+
+        ``radius``
+            Target-area radius [m].
+        ``n``
+            Matched periods entering the row: rows of `pairs` at that radius
+            holding a finite value on both sides.
+        ``intercept``, ``slope``
+            beta_0 and beta_1 of Eq. 7. A slope below 1 means the footprint
+            saw systematically higher values than the target area, which held
+            at every radius in the paper.
+        ``r_squared``, ``p_value``
+            Squared Pearson correlation and its two-sided significance.
+        ``rmse``, ``mae``
+            Root mean square and mean absolute *difference* between the
+            footprint-weighted and target-area values, as in Table 1. These
+            describe the two series against the 1:1 line, not the residuals
+            about the fitted line, and so are reported whenever the radius
+            holds a match at all.
+        ``intercept_lower``, ``intercept_upper``, ``slope_lower``,
+        ``slope_upper``
+            Confidence limits at `ci_level`, the square-bracketed columns of
+            Table 1.
+        ``sufficient``
+            Whether ``n >= min_matches``, i.e. whether the row was fitted.
+        ``level``
+            :class:`Level` member, or ``pd.NA`` where `sufficient` is False.
+            ``HIGH`` when ``r_squared >= 0.8`` with slope in [0.9, 1.1] and
+            intercept in [-0.1, 0.1]; ``MEDIUM`` when ``r_squared >= 0.6`` and
+            ``p_value < alpha``; ``LOW`` otherwise.
+
+        ``DataFrame.attrs`` records ``min_matches``, ``alpha``, ``ci_level``,
+        and ``ci_method``.
+
+    Raises
+    ------
+    KeyError
+        If `pairs` is missing any of the four required columns.
+    ValueError
+        If `pairs` is not a DataFrame; if `radii` is empty or holds a radius
+        that is not positive and finite; or if `min_matches` is below 3, which
+        is the fewest pairs a regression can be fitted on at all.
+
+    See Also
+    --------
+    sensor_location_bias_series : Produces the frame this consumes.
+    rma_regression : The model II fit applied per radius.
+    classify_continuous : The three-level index applied here.
+    categorical_representativeness : The land-cover counterpart.
+
+    Notes
+    -----
+    A radius listed in `radii` but absent from `pairs` comes back with
+    ``n = 0`` and ``sufficient = False`` rather than raising, so a frame built
+    over a shorter set of radii still reports against the full series. Radii
+    are matched to within floating-point tolerance, so an integer 250 finds a
+    250.0 in the frame.
+
+    The insufficient rows are the point of `min_matches`: a site-radius with
+    three or four matches can be fitted, and will be classified LOW or HIGH by
+    the same criteria, but on evidence too thin to mean what the index says.
+    Chu et al. (2021) set the bar at six matched months, with a median of 13
+    per site. Filter on ``sufficient`` rather than on ``level.notna()`` if the
+    distinction matters downstream.
+
+    Rows are fitted independently per radius. That is deliberate: the
+    footprint-weighted value is the same across radii while the target-area
+    mean is not, so the systematic bias grows with the disc -- from a slope of
+    0.96 at 250 m to 0.80 at 3000 m in Table 1 -- and pooling radii would
+    average that trend away.
+
+    Examples
+    --------
+    >>> bias = sensor_location_bias_series(scenes, model.x, model.y)  # doctest: +SKIP
+    >>> site = continuous_representativeness(bias)                   # doctest: +SKIP
+    >>> site[["radius", "n", "slope", "r_squared", "level"]]         # doctest: +SKIP
+       radius   n  slope  r_squared   level
+    0   250.0  13  0.962      0.941    high
+    1   500.0  13  0.913      0.883  medium
+    ...
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4,
+    Table 1.
+    """
+    if not isinstance(pairs, pd.DataFrame):
+        raise ValueError(
+            f"pairs must be a tidy DataFrame of matched periods with columns "
+            f"{list(_PAIR_COLUMNS)}, got {type(pairs).__name__}. "
+            f"sensor_location_bias_series returns one."
+        )
+    missing = [column for column in _PAIR_COLUMNS if column not in pairs.columns]
+    if missing:
+        raise KeyError(
+            f"pairs is missing the column(s) {missing}; a row of matched "
+            f"periods needs {list(_PAIR_COLUMNS)}."
+        )
+    if int(min_matches) < 3:
+        raise ValueError(
+            f"min_matches must be at least 3, the fewest pairs a regression "
+            f"can be fitted on, got {min_matches!r}. Chu et al. (2021) used 6."
+        )
+
+    radii_values = [float(radius) for radius in radii]
+    if not radii_values:
+        raise ValueError(
+            "radii holds no target areas, so there is nothing to compare the "
+            "footprint against. Pass at least one radius, e.g. TARGET_RADII."
+        )
+    for radius in radii_values:
+        if not np.isfinite(radius) or radius <= 0.0:
+            raise ValueError(
+                f"Every target radius must be positive and finite, got "
+                f"{radius!r}."
+            )
+
+    threshold = int(min_matches)
+    frame_radii = pairs["radius"].to_numpy(dtype=float)
+    footprint_all = pairs["value_footprint"].to_numpy(dtype=float)
+    target_all = pairs["value_target"].to_numpy(dtype=float)
+
+    rows = []
+    for radius in radii_values:
+        here = np.isclose(frame_radii, radius, rtol=1e-9, atol=0.0)
+        footprint, target = _finite_pairs(footprint_all[here], target_all[here])
+        n = int(footprint.size)
+
+        row: dict[str, Any] = {
+            "radius": radius,
+            "n": n,
+            "intercept": float("nan"),
+            "slope": float("nan"),
+            "r_squared": float("nan"),
+            "p_value": float("nan"),
+            "rmse": float("nan"),
+            "mae": float("nan"),
+            "intercept_lower": float("nan"),
+            "intercept_upper": float("nan"),
+            "slope_lower": float("nan"),
+            "slope_upper": float("nan"),
+            "sufficient": n >= threshold,
+            "level": pd.NA,
+        }
+
+        if n:
+            # Against the 1:1 line, as in Table 1, not about the fitted line.
+            difference = target - footprint
+            row["rmse"] = float(np.sqrt(np.mean(difference**2)))
+            row["mae"] = float(np.mean(np.abs(difference)))
+
+        if row["sufficient"]:
+            fit = rma_regression(
+                footprint,
+                target,
+                ci_level=ci_level,
+                ci_method=ci_method,
+                n_boot=n_boot,
+                random_state=random_state,
+            )
+            row.update(
+                intercept=fit.intercept,
+                slope=fit.slope,
+                r_squared=fit.r_squared,
+                p_value=fit.p_value,
+                intercept_lower=fit.intercept_ci[0],
+                intercept_upper=fit.intercept_ci[1],
+                slope_lower=fit.slope_ci[0],
+                slope_upper=fit.slope_ci[1],
+                level=classify_continuous(
+                    fit.r_squared, fit.slope, fit.intercept, fit.p_value, alpha
+                ),
+            )
+        rows.append(row)
+
+    results = pd.DataFrame(
+        rows,
+        columns=[
+            "radius",
+            "n",
+            "intercept",
+            "slope",
+            "r_squared",
+            "p_value",
+            "rmse",
+            "mae",
+            "intercept_lower",
+            "intercept_upper",
+            "slope_lower",
+            "slope_upper",
+            "sufficient",
+            "level",
+        ],
+    )
+    results = results.astype(
+        {
+            "radius": float,
+            "n": int,
+            "intercept": float,
+            "slope": float,
+            "r_squared": float,
+            "p_value": float,
+            "rmse": float,
+            "mae": float,
+            "intercept_lower": float,
+            "intercept_upper": float,
+            "slope_lower": float,
+            "slope_upper": float,
+            "sufficient": bool,
+        }
+    )
+    results.attrs["min_matches"] = threshold
+    results.attrs["alpha"] = float(alpha)
+    results.attrs["ci_level"] = float(ci_level)
+    results.attrs["ci_method"] = ci_method
+    return results
 
 
 # ------------------------------
