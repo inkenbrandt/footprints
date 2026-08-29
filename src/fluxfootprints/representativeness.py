@@ -58,6 +58,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import xarray as xr
+from scipy.stats import chisquare
 
 from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
 from .openet_masking import GridGeometry, footprint_grid_geometry
@@ -97,6 +98,7 @@ __all__ = [
     "model2_regression",
     "classify_categorical",
     "classify_continuous",
+    "categorical_representativeness",
     "evaluate_landcover",
     "evaluate_vegetation_index",
     "evaluate_representativeness",
@@ -3338,7 +3340,14 @@ def classify_categorical(
     >>> classify_categorical(92.0, 61.0, 0.31)   # doctest: +SKIP
     <Level.MEDIUM: 'medium'>
     """
-    raise NotImplementedError
+    # A non-finite p-value -- an undefined test -- fails this comparison and
+    # so falls through to LOW, as does a non-finite percentage below.
+    if p_value >= alpha:
+        if p_footprint >= 80.0 and p_target >= 80.0:
+            return Level.HIGH
+        if p_footprint >= 50.0 and p_target >= 50.0:
+            return Level.MEDIUM
+    return Level.LOW
 
 
 def classify_continuous(
@@ -3378,6 +3387,285 @@ def classify_continuous(
     a rescaled criterion before this classification is meaningful.
     """
     raise NotImplementedError
+
+
+def _composition_chi_square(
+    footprint: pd.Series,
+    target: pd.Series,
+) -> tuple[float, float, int]:
+    """
+    Compare a footprint-weighted and a target-area composition, Sect. 2.4.
+
+    Parameters
+    ----------
+    footprint : pandas.Series
+        Footprint-weighted class fractions from
+        :func:`footprint_weighted_composition`.
+    target : pandas.Series
+        Target-area class fractions from :func:`target_area_composition`,
+        whose ``attrs["n_cells"]`` supplies the sample size.
+
+    Returns
+    -------
+    chi2 : float
+        Chi-square statistic. ``inf`` when the footprint sees a class the
+        target area holds none of; ``nan`` when the target area holds no
+        classified cell to test against.
+    p_value : float
+        Upper-tail probability. ``0.0`` alongside an infinite statistic,
+        ``1.0`` when both compositions consist of the same single class, and
+        ``nan`` alongside a ``nan`` statistic.
+    dof : int
+        Degrees of freedom, one less than the number of classes tested.
+
+    Notes
+    -----
+    A chi-square test needs counts, but a footprint-weighted composition is a
+    continuous share of source weight with no natural sample size -- the cells
+    under it are not independent draws, and their count depends on the grid
+    rather than on the landscape. Both compositions are therefore scaled to
+    **pseudo-counts** by the same sample size, the number of classified cells
+    inside the target area, and the footprint's counts are tested against the
+    target area's as expectations. That choice makes the test well posed and
+    puts the two compositions on one footing, but it fixes the power of the
+    test by the grid: a finer grid raises the cell count, hence the counts,
+    hence the statistic, for compositions that have not changed. Read the
+    p-value as a comparison against the paper's fixed 30 m Landsat grid, not
+    as an absolute significance.
+
+    Classes absent from both compositions are dropped rather than entered as
+    matching zeros. Keeping them would inflate the degrees of freedom with
+    classes the analysis never saw -- a raster carrying all 16 consolidated
+    groups of Table S6 would spend degrees of freedom on the dozen a given
+    site holds nowhere -- which weakens the test regardless of the landscape.
+    Taking the union of the two indices drops them by construction.
+    """
+    n_cells = int(target.attrs.get("n_cells", 0))
+    classes = footprint.index.union(target.index)
+    dof = int(classes.size) - 1
+
+    if n_cells <= 0 or classes.size == 0:
+        return float("nan"), float("nan"), max(dof, 0)
+
+    observed = (
+        footprint.reindex(classes, fill_value=0.0).to_numpy(dtype=float) * n_cells
+    )
+    expected = target.reindex(classes, fill_value=0.0).to_numpy(dtype=float) * n_cells
+
+    if dof == 0:
+        # One class, held by both compositions in full: nothing can differ.
+        return 0.0, 1.0, 0
+    if np.any(expected <= 0.0):
+        # A class the footprint sees and the target area holds none of. Its
+        # term is unbounded, so the compositions cannot be reconciled.
+        return float("inf"), 0.0, dof
+
+    result = chisquare(observed, expected)
+    return float(result.statistic), float(result.pvalue), dof
+
+
+def categorical_representativeness(
+    w: xr.DataArray | np.ndarray,
+    landcover: xr.DataArray | np.ndarray,
+    x: np.ndarray | xr.DataArray,
+    y: np.ndarray | xr.DataArray,
+    radii: Sequence[float] = TARGET_RADII,
+    alpha: float = DEFAULT_ALPHA,
+) -> pd.DataFrame:
+    """
+    Evaluate land-cover representativeness against each target area, Sect. 2.4.
+
+    The categorical counterpart of :func:`sensor_location_bias`. The dominant
+    land-cover type -- the class holding the largest footprint-weighted share
+    -- is identified once, since it does not depend on the target area; its
+    share within each disc is then read off, the full compositions are
+    compared with a chi-square test, and each radius is classified HIGH,
+    MEDIUM, or LOW by :func:`classify_categorical`.
+
+    Parameters
+    ----------
+    w : xarray.DataArray or numpy.ndarray
+        Footprint source weights with dims ``(x, y)``, normally a truncated,
+        renormalised climatology from :func:`truncate_to_contour` or a slice
+        of :func:`monthly_climatologies`. Weights summing to something other
+        than 1 are renormalised, as in :func:`footprint_weighted_composition`.
+    landcover : xarray.DataArray or numpy.ndarray
+        Categorical raster on the same grid, typically the integer codes of
+        the consolidated NLCD / Land Cover of Canada groups of Table S6, NaN
+        where it holds no data. Use :func:`sample_raster_on_grid` with
+        ``categorical=True`` to bring an external product onto the grid.
+    x, y : numpy.ndarray or xarray.DataArray
+        Cell-centre offsets from the tower [m] (``model.x``, ``model.y``),
+        which is the grid both `w` and `landcover` must be on.
+    radii : sequence of float, default TARGET_RADII
+        Target-area radii [m], evaluated and reported in the order given.
+    alpha : float, default 0.05
+        Significance level; compositions with ``p_value >= alpha`` count as
+        not significantly different.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per radius, with columns
+
+        ``radius``
+            Target-area radius [m].
+        ``dominant_class``
+            Class code holding the largest footprint-weighted share. Constant
+            down the frame, since the footprint does not depend on the radius.
+        ``p_footprint``
+            That class's footprint-weighted share, P_footprint, **as a
+            fraction in [0, 1]** rather than the percentage of the paper;
+            multiply by 100 to match its figures. Constant down the frame.
+        ``p_target``
+            The same class's share of the disc, P_target, likewise a fraction.
+            ``0.0`` when the disc holds none of it.
+        ``chi2``
+            Chi-square statistic comparing the two full compositions.
+        ``p_value``
+            p-value of that test.
+        ``dof``
+            Degrees of freedom, one less than the number of classes tested.
+        ``level``
+            :class:`Level` member: ``HIGH`` when both shares reach 0.80 and
+            the compositions do not differ significantly, ``MEDIUM`` when both
+            reach 0.50 and they do not differ significantly, ``LOW``
+            otherwise. Being a ``str`` enum it compares equal to ``"high"``
+            and serialises as it.
+
+        ``DataFrame.attrs`` holds ``alpha`` and ``footprint_composition``, the
+        full footprint-weighted composition the dominant class was taken from.
+
+    Raises
+    ------
+    ValueError
+        If `radii` is empty; if any radius is not positive and finite, or is
+        smaller than half the grid spacing so that its disc holds no cell
+        centre; if `w`, `landcover`, and the grid `x` and `y` describe are not
+        one and the same; if `w` holds a non-finite or negative weight, or no
+        weight at all; or if no cell carries both weight and a class code,
+        leaving no composition to take a dominant class from.
+
+    See Also
+    --------
+    footprint_weighted_composition : P_footprint over the whole composition.
+    target_area_composition : P_target over the whole composition.
+    classify_categorical : The three-level index applied here.
+    sensor_location_bias : The continuous-field counterpart, Eq. 6.
+
+    Notes
+    -----
+    The chi-square test rests on pseudo-counts: both compositions are scaled
+    by the number of classified cells inside the target area, because a
+    footprint-weighted composition is a share of source weight and carries no
+    sample size of its own. Classes absent from both compositions are dropped
+    rather than entered as matching zeros, so the degrees of freedom count
+    only the classes the analysis actually saw. Both choices are set out in
+    :func:`_composition_chi_square`; the p-value is best read as a comparison
+    on the paper's 30 m grid rather than as an absolute significance.
+
+    The dominant class comes from the footprint, never from the target area,
+    so ``p_target`` can fall to zero while a different class dominates the
+    disc -- the mismatch the index is there to report. Ties for the largest
+    footprint share go to the lowest class code.
+
+    A raster covering only part of the footprint or the disc lowers the
+    retained weight of the underlying compositions rather than making them
+    NaN, so a row here can rest on partial coverage; read
+    ``attrs["footprint_composition"].attrs["retained_weight"]`` when that
+    matters.
+
+    Chu et al. (2021) found 34 of 214 sites where the land-cover product
+    disagreed with the site's own IGBP metadata, so a result that contradicts
+    site metadata is worth checking against the product before trusting it.
+
+    Examples
+    --------
+    >>> nlcd = sample_raster_on_grid(                          # doctest: +SKIP
+    ...     "nlcd.tif", model.x, model.y, lat, lon, categorical=True
+    ... )
+    >>> categorical_representativeness(                        # doctest: +SKIP
+    ...     truncate_to_contour(model.fclim_2d), nlcd, model.x, model.y
+    ... )[["radius", "dominant_class", "p_target", "level"]]
+       radius  dominant_class  p_target   level
+    0   250.0              41     0.912    high
+    1   500.0              41     0.774  medium
+    ...
+
+    References
+    ----------
+    Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.4.
+
+    Goeckede, M., et al. (2008). Quality control of CarboEurope flux data --
+    Part 1. *Biogeosciences*, **5**, 433-450. Source of the 50 % and 80 %
+    criteria.
+    """
+    radii_values = [float(radius) for radius in radii]
+    if not radii_values:
+        raise ValueError(
+            "radii holds no target areas, so there is nothing to compare the "
+            "footprint against. Pass at least one radius, e.g. TARGET_RADII."
+        )
+
+    footprint = footprint_weighted_composition(w, landcover)
+    if footprint.empty:
+        raise ValueError(
+            "No cell carries both source weight and a land-cover code, so the "
+            "footprint has no composition and no dominant class. Check that "
+            "landcover holds data over the footprint rather than only NaN."
+        )
+
+    dominant = footprint.idxmax()
+    p_footprint = float(footprint.loc[dominant])
+
+    rows = []
+    for radius in radii_values:
+        target = target_area_composition(landcover, x, y, radius)
+        chi2, p_value, dof = _composition_chi_square(footprint, target)
+        p_target = float(target.get(dominant, 0.0))
+        rows.append(
+            {
+                "radius": radius,
+                "dominant_class": dominant,
+                "p_footprint": p_footprint,
+                "p_target": p_target,
+                "chi2": chi2,
+                "p_value": p_value,
+                "dof": dof,
+                # classify_categorical works in the percentages of the paper,
+                # the columns above in fractions.
+                "level": classify_categorical(
+                    100.0 * p_footprint, 100.0 * p_target, p_value, alpha
+                ),
+            }
+        )
+
+    frame = pd.DataFrame(
+        rows,
+        columns=[
+            "radius",
+            "dominant_class",
+            "p_footprint",
+            "p_target",
+            "chi2",
+            "p_value",
+            "dof",
+            "level",
+        ],
+    )
+    frame = frame.astype(
+        {
+            "radius": float,
+            "p_footprint": float,
+            "p_target": float,
+            "chi2": float,
+            "p_value": float,
+            "dof": int,
+        }
+    )
+    frame.attrs["alpha"] = float(alpha)
+    frame.attrs["footprint_composition"] = footprint
+    return frame
 
 
 # ------------------------------
