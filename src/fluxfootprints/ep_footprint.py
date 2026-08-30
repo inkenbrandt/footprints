@@ -1,4 +1,8 @@
-
+"""
+ep_footprint.py
+===============
+Module for calculating footprint characteristics based on different models.
+"""
 
 from dataclasses import dataclass
 
