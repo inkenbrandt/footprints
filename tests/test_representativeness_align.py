@@ -229,7 +229,10 @@ def test_continuous_resampling_interpolates_between_source_cells(tmp_path):
 
 def test_categorical_resampling_invents_no_intermediate_codes(tmp_path):
     """Bilinear would blend 11 and 42 into codes that mean nothing."""
-    grid = footprint_grid()
+    # Offset by half a cell, as in the ramp test above: on the unshifted grid
+    # every footprint cell centre lands exactly on a source cell centre, where
+    # bilinear is the identity and the negative control below cannot fire.
+    grid = footprint_grid(x=GRID + 5.0, y=GRID + 5.0)
     path = code_raster(tmp_path / "codes.tif")
 
     nearest, near_valid = _align_raster(path, grid, categorical=True)

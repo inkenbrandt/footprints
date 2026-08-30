@@ -1,4 +1,3 @@
-# src/fluxfootprints/base_footprint_model.py
 """
 base_footprint_model.py
 ========================

@@ -1,3 +1,17 @@
+"""
+by_row_fetch_tools.py
+========================
+Tools for fetching and processing by-row data, including:
+* coordinate transformations, 
+* daily aggregation, and
+* raster generation.
+This module provides functions to:
+* convert polar coordinates to Cartesian, 
+* aggregate sub-daily data to daily centroids, 
+* generate weighted kernel density rasters, and 
+* impute missing evapotranspiration data.
+"""
+
 import geopandas as gpd
 import numpy as np
 import pandas as pd

@@ -61,14 +61,23 @@ import xarray as xr
 from scipy.stats import chisquare, pearsonr
 from scipy.stats import t as _student_t
 
-from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
+from .base_footprint_model import _source_weight_threshold
 from .openet_masking import GridGeometry, footprint_grid_geometry
 
 __all__ = [
     "TARGET_RADII",
+    "DEFAULT_CONTOUR_FRACTION",
+    "DEFAULT_ALPHA",
     "ASYMMETRY_THRESHOLD",
+    "OVERLAP_THRESHOLD",
     "BIAS_THRESHOLD",
     "MIN_MATCHES",
+    "HIGH_COVER_PERCENT",
+    "MEDIUM_COVER_PERCENT",
+    "HIGH_R_SQUARED",
+    "MEDIUM_R_SQUARED",
+    "SLOPE_TOLERANCE",
+    "INTERCEPT_TOLERANCE",
     "Level",
     "ClimatologyMetrics",
     "WeightedValue",
@@ -146,6 +155,36 @@ BIAS_THRESHOLD: float = 0.10
 #: regression, Sect. 2.4; 166 of the 214 sites cleared it.
 MIN_MATCHES: int = 6
 
+#: Dominant-class percentage the footprint and the target area must *both*
+#: reach for HIGH categorical representativeness (Sect. 2.4) [%].
+#: The 50 % / 80 % pair follows Goeckede et al. (2008).
+HIGH_COVER_PERCENT: float = 80.0
+
+#: Dominant-class percentage both must reach for MEDIUM categorical
+#: representativeness (Sect. 2.4) [%].
+MEDIUM_COVER_PERCENT: float = 50.0
+
+#: R^2 a site-level model II regression must reach for HIGH continuous
+#: representativeness (Sect. 2.4) [-].
+HIGH_R_SQUARED: float = 0.8
+
+#: R^2 it must reach for MEDIUM continuous representativeness (Sect. 2.4) [-].
+MEDIUM_R_SQUARED: float = 0.6
+
+#: Half-width of the slope tolerance about 1.0 for HIGH continuous
+#: representativeness: the paper's ``1.0 +/- 0.1`` (Sect. 2.4) [-].
+SLOPE_TOLERANCE: float = 0.1
+
+#: Half-width of the intercept tolerance about 0.0 for HIGH continuous
+#: representativeness: the paper's ``0.0 +/- 0.1`` (Sect. 2.4). Absolute, and
+#: calibrated to EVI's 0-1 range -- rescale it for a field on another scale.
+INTERCEPT_TOLERANCE: float = 0.1
+
+#: Overlap index below which Chu et al. (2021) call a site-year's footprint
+#: climatologies poorly overlapped, either across months or between day and
+#: night (Sect. 3.1, Fig. 3d) [-]. Reported against, never used to filter.
+OVERLAP_THRESHOLD: float = 0.8
+
 #: Default name of the dimension the monthly climatologies of a site-year are
 #: stacked over, for the overlap indices of Eqs. 2-3.
 _MONTH_DIM: str = "month"
@@ -204,6 +243,15 @@ class Level(str, Enum):
         Poor agreement. For land cover: no class reaches 50 % in the footprint
         or the target area, or the compositions differ significantly. For a
         continuous field: R² < 0.6 or p >= 0.05.
+
+    Examples
+    --------
+    >>> Level.HIGH
+    <Level.HIGH: 'high'>
+    >>> Level.HIGH == "high"  # a str subclass, so it compares and serialises as one
+    True
+    >>> Level("medium")
+    <Level.MEDIUM: 'medium'>
 
     References
     ----------
@@ -306,6 +354,22 @@ class ClimatologyMetrics:
         O80_daynight, Eq. 3, the mean overlap of paired daytime and nighttime
         climatologies. ``None`` when no pairing was supplied.
 
+    Examples
+    --------
+    >>> metrics = ClimatologyMetrics(
+    ...     fraction=0.8,
+    ...     contour_level=5.351e-06,
+    ...     fetch=181.11,
+    ...     area=64400.0,
+    ...     symmetry=0.625,
+    ...     enclosed_fraction=0.8188,
+    ...     n_cells=161,
+    ... )
+    >>> metrics.fetch, metrics.area
+    (181.11, 64400.0)
+    >>> metrics.seasonal_overlap is None  # not supplied
+    True
+
     References
     ----------
     Chu, H., et al. (2021). Agric. For. Meteorol., 301-302, 108350, Sect. 2.2.
@@ -345,6 +409,14 @@ class WeightedValue:
         the same, it is the fraction of the disc's cells that held data.
     n_cells : int
         Number of cells that contributed to `value`.
+
+    Examples
+    --------
+    >>> result = WeightedValue(value=0.42, retained_weight=1.0, n_cells=161)
+    >>> result
+    WeightedValue(value=0.42, retained_weight=1.0, n_cells=161)
+    >>> result.value
+    0.42
 
     References
     ----------
@@ -386,6 +458,26 @@ class CategoricalResult:
         Full footprint-weighted composition, class code -> percentage [%].
     target_composition : Mapping
         Full target-area composition, class code -> percentage [%].
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
+    ... )
+    >>> result = evaluate_landcover(fclim, landcover, radii=(250.0,))[0]
+    >>> result.radius, result.dominant_class, result.dof
+    (250.0, 42, 1)
+    >>> round(result.p_footprint, 2), round(result.p_target, 2)
+    (55.88, 62.59)
+    >>> result.level
+    <Level.LOW: 'low'>
 
     References
     ----------
@@ -441,6 +533,33 @@ class ContinuousResult:
         than a percentage. Length `n`.
     within_threshold : float
         Fraction of periods with ``|Delta| <=`` the bias threshold [-].
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def clim(cx):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    ...     f /= f.sum() * 400.0
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> clims = [clim(40.0 + 8 * i) for i in range(8)]
+    >>> scenes = [
+    ...     xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.01 * i, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for i in range(8)
+    ... ]
+    >>> result = evaluate_vegetation_index(clims, scenes, radii=(250.0,))[0]
+    >>> result.radius, result.n
+    (250.0, 8)
+    >>> round(result.slope, 4), round(result.intercept, 4), round(result.r_squared, 4)
+    (0.7187, 0.0699, 0.9999)
+    >>> result.level
+    <Level.MEDIUM: 'medium'>
+    >>> result.bias.shape  # one sensor location bias per matched period
+    (8,)
 
     References
     ----------
@@ -500,6 +619,18 @@ class RMAFit:
     --------
     rma_regression : Produces this fit.
     classify_continuous : Turns it into the three-level index of Sect. 2.4.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> rng = np.random.default_rng(3)
+    >>> footprint = rng.uniform(0.2, 0.8, 40)
+    >>> target = 0.95 * footprint + 0.02 + rng.normal(0.0, 0.03, 40)
+    >>> fit = rma_regression(footprint, target)
+    >>> round(fit.slope, 4), round(fit.intercept, 4), round(fit.r_squared, 4), fit.n
+    (0.9739, 0.0039, 0.9647, 40)
+    >>> fit.ci_level, fit.ci_method
+    (0.95, 'analytical')
 
     References
     ----------
@@ -644,6 +775,18 @@ def contour_level_for_fraction(
     ValueError
         If `fraction` is outside (0, 1), or `fclim` carries no positive mass.
 
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0  # a density: integrates to 1 over dx * dy
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> round(contour_level_for_fraction(fclim), 9)
+    5.351e-06
+
     Notes
     -----
     Because the package's climatologies integrate to the mean captured fraction
@@ -682,6 +825,21 @@ def footprint_contour_mask(
     --------
     contour_level_for_fraction : The threshold this mask is built from.
     truncate_to_contour : Mask and renormalise in one step.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0  # a density: integrates to 1 over dx * dy
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> mask = footprint_contour_mask(fclim)
+    >>> mask.dtype
+    dtype('bool')
+    >>> int(mask.sum())
+    161
 
     Notes
     -----
@@ -731,6 +889,27 @@ def truncate_to_contour(
     xarray.DataArray
         Climatology with cells outside the contour set to zero, carrying the
         dims and coords of `fclim`. Unitless when `renormalize` is True.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0  # a density: integrates to 1 over dx * dy
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> truncated = truncate_to_contour(fclim)
+    >>> float(round(float(truncated.sum()), 10))  # renormalised to unit sum
+    1.0
+    >>> truncated.attrs["contour_n_cells"]
+    161
+
+    Keeping the original densities instead:
+
+    >>> raw = truncate_to_contour(fclim, renormalize=False)
+    >>> bool(float(raw.sum()) < 1.0)
+    True
 
     Notes
     -----
@@ -800,6 +979,17 @@ def target_area_mask(
     ValueError
         If `radius` is not positive and finite, or if `x` or `y` is not a
         non-empty 1-D array of cell-centre offsets.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> mask = target_area_mask(x, y, 100.0)
+    >>> mask.dims
+    ('x', 'y')
+    >>> int(mask.sum())  # cell centres within 100 m of the tower
+    81
 
     Notes
     -----
@@ -1090,9 +1280,7 @@ def _solar_geometry(
 
     # True solar time [minutes past local solar midnight], then hour angle.
     minutes_utc = np.mod(julian_day + 0.5, 1.0) * 1440.0
-    true_solar_time = np.mod(
-        minutes_utc + equation_of_time + 4.0 * longitude, 1440.0
-    )
+    true_solar_time = np.mod(minutes_utc + equation_of_time + 4.0 * longitude, 1440.0)
     hour_angle = np.deg2rad(true_solar_time / 4.0 - 180.0)
 
     phi = np.deg2rad(latitude)
@@ -1645,18 +1833,36 @@ def monthly_climatologies(
 
     Examples
     --------
-    >>> from fluxfootprints import build_climatology, monthly_climatologies
-    >>> model = build_climatology(df)                        # doctest: +SKIP
-    >>> clim = monthly_climatologies(                        # doctest: +SKIP
-    ...     model, latitude=40.1, longitude=-111.9, tz=-7
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> times = pd.date_range("2020-01-01", "2020-06-30 21:00", freq="3h")
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> rng = np.random.default_rng(0)
+    >>> centres = rng.normal(30.0, 25.0, times.size)  # a wandering wind direction
+    >>> f = np.stack(
+    ...     [np.exp(-((X - c) ** 2 + Y ** 2) / (2 * 80.0 ** 2)) for c in centres]
     ... )
-    >>> clim.footprint_climatology.dims                      # doctest: +SKIP
-    ('month', 'period', 'x', 'y')
+    >>> f /= f.sum(axis=(1, 2), keepdims=True) * 400.0
+    >>> f_2d = xr.DataArray(
+    ...     f, coords={"time": times, "x": x, "y": y}, dims=("time", "x", "y")
+    ... )
+    >>> clim = monthly_climatologies(f_2d, latitude=40.0, longitude=-111.9, tz=-7)
+    >>> dict(clim.sizes)
+    {'month': 6, 'period': 2, 'x': 21, 'y': 21}
+    >>> list(clim.data_vars)
+    ['footprint_climatology', 'n_times', 'contour_level', 'contour_n_cells']
+    >>> [str(p) for p in clim["period"].values]
+    ['daytime', 'nighttime']
+
+    Every month-period slice arrives truncated at `fraction` and rescaled to
+    unit sum, ready for the weighted statistics:
+
+    >>> round(float(clim["footprint_climatology"].isel(month=0, period=0).sum()), 10)
+    1.0
     """
     if partition not in _PARTITIONS:
-        raise ValueError(
-            f"partition must be one of {_PARTITIONS}, got {partition!r}."
-        )
+        raise ValueError(f"partition must be one of {_PARTITIONS}, got {partition!r}.")
     if int(min_times) < 1:
         raise ValueError(f"min_times must be at least 1, got {min_times!r}.")
     min_times = int(min_times)
@@ -1805,6 +2011,19 @@ def footprint_fetch(
     ValueError
         If `mask` carries no ``x`` or ``y`` coordinate to measure distance from.
 
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0  # a density: integrates to 1 over dx * dy
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> mask = footprint_contour_mask(fclim)
+    >>> round(footprint_fetch(mask), 4)
+    181.1077
+
     Notes
     -----
     Distances are measured to cell *centres*, as in :func:`target_area_mask`,
@@ -1849,6 +2068,19 @@ def footprint_area(
         Area enclosed by the contour [m²], as the cell count times ``dx * dy``.
         ``0.0`` if no cell is inside.
 
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0  # a density: integrates to 1 over dx * dy
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> mask = footprint_contour_mask(fclim)
+    >>> round(footprint_area(mask), 1)  # 161 cells of 20 m x 20 m
+    64400.0
+
     Notes
     -----
     Counting whole cells makes the area a step function of the grid spacing:
@@ -1884,6 +2116,13 @@ def symmetry_index(area: float, fetch: float) -> float:
     See Also
     --------
     footprint_symmetry : The same index straight from a truncated climatology.
+
+    Examples
+    --------
+    >>> round(symmetry_index(40000.0, 200.0), 6)  # a square inscribed in its disc
+    0.31831
+    >>> symmetry_index(1.0, 0.0)  # an undefined fetch
+    nan
 
     Notes
     -----
@@ -1926,6 +2165,19 @@ def footprint_symmetry(
         Symmetry index in [0, 1]; values below :data:`ASYMMETRY_THRESHOLD`
         (0.30) are the paper's relatively asymmetric climatologies. ``nan`` if
         `w` holds no cell inside the contour.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0  # a density: integrates to 1 over dx * dy
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> round(footprint_symmetry(truncate_to_contour(fclim)), 4)
+    0.625
+
     """
     return symmetry_index(
         footprint_area(w, dx, dy),
@@ -1986,10 +2238,23 @@ def climatology_metrics(
 
     Examples
     --------
-    >>> from fluxfootprints import build_climatology, climatology_metrics
-    >>> model = build_climatology(df)                     # doctest: +SKIP
-    >>> climatology_metrics(model.fclim_2d).symmetry      # doctest: +SKIP
-    0.52
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> metrics = climatology_metrics(fclim)
+    >>> round(metrics.fetch, 2), round(metrics.area, 1), metrics.n_cells
+    (181.11, 64400.0, 161)
+    >>> round(metrics.symmetry, 3), round(metrics.enclosed_fraction, 4)
+    (0.625, 0.8188)
+
+    The overlap indices are optional, and stay None unless supplied:
+
+    >>> metrics.seasonal_overlap is None
+    True
     """
     cell_dx, cell_dy = _grid_spacing(fclim, dx, dy)
 
@@ -2313,6 +2578,21 @@ def overlap(
     seasonal_overlap : Eq. 2, over the K months of a site-year.
     daynight_overlap : Eq. 3, over paired daytime and nighttime months.
 
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def weights(cx, spread=80.0):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * spread ** 2))
+    ...     f /= f.sum()  # the overlap indices take unit-sum weights
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> round(overlap(weights(0.0), weights(0.0)), 6)  # identical months
+    1.0
+    >>> round(overlap(weights(0.0), weights(40.0)), 4)  # shifted downwind
+    0.9716
+
     Notes
     -----
     Normalisation is left to the callers rather than checked here, so that the
@@ -2369,6 +2649,22 @@ def seasonal_overlap(weights: xr.DataArray, dim: str = _MONTH_DIM) -> float:
     overlap : The two-footprint kernel, which Eq. 2 reduces to at K = 2.
     seasonal_overlap_index : The same index from a sequence of climatologies.
     daynight_overlap : The companion index across daytime and nighttime.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def weights(cx, spread=80.0):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * spread ** 2))
+    ...     f /= f.sum()  # the overlap indices take unit-sum weights
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> months = xr.concat(
+    ...     [weights(0.0), weights(20.0), weights(40.0)], dim="month"
+    ... ).assign_coords(month=[1, 2, 3])
+    >>> round(seasonal_overlap(months), 4)
+    0.9809
 
     Notes
     -----
@@ -2453,6 +2749,25 @@ def daynight_overlap(
     daynight_overlap_index : The same index from sequences of climatologies.
     seasonal_overlap : The companion index across the months of a site-year.
 
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def weights(cx, spread=80.0):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * spread ** 2))
+    ...     f /= f.sum()  # the overlap indices take unit-sum weights
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> day = xr.concat(
+    ...     [weights(0.0), weights(20.0), weights(40.0)], dim="month"
+    ... ).assign_coords(month=[1, 2, 3])
+    >>> night = xr.concat(
+    ...     [weights(c, 110.0) for c in (0.0, 20.0, 40.0)], dim="month"
+    ... ).assign_coords(month=[1, 2, 3])
+    >>> round(daynight_overlap(day, night), 4)  # nighttime reaches farther
+    0.9731
+
     Notes
     -----
     Unlike Eq. 2, this index pairs the two climatologies month by month before
@@ -2518,6 +2833,19 @@ def seasonal_overlap_index(climatologies: Sequence[xr.DataArray]) -> float:
     ValueError
         If fewer than two climatologies are supplied, or their grids differ.
 
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def weights(cx, spread=80.0):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * spread ** 2))
+    ...     f /= f.sum()  # the overlap indices take unit-sum weights
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> round(seasonal_overlap_index([weights(c) for c in (0.0, 20.0, 40.0)]), 4)
+    0.9809
+
     Notes
     -----
     The geometric mean is zero wherever any single month has zero weight, so
@@ -2554,6 +2882,22 @@ def daynight_overlap_index(
     ------
     ValueError
         If the two sequences differ in length, or their grids differ.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def weights(cx, spread=80.0):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * spread ** 2))
+    ...     f /= f.sum()  # the overlap indices take unit-sum weights
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> day = [weights(c) for c in (0.0, 20.0)]
+    >>> night = [weights(c, 110.0) for c in (0.0, 20.0)]
+    >>> round(daynight_overlap_index(day, night), 4)
+    0.9732
+
     """
     return daynight_overlap(
         _stack_months(daytime, "daytime"),
@@ -2733,10 +3077,20 @@ def footprint_weighted_value(
 
     Examples
     --------
-    >>> evi = sample_raster_on_grid("evi.tif", model.x, model.y, lat, lon)  # doctest: +SKIP
-    >>> result = footprint_weighted_value(truncate_to_contour(fclim), evi)  # doctest: +SKIP
-    >>> result.value, result.retained_weight                                # doctest: +SKIP
-    (0.42, 1.0)
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> weights = truncate_to_contour(fclim)
+    >>> evi = xr.DataArray(
+    ...     0.30 + 0.0005 * X, dims=("x", "y"), coords={"x": x, "y": y}
+    ... )
+    >>> result = footprint_weighted_value(weights, evi)
+    >>> round(result.value, 4), round(result.retained_weight, 4), result.n_cells
+    (0.32, 1.0, 161)
     """
     _check_same_grid(weights, raster, "weights", "raster")
     phi = _weight_values(weights, "weights")
@@ -2800,14 +3154,20 @@ def footprint_weighted_composition(
 
     Examples
     --------
-    >>> nlcd = sample_raster_on_grid(                       # doctest: +SKIP
-    ...     "nlcd.tif", model.x, model.y, lat, lon, categorical=True
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> weights = truncate_to_contour(fclim)
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
     ... )
-    >>> footprint_weighted_composition(weights, nlcd)       # doctest: +SKIP
-    class
-    41    0.62
-    81    0.38
-    Name: footprint_fraction, dtype: float64
+    >>> composition = footprint_weighted_composition(weights, landcover)
+    >>> {int(k): round(float(v), 4) for k, v in composition.items()}
+    {42: 0.5588, 81: 0.4412}
     """
     _check_same_grid(weights, landcover, "weights", "landcover")
     phi = _weight_values(weights, "weights")
@@ -2866,6 +3226,17 @@ def target_area_value(
     --------
     footprint_weighted_value : The footprint-weighted counterpart, Eq. 5.
     target_area_mask : The disc this averages over.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, _ = np.meshgrid(x, y, indexing="ij")
+    >>> evi = xr.DataArray(0.30 + 0.0005 * X, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> result = target_area_value(evi, x, y, 100.0)
+    >>> round(result.value, 4), round(result.retained_weight, 4), result.n_cells
+    (0.3, 1.0, 81)
 
     Notes
     -----
@@ -2939,6 +3310,19 @@ def target_area_composition(
     See Also
     --------
     footprint_weighted_composition : The footprint-weighted counterpart.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, _ = np.meshgrid(x, y, indexing="ij")
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
+    ... )
+    >>> composition = target_area_composition(landcover, x, y, 100.0)
+    >>> {int(k): round(float(v), 4) for k, v in composition.items()}
+    {42: 0.7901, 81: 0.2099}
 
     Notes
     -----
@@ -3119,15 +3503,24 @@ def sensor_location_bias(
 
     Examples
     --------
-    >>> evi = sample_raster_on_grid("evi.tif", model.x, model.y, lat, lon)  # doctest: +SKIP
-    >>> bias = sensor_location_bias(                                       # doctest: +SKIP
-    ...     truncate_to_contour(model.fclim_2d), evi, model.x, model.y
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> weights = truncate_to_contour(fclim)
+    >>> evi = xr.DataArray(
+    ...     0.30 + 0.0005 * X, dims=("x", "y"), coords={"x": x, "y": y}
     ... )
-    >>> bias[["radius", "delta", "within_threshold"]]                      # doctest: +SKIP
-       radius     delta  within_threshold
-    0   250.0  0.021...              True
-    1   500.0  0.064...              True
-    ...
+    >>> bias = sensor_location_bias(weights, evi, x, y, radii=(250.0, 1000.0))
+    >>> print(bias.round(4).to_string(index=False))
+     radius  value_footprint  value_target  delta  within_threshold
+      250.0             0.32           0.3 0.0667              True
+     1000.0             0.32           0.3 0.0667              True
+    >>> bias.attrs["bias_threshold"]
+    0.1
 
     References
     ----------
@@ -3297,16 +3690,42 @@ def sensor_location_bias_series(
 
     Examples
     --------
-    >>> pairs = {                                        # doctest: +SKIP
-    ...     month: (clim.sel(month=month, period="daytime"), scenes[month])
-    ...     for month in scenes
-    ... }
-    >>> bias = sensor_location_bias_series(pairs, model.x, model.y)  # doctest: +SKIP
-    >>> bias.groupby("radius")["within_threshold"].mean()            # doctest: +SKIP
-    radius
-    250.0     0.73
-    3000.0    0.42
-    Name: within_threshold, dtype: Float64
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def clim(cx):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    ...     f /= f.sum() * 400.0
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> clims = [clim(40.0 + 8 * i) for i in range(8)]
+    >>> scenes = [
+    ...     xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.01 * i, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for i in range(8)
+    ... ]
+    >>> pairs = sensor_location_bias_series(
+    ...     {
+    ...         pd.Timestamp(f"2020-{m:02d}-01"): (truncate_to_contour(c), s)
+    ...         for m, (c, s) in enumerate(zip(clims, scenes), 1)
+    ...     },
+    ...     x,
+    ...     y,
+    ...     radii=(250.0, 1000.0),
+    ... )
+    >>> pairs.shape
+    (16, 6)
+    >>> print(
+    ...     pairs.head(4).to_string(
+    ...         index=False, float_format=lambda v: format(v, ".4f")
+    ...     )
+    ... )
+          time    radius  value_footprint  value_target  delta  within_threshold
+    2020-01-01  250.0000           0.3200        0.3000 0.0667              True
+    2020-01-01 1000.0000           0.3200        0.3000 0.0667              True
+    2020-02-01  250.0000           0.3342        0.3100 0.0781              True
+    2020-02-01 1000.0000           0.3342        0.3100 0.0781              True
 
     References
     ----------
@@ -3547,9 +3966,7 @@ def rma_regression(
         # point estimate scaled by sqrt(B + 1) -/+ sqrt(B).
         t_crit = float(_student_t.ppf(0.5 + level / 2.0, n - 2))
         b = t_crit**2 * (1.0 - r_squared) / (n - 2)
-        scale = np.array(
-            [np.sqrt(b + 1.0) - np.sqrt(b), np.sqrt(b + 1.0) + np.sqrt(b)]
-        )
+        scale = np.array([np.sqrt(b + 1.0) - np.sqrt(b), np.sqrt(b + 1.0) + np.sqrt(b)])
         limits = np.sort(slope * scale)
         slope_ci = (float(limits[0]), float(limits[1]))
         # The intercept is monotone in the slope through the centroid, so its
@@ -3622,6 +4039,18 @@ def model2_regression(
     ValueError
         If the inputs differ in length, or fewer than three finite pairs remain.
 
+    Examples
+    --------
+    >>> import numpy as np
+    >>> rng = np.random.default_rng(3)
+    >>> footprint = rng.uniform(0.2, 0.8, 40)
+    >>> target = 0.95 * footprint + 0.02 + rng.normal(0.0, 0.03, 40)
+    >>> intercept, slope, r_squared, p_value = model2_regression(footprint, target)
+    >>> round(intercept, 4), round(slope, 4), round(r_squared, 4)
+    (0.0039, 0.9739, 0.9647)
+    >>> bool(p_value < 1e-6)
+    True
+
     Notes
     -----
     Pairs where either value is non-finite are dropped before fitting. The RMA
@@ -3646,6 +4075,8 @@ def classify_categorical(
     p_target: float,
     p_value: float,
     alpha: float = DEFAULT_ALPHA,
+    high_percent: float = HIGH_COVER_PERCENT,
+    medium_percent: float = MEDIUM_COVER_PERCENT,
 ) -> Level:
     """
     Assign the land-cover representativeness level, Sect. 2.4.
@@ -3660,30 +4091,42 @@ def classify_categorical(
         Percentage of the same type within the target area [%].
     p_value : float
         Chi-square p-value comparing the two compositions.
-    alpha : float, default 0.05
+    alpha : float, default :data:`DEFAULT_ALPHA`
         Significance level; compositions with ``p_value >= alpha`` are treated
         as not significantly different.
+    high_percent : float, default :data:`HIGH_COVER_PERCENT`
+        Percentage both compositions must reach for ``HIGH`` [%].
+    medium_percent : float, default :data:`MEDIUM_COVER_PERCENT`
+        Percentage both compositions must reach for ``MEDIUM`` [%].
 
     Returns
     -------
     Level
-        ``HIGH`` when both percentages are >= 80 and the compositions do not
-        differ significantly; ``MEDIUM`` when both are >= 50 and the
-        compositions do not differ significantly; ``LOW`` otherwise.
+        ``HIGH`` when both percentages are >= `high_percent` and the
+        compositions do not differ significantly; ``MEDIUM`` when both are
+        >= `medium_percent` and the compositions do not differ significantly;
+        ``LOW`` otherwise.
 
     Examples
     --------
-    >>> classify_categorical(92.0, 88.0, 0.42)   # doctest: +SKIP
+    >>> classify_categorical(92.0, 88.0, 0.42)  # both >= 80 %, compositions agree
     <Level.HIGH: 'high'>
-    >>> classify_categorical(92.0, 61.0, 0.31)   # doctest: +SKIP
+    >>> classify_categorical(92.0, 61.0, 0.31)  # both >= 50 %
+    <Level.MEDIUM: 'medium'>
+    >>> classify_categorical(92.0, 20.0, 0.001)  # target area is something else
+    <Level.LOW: 'low'>
+
+    The thresholds are arguments, so a stricter rule needs no rewriting:
+
+    >>> classify_categorical(92.0, 88.0, 0.42, high_percent=90.0)
     <Level.MEDIUM: 'medium'>
     """
     # A non-finite p-value -- an undefined test -- fails this comparison and
     # so falls through to LOW, as does a non-finite percentage below.
     if p_value >= alpha:
-        if p_footprint >= 80.0 and p_target >= 80.0:
+        if p_footprint >= high_percent and p_target >= high_percent:
             return Level.HIGH
-        if p_footprint >= 50.0 and p_target >= 50.0:
+        if p_footprint >= medium_percent and p_target >= medium_percent:
             return Level.MEDIUM
     return Level.LOW
 
@@ -3694,6 +4137,10 @@ def classify_continuous(
     intercept: float,
     p_value: float,
     alpha: float = DEFAULT_ALPHA,
+    high_r_squared: float = HIGH_R_SQUARED,
+    medium_r_squared: float = MEDIUM_R_SQUARED,
+    slope_tolerance: float = SLOPE_TOLERANCE,
+    intercept_tolerance: float = INTERCEPT_TOLERANCE,
 ) -> Level:
     """
     Assign the continuous-field representativeness level, Sect. 2.4.
@@ -3708,29 +4155,60 @@ def classify_continuous(
         Regression intercept beta_0.
     p_value : float
         Significance of the regression.
-    alpha : float, default 0.05
+    alpha : float, default :data:`DEFAULT_ALPHA`
         Significance level for the MEDIUM criterion.
+    high_r_squared : float, default :data:`HIGH_R_SQUARED`
+        R^2 required for ``HIGH``.
+    medium_r_squared : float, default :data:`MEDIUM_R_SQUARED`
+        R^2 required for ``MEDIUM``.
+    slope_tolerance : float, default :data:`SLOPE_TOLERANCE`
+        Half-width of the slope window about 1.0 required for ``HIGH``.
+    intercept_tolerance : float, default :data:`INTERCEPT_TOLERANCE`
+        Half-width of the intercept window about 0.0 required for ``HIGH``.
 
     Returns
     -------
     Level
-        ``HIGH`` when ``r_squared >= 0.8`` with ``0.9 <= slope <= 1.1`` and
-        ``-0.1 <= intercept <= 0.1``; ``MEDIUM`` when ``r_squared >= 0.6`` and
-        ``p_value < alpha``; ``LOW`` otherwise.
+        ``HIGH`` when ``r_squared >= high_r_squared`` with the slope within
+        `slope_tolerance` of 1.0 and the intercept within
+        `intercept_tolerance` of 0.0; ``MEDIUM`` when
+        ``r_squared >= medium_r_squared`` and ``p_value < alpha``; ``LOW``
+        otherwise.
+
+    Examples
+    --------
+    >>> classify_continuous(0.94, 0.96, 0.02, 1e-6)
+    <Level.HIGH: 'high'>
+    >>> classify_continuous(0.71, 0.83, 0.05, 1e-4)  # fits, but not one-to-one
+    <Level.MEDIUM: 'medium'>
+    >>> classify_continuous(0.31, 0.62, 0.18, 0.2)
+    <Level.LOW: 'low'>
+
+    A field on another scale needs a rescaled intercept tolerance:
+
+    >>> classify_continuous(0.94, 0.96, 0.02, 1e-6, intercept_tolerance=0.01)
+    <Level.MEDIUM: 'medium'>
 
     Notes
     -----
     The intercept tolerance is absolute and calibrated to EVI's 0-1 range. A
     field on a different scale, e.g. land surface temperature in kelvin, needs
-    a rescaled criterion before this classification is meaningful.
+    a rescaled `intercept_tolerance` before this classification is meaningful.
 
     A degenerate fit -- too few distinct values to orient a slope, say --
     arrives here as non-finite statistics, which fail every comparison below
     and so fall through to LOW.
     """
-    if r_squared >= 0.8 and 0.9 <= slope <= 1.1 and -0.1 <= intercept <= 0.1:
+    if (
+        r_squared >= high_r_squared
+        # Written as inclusive bounds, not abs(): at the paper's own
+        # tolerance abs(1.1 - 1.0) is 0.1000...09 in binary floating point
+        # and would exclude a slope of exactly 1.1, which 1.0 + 0.1 admits.
+        and 1.0 - slope_tolerance <= slope <= 1.0 + slope_tolerance
+        and -intercept_tolerance <= intercept <= intercept_tolerance
+    ):
         return Level.HIGH
-    if r_squared >= 0.6 and p_value < alpha:
+    if r_squared >= medium_r_squared and p_value < alpha:
         return Level.MEDIUM
     return Level.LOW
 
@@ -3927,16 +4405,33 @@ def categorical_representativeness(
 
     Examples
     --------
-    >>> nlcd = sample_raster_on_grid(                          # doctest: +SKIP
-    ...     "nlcd.tif", model.x, model.y, lat, lon, categorical=True
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> weights = truncate_to_contour(fclim)
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
     ... )
-    >>> categorical_representativeness(                        # doctest: +SKIP
-    ...     truncate_to_contour(model.fclim_2d), nlcd, model.x, model.y
-    ... )[["radius", "dominant_class", "p_target", "level"]]
-       radius  dominant_class  p_target   level
-    0   250.0              41     0.912    high
-    1   500.0              41     0.774  medium
-    ...
+    >>> result = categorical_representativeness(
+    ...     weights, landcover, x, y, radii=(250.0, 1000.0)
+    ... )
+    >>> list(result.columns)
+    ['radius', 'dominant_class', 'p_footprint', 'p_target', 'chi2', 'p_value', 'dof', 'level']
+    >>> print(result[["radius", "dominant_class", "level"]].to_string(index=False))
+     radius  dominant_class level
+      250.0              42   low
+     1000.0              42   low
+
+    ``p_footprint`` and ``p_target`` are reported here as *fractions*, while
+    :func:`classify_categorical` and :func:`evaluate_landcover` work in
+    percentages:
+
+    >>> round(float(result["p_footprint"].iloc[0]), 4)
+    0.5588
 
     References
     ----------
@@ -4151,13 +4646,39 @@ def continuous_representativeness(
 
     Examples
     --------
-    >>> bias = sensor_location_bias_series(scenes, model.x, model.y)  # doctest: +SKIP
-    >>> site = continuous_representativeness(bias)                   # doctest: +SKIP
-    >>> site[["radius", "n", "slope", "r_squared", "level"]]         # doctest: +SKIP
-       radius   n  slope  r_squared   level
-    0   250.0  13  0.962      0.941    high
-    1   500.0  13  0.913      0.883  medium
-    ...
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def clim(cx):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    ...     f /= f.sum() * 400.0
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> clims = [clim(40.0 + 8 * i) for i in range(8)]
+    >>> scenes = [
+    ...     xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.01 * i, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for i in range(8)
+    ... ]
+    >>> pairs = sensor_location_bias_series(
+    ...     {
+    ...         pd.Timestamp(f"2020-{m:02d}-01"): (truncate_to_contour(c), s)
+    ...         for m, (c, s) in enumerate(zip(clims, scenes), 1)
+    ...     },
+    ...     x,
+    ...     y,
+    ...     radii=(250.0, 1000.0),
+    ... )
+    >>> site = continuous_representativeness(pairs, radii=(250.0, 1000.0))
+    >>> print(
+    ...     site[["radius", "n", "slope", "intercept", "r_squared", "level"]]
+    ...     .round(4)
+    ...     .to_string(index=False)
+    ... )
+     radius  n  slope  intercept  r_squared  level
+      250.0  8 0.7187     0.0699     0.9999 medium
+     1000.0  8 0.7187     0.0699     0.9999 medium
 
     References
     ----------
@@ -4191,8 +4712,7 @@ def continuous_representativeness(
     for radius in radii_values:
         if not np.isfinite(radius) or radius <= 0.0:
             raise ValueError(
-                f"Every target radius must be positive and finite, got "
-                f"{radius!r}."
+                f"Every target radius must be positive and finite, got {radius!r}."
             )
 
     threshold = int(min_matches)
@@ -4477,12 +4997,25 @@ def evaluate_landcover(
 
     Examples
     --------
-    >>> nlcd = sample_raster_on_grid(                        # doctest: +SKIP
-    ...     "nlcd.tif", model.x, model.y, lat, lon, categorical=True
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> f = np.exp(-((X - 40.0) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    >>> f /= f.sum() * 400.0
+    >>> fclim = xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
     ... )
-    >>> results = evaluate_landcover(model.fclim_2d, nlcd)   # doctest: +SKIP
-    >>> [(entry.radius, entry.level) for entry in results]   # doctest: +SKIP
-    [(250.0, <Level.HIGH: 'high'>), (500.0, <Level.MEDIUM: 'medium'>), ...]
+    >>> results = evaluate_landcover(fclim, landcover, radii=(250.0, 1000.0))
+    >>> [(entry.radius, entry.dominant_class, entry.level) for entry in results]
+    [(250.0, 42, <Level.LOW: 'low'>), (1000.0, 42, <Level.LOW: 'low'>)]
+
+    Unlike :func:`categorical_representativeness`, the percentages here are
+    in percent:
+
+    >>> round(results[0].p_footprint, 2)
+    55.88
 
     References
     ----------
@@ -4598,9 +5131,26 @@ def evaluate_vegetation_index(
 
     Examples
     --------
-    >>> results = evaluate_vegetation_index(clims, scenes)   # doctest: +SKIP
-    >>> [(entry.radius, round(entry.slope, 2)) for entry in results]
-    [(250.0, 0.96), (500.0, 0.91), ...]                      # doctest: +SKIP
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def clim(cx):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    ...     f /= f.sum() * 400.0
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> clims = [clim(40.0 + 8 * i) for i in range(8)]
+    >>> scenes = [
+    ...     xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.01 * i, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for i in range(8)
+    ... ]
+    >>> results = evaluate_vegetation_index(clims, scenes, radii=(250.0, 1000.0))
+    >>> [(entry.radius, round(entry.slope, 4)) for entry in results]
+    [(250.0, 0.7187), (1000.0, 0.7187)]
+    >>> [(entry.radius, entry.n, entry.level) for entry in results]
+    [(250.0, 8, <Level.MEDIUM: 'medium'>), (1000.0, 8, <Level.MEDIUM: 'medium'>)]
 
     References
     ----------
@@ -4785,13 +5335,41 @@ def representativeness_summary(
 
     Examples
     --------
-    >>> table = representativeness_summary(                  # doctest: +SKIP
-    ...     evaluate_landcover(model.fclim_2d, nlcd),
-    ...     evaluate_vegetation_index(clims, scenes),
-    ...     climatology_metrics(model.fclim_2d),
-    ...     site_id="US-MOz",
+    >>> import numpy as np, xarray as xr
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> def clim(cx):
+    ...     f = np.exp(-((X - cx) ** 2 + Y ** 2) / (2 * 80.0 ** 2))
+    ...     f /= f.sum() * 400.0
+    ...     return xr.DataArray(f, dims=("x", "y"), coords={"x": x, "y": y})
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
     ... )
-    >>> table[["radius", "landcover_level", "continuous_level"]]  # doctest: +SKIP
+    >>> scenes = [
+    ...     xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.01 * i, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for i in range(8)
+    ... ]
+    >>> categorical = evaluate_landcover(clim(40.0), landcover, radii=(250.0, 1000.0))
+    >>> continuous = evaluate_vegetation_index(
+    ...     [clim(40.0 + 8 * i) for i in range(8)], scenes, radii=(250.0, 1000.0)
+    ... )
+    >>> summary = representativeness_summary(
+    ...     categorical=categorical, continuous=continuous, site_id="US-Xyz"
+    ... )
+    >>> summary.shape  # one row per radius
+    (2, 29)
+    >>> print(
+    ...     summary[
+    ...         ["site_id", "radius", "dominant_class",
+    ...          "landcover_level", "continuous_level"]
+    ...     ].to_string(index=False)
+    ... )
+    site_id  radius  dominant_class landcover_level continuous_level
+     US-Xyz   250.0              42             low           medium
+     US-Xyz  1000.0              42             low           medium
 
     References
     ----------
@@ -5320,11 +5898,42 @@ def sample_raster_on_grid(
 
     Examples
     --------
-    >>> evi = sample_raster_on_grid(              # doctest: +SKIP
-    ...     "evi.tif", model.x, model.y, 40.0, -111.9
-    ... )
-    >>> footprint_weighted_value(weights, evi).value   # doctest: +SKIP
-    0.42
+    >>> import numpy as np, tempfile, pathlib
+    >>> import rasterio
+    >>> from rasterio.transform import from_origin
+    >>> from fluxfootprints.openet_masking import footprint_grid_geometry
+    >>> lat, lon = 40.0, -111.9
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> geom = footprint_grid_geometry(x, y, lat, lon, crs="auto")
+
+    Write a small west-to-east EVI ramp in the tower's own UTM zone:
+
+    >>> directory = pathlib.Path(tempfile.mkdtemp())
+    >>> path = directory / "evi.tif"
+    >>> n = 60
+    >>> values = 0.20 + 0.005 * np.tile(np.arange(n, dtype="float32"), (n, 1))
+    >>> with rasterio.open(
+    ...     path,
+    ...     "w",
+    ...     driver="GTiff",
+    ...     height=n,
+    ...     width=n,
+    ...     count=1,
+    ...     dtype="float32",
+    ...     crs=geom.crs,
+    ...     transform=from_origin(
+    ...         geom.x_origin - 600.0, geom.y_origin + 600.0, 20.0, 20.0
+    ...     ),
+    ... ) as dst:
+    ...     dst.write(values, 1)
+    >>> evi = sample_raster_on_grid(path, x, y, lat, lon)
+    >>> evi.dims, evi.shape
+    (('x', 'y'), (21, 21))
+    >>> round(float(evi.sel(x=0.0, y=0.0)), 4)
+    0.3475
+    >>> round(float(evi.min()), 4), round(float(evi.max()), 4)
+    (0.2975, 0.3975)
     """
     _require("rioxarray")  # registers the .rio accessor used below
 
@@ -5360,6 +5969,13 @@ def predict_sigmav(
     """
     Gap-fill the crosswind velocity standard deviation, Sect. 2.2 and Text S1.
 
+    .. warning::
+       **Not implemented.** This function is a placeholder for the paper's
+       random-forest gap-fill and raises :exc:`NotImplementedError` on every
+       call. The parameters and return value below describe the intended
+       interface, not current behaviour. Supply V_SIGMA yourself, or predict
+       it with your own estimator, until this lands.
+
     V_SIGMA is missing at many towers but is required by the FFP model. The
     paper trains a random forest on the 106 sites that do report it, using
     friction velocity, boundary-layer height, wind speed, incoming shortwave
@@ -5387,11 +6003,22 @@ def predict_sigmav(
 
     Raises
     ------
+    NotImplementedError
+        Always, at present -- see the warning above. The exceptions below are
+        the intended behaviour once this is implemented.
     ImportError
         If ``scikit-learn`` is not installed and no `estimator` is supplied.
     ValueError
         If required predictor columns are missing, or no rows carry an
         observed ``sigmav`` to train on.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> predict_sigmav(pd.DataFrame({"ustar": [0.3]}))
+    Traceback (most recent call last):
+        ...
+    NotImplementedError
 
     Notes
     -----
@@ -5411,6 +6038,11 @@ def export_representativeness_gpkg(
 ) -> Path:
     """
     Write representativeness results to a GeoPackage as target-area discs.
+
+    .. warning::
+       **Not implemented.** This function is a placeholder and raises
+       :exc:`NotImplementedError` on every call. The parameters and return
+       value below describe the intended interface, not current behaviour.
 
     Parameters
     ----------
@@ -5437,6 +6069,16 @@ def export_representativeness_gpkg(
         If ``geopandas`` is not installed.
     ValueError
         If `results` carries no ``radius`` column.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> export_representativeness_gpkg(
+    ...     pd.DataFrame({"radius": [250.0]}), None, "out.gpkg"
+    ... )
+    Traceback (most recent call last):
+        ...
+    NotImplementedError
 
     Notes
     -----
@@ -6276,20 +6918,58 @@ def assess_representativeness(
 
     Examples
     --------
-    >>> from fluxfootprints import build_climatology, assess_representativeness
-    >>> model = build_climatology(df)                          # doctest: +SKIP
-    >>> results = assess_representativeness(                   # doctest: +SKIP
-    ...     model,
-    ...     station_lat=40.1,
-    ...     station_lon=-111.9,
-    ...     site_id="US-Utj",
-    ...     landcover="nlcd_2019.tif",
-    ...     continuous={"2019-07-04": "evi_20190704.tif"},
-    ...     tz=-7,
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> times = pd.date_range("2020-01-01", "2020-06-30 21:00", freq="3h")
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> rng = np.random.default_rng(0)
+    >>> centres = rng.normal(30.0, 25.0, times.size)  # a wandering wind direction
+    >>> f = np.stack(
+    ...     [np.exp(-((X - c) ** 2 + Y ** 2) / (2 * 80.0 ** 2)) for c in centres]
     ... )
-    >>> results.query("scope == 'site' and kind == 'continuous'")[
-    ...     ["slope", "r_squared", "level"]
-    ... ]                                                      # doctest: +SKIP
+    >>> f /= f.sum(axis=(1, 2), keepdims=True) * 400.0
+    >>> f_2d = xr.DataArray(
+    ...     f, coords={"time": times, "x": x, "y": y}, dims=("time", "x", "y")
+    ... )
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
+    ... )
+    >>> scenes = {
+    ...     pd.Timestamp(f"2020-{m:02d}-15"): xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.02 * m, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for m in range(1, 7)
+    ... }
+    >>> results = assess_representativeness(
+    ...     f_2d,
+    ...     40.0,
+    ...     -111.9,
+    ...     site_id="US-Xyz",
+    ...     tz=-7,
+    ...     landcover=landcover,
+    ...     continuous=scenes,
+    ...     radii=(250.0, 1000.0),
+    ... )
+    >>> results.index.names
+    FrozenList(['site', 'year', 'month', 'period', 'radius', 'variable'])
+    >>> sorted(results["scope"].unique())
+    ['period', 'site', 'site_year']
+
+    The site-scope rows carry the Sect. 2.4 regression and its level:
+
+    >>> site = results.reset_index()
+    >>> site = site[(site["scope"] == "site") & (site["variable"] == "EVI")]
+    >>> print(
+    ...     site[["period", "radius", "n", "slope", "r_squared", "level"]]
+    ...     .round(4)
+    ...     .to_string(index=False)
+    ... )
+       period  radius  n  slope  r_squared level
+      daytime   250.0  6 0.9942     0.9997  high
+      daytime  1000.0  6 0.9942     0.9997  high
+    nighttime   250.0  6 0.9840     0.9988  high
+    nighttime  1000.0  6 0.9840     0.9988  high
 
     References
     ----------
@@ -6306,8 +6986,7 @@ def assess_representativeness(
     for radius in radii_values:
         if not np.isfinite(radius) or radius <= 0.0:
             raise ValueError(
-                f"Every target radius must be positive and finite, got "
-                f"{radius!r}."
+                f"Every target radius must be positive and finite, got {radius!r}."
             )
 
     clim = _climatology_dataset(
@@ -6326,7 +7005,9 @@ def assess_representativeness(
     months = pd.DatetimeIndex(clim[_MONTH_DIM].values)
     periods = [str(period) for period in np.atleast_1d(clim[_PERIOD_DIM].values)]
     fraction_used = float(
-        weights_all.attrs.get("contour_fraction", clim.attrs.get("contour_fraction", fraction))
+        weights_all.attrs.get(
+            "contour_fraction", clim.attrs.get("contour_fraction", fraction)
+        )
     )
     site = pd.NA if site_id is None else str(site_id)
 
@@ -6373,9 +7054,7 @@ def assess_representativeness(
             monthly_metrics[(mi, period)] = metrics
 
             template = _blank_row()
-            template.update(
-                site=site, year=int(month.year), month=month, period=period
-            )
+            template.update(site=site, year=int(month.year), month=month, period=period)
             label = f"At {month:%Y-%m} {period}"
 
             row = dict(template)
@@ -6572,7 +7251,7 @@ def _site_year_rows(
                 fetch=float(np.mean([entry.fetch for entry in metrics])),
                 area=float(np.mean([entry.area for entry in metrics])),
                 symmetry=float(np.mean([entry.symmetry for entry in metrics])),
-                n_cells=int(round(float(np.mean([entry.n_cells for entry in metrics])))),
+                n_cells=round(float(np.mean([entry.n_cells for entry in metrics]))),
                 seasonal_overlap=(
                     seasonal_overlap(
                         weights_all.isel({_PERIOD_DIM: pi, _MONTH_DIM: indices})
@@ -6959,14 +7638,63 @@ def representativeness_table(results: pd.DataFrame, dataset: str) -> pd.DataFram
 
     Examples
     --------
-    >>> table = representativeness_table(results, "S6")   # doctest: +SKIP
-    >>> table[["TARGET_AREA", "SLOPE", "R2", "REP_EVI"]]  # doctest: +SKIP
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> times = pd.date_range("2020-01-01", "2020-06-30 21:00", freq="3h")
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> rng = np.random.default_rng(0)
+    >>> centres = rng.normal(30.0, 25.0, times.size)  # a wandering wind direction
+    >>> f = np.stack(
+    ...     [np.exp(-((X - c) ** 2 + Y ** 2) / (2 * 80.0 ** 2)) for c in centres]
+    ... )
+    >>> f /= f.sum(axis=(1, 2), keepdims=True) * 400.0
+    >>> f_2d = xr.DataArray(
+    ...     f, coords={"time": times, "x": x, "y": y}, dims=("time", "x", "y")
+    ... )
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
+    ... )
+    >>> scenes = {
+    ...     pd.Timestamp(f"2020-{m:02d}-15"): xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.02 * m, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for m in range(1, 7)
+    ... }
+    >>> results = assess_representativeness(
+    ...     f_2d,
+    ...     40.0,
+    ...     -111.9,
+    ...     site_id="US-Xyz",
+    ...     tz=-7,
+    ...     landcover=landcover,
+    ...     continuous=scenes,
+    ...     radii=(250.0, 1000.0),
+    ... )
+    >>> s6 = representativeness_table(results, "S6")
+    >>> list(s6.columns) == list(CHU_TABLE_COLUMNS["S6"])
+    True
+    >>> print(
+    ...     s6[["SITE_ID", "PERIOD", "TARGET_AREA", "N", "SLOPE", "R2", "REP_EVI"]]
+    ...     .head(2)
+    ...     .round(4)
+    ...     .to_string(index=False)
+    ... )
+    SITE_ID  PERIOD  TARGET_AREA  N  SLOPE     R2 REP_EVI
+     US-Xyz daytime        250.0  6 0.9942 0.9997    high
+     US-Xyz daytime       1000.0  6 0.9942 0.9997    high
+
+    The land-cover and per-period tables come off the same frame:
+
+    >>> representativeness_table(results, "S4").shape
+    (4, 12)
+    >>> representativeness_table(results, "S5").shape
+    (24, 11)
     """
     key = str(dataset).upper()
     if key not in _TABLE_BUILDERS:
         raise KeyError(
-            f"dataset must be one of {sorted(_TABLE_BUILDERS)}, got "
-            f"{dataset!r}."
+            f"dataset must be one of {sorted(_TABLE_BUILDERS)}, got {dataset!r}."
         )
 
     flat = results.reset_index() if results.index.nlevels > 1 else results.copy()
@@ -7059,16 +7787,51 @@ def export_representativeness_tables(
 
     Examples
     --------
-    >>> written = export_representativeness_tables(      # doctest: +SKIP
-    ...     results, "out/", fmt="parquet", prefix="US-Utj"
+    >>> import numpy as np, pandas as pd, xarray as xr
+    >>> times = pd.date_range("2020-01-01", "2020-06-30 21:00", freq="3h")
+    >>> x = np.arange(-200.0, 201.0, 20.0)
+    >>> y = x.copy()
+    >>> X, Y = np.meshgrid(x, y, indexing="ij")
+    >>> rng = np.random.default_rng(0)
+    >>> centres = rng.normal(30.0, 25.0, times.size)  # a wandering wind direction
+    >>> f = np.stack(
+    ...     [np.exp(-((X - c) ** 2 + Y ** 2) / (2 * 80.0 ** 2)) for c in centres]
     ... )
-    >>> sorted(written)                                  # doctest: +SKIP
+    >>> f /= f.sum(axis=(1, 2), keepdims=True) * 400.0
+    >>> f_2d = xr.DataArray(
+    ...     f, coords={"time": times, "x": x, "y": y}, dims=("time", "x", "y")
+    ... )
+    >>> landcover = xr.DataArray(
+    ...     np.where(X < 60.0, 42, 81), dims=("x", "y"), coords={"x": x, "y": y}
+    ... )
+    >>> scenes = {
+    ...     pd.Timestamp(f"2020-{m:02d}-15"): xr.DataArray(
+    ...         0.30 + 0.0005 * X + 0.02 * m, dims=("x", "y"), coords={"x": x, "y": y}
+    ...     )
+    ...     for m in range(1, 7)
+    ... }
+    >>> results = assess_representativeness(
+    ...     f_2d,
+    ...     40.0,
+    ...     -111.9,
+    ...     site_id="US-Xyz",
+    ...     tz=-7,
+    ...     landcover=landcover,
+    ...     continuous=scenes,
+    ...     radii=(250.0, 1000.0),
+    ... )
+    >>> import tempfile, pathlib
+    >>> directory = pathlib.Path(tempfile.mkdtemp())
+    >>> written = export_representativeness_tables(results, directory)
+    >>> sorted(written)
     ['S4', 'S5', 'S6']
+    >>> sorted(p.name for p in written.values())
+    ['representativeness_S4.csv', 'representativeness_S5.csv', 'representativeness_S6.csv']
+    >>> written["S6"].exists()
+    True
     """
     if fmt not in _TABLE_FORMATS:
-        raise ValueError(
-            f"fmt must be one of {sorted(_TABLE_FORMATS)}, got {fmt!r}."
-        )
+        raise ValueError(f"fmt must be one of {sorted(_TABLE_FORMATS)}, got {fmt!r}.")
 
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=True)
