@@ -49,6 +49,11 @@ contours = [
     "scikit-learn>=1.3",
 ]
 
+gee = [
+    "earthengine-api>=1.0",  # Google Earth Engine client, for representativeness_data
+    "rioxarray>=0.15",       # .rio accessor the fetched rasters carry their CRS on
+]
+
 animation = [
     "contextily>=1.6",      # georeferenced basemap tiles
     "imageio-ffmpeg>=0.5",  # bundled ffmpeg binary for MP4/WebM output
@@ -73,3 +78,11 @@ test = [
 [project.urls]
 "Homepage" = "https://github.com/inkenbrandt/footprints"
 "Documentation" = "https://fluxfootprints.readthedocs.io/en/stable/"
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: end-to-end tests that build a footprint climatology from the bundled tower data (deselect with '-m \"not slow\"')",
+]

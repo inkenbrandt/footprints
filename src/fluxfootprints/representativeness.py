@@ -137,7 +137,8 @@ ASYMMETRY_THRESHOLD: float = 0.30
 #: Significance level for the land-cover composition chi-square test.
 DEFAULT_ALPHA: float = 0.05
 
-#: Sensor location bias threshold |Δ| considered representative, Sect. 2.4 [-].
+#: Sensor location bias threshold ``|Δ|`` considered representative,
+#: Sect. 2.4 [-].
 #: Chu et al. (2021) adopt the 10 % of Chen et al. (2011) and Kim et al. (2006).
 BIAS_THRESHOLD: float = 0.10
 
@@ -220,6 +221,7 @@ class Level(str, Enum):
 
 #: Install hints surfaced by :func:`_require` when an optional import fails.
 _OPTIONAL_DEPENDENCIES: dict[str, str] = {
+    "ee": "pip install earthengine-api  (or: pip install 'fluxfootprints[gee]')",
     "geopandas": "pip install geopandas",
     "rioxarray": "pip install rioxarray",
     "sklearn": "pip install scikit-learn  (or: pip install 'fluxfootprints[contours]')",
@@ -4096,8 +4098,7 @@ def continuous_representativeness(
             describe the two series against the 1:1 line, not the residuals
             about the fitted line, and so are reported whenever the radius
             holds a match at all.
-        ``intercept_lower``, ``intercept_upper``, ``slope_lower``,
-        ``slope_upper``
+        ``intercept_lower``, ``intercept_upper``, ``slope_lower``, ``slope_upper``
             Confidence limits at `ci_level`, the square-bracketed columns of
             Table 1.
         ``sufficient``
@@ -4741,12 +4742,9 @@ def representativeness_summary(
         ``site_id``, ``radius``
             Row identity. Radii come in the order `categorical` presents them,
             followed by any radius only `continuous` holds.
-        ``dominant_class``, ``p_footprint``, ``p_target``, ``chi2``,
-        ``chi2_p_value``, ``dof``, ``landcover_level``
+        ``dominant_class``, ``p_footprint``, ``p_target``, ``chi2``, ``chi2_p_value``, ``dof``, ``landcover_level``
             The land-cover half, with the two shares as percentages.
-        ``n``, ``slope``, ``intercept``, ``r_squared``,
-        ``regression_p_value``, ``rmse``, ``mae``, ``mean_bias``,
-        ``median_bias``, ``bias_within_threshold``, ``continuous_level``
+        ``n``, ``slope``, ``intercept``, ``r_squared``, ``regression_p_value``, ``rmse``, ``mae``, ``mean_bias``, ``median_bias``, ``bias_within_threshold``, ``continuous_level``
             The continuous half. The three bias columns summarise the
             per-period Deltas of Eq. 6 as fractions; the rest is the model II
             regression of Eq. 7.

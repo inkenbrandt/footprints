@@ -35,6 +35,13 @@ extensions = [
     "nbsphinx",
 ]
 napoleon_numpy_docstring = True  # Set this to True for NumPy-style
+# Level subclasses str, so numpydoc would otherwise autosummary every inherited
+# str method (Level.count, Level.startswith, ...) and warn that it cannot
+# import them through the package namespace.
+numpydoc_show_inherited_class_members = {
+    "fluxfootprints.representativeness.Level": False,
+    "fluxfootprints.Level": False,
+}
 autosummary_generate = True  # Automatically generate .rst files for modules
 autosummary_imported_members = True
 bibtex_bibfiles = ["refs.bib"]  # Your BibTeX file(s)

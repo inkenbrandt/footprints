@@ -24,6 +24,7 @@
 
 - [fluxfootprints](#fluxfootprints)
     - [Table of Contents](#table-of-contents)
+    - [Key Features](#key-features)
     - [Installation](#installation)
     - [Documentation](#documentation)
     - [Quick-start Example](#quick-start-example)
@@ -34,6 +35,22 @@
     - [Contributing](#contributing)
     - [Development Road-map](#development-road-map)
     - [License](#license)
+
+---
+
+### Key Features
+
+| Feature | What it does | Entry points |
+| ------- | ------------ | ------------ |
+| **Five footprint models** | Kljun et al. (2015) parameterisation (NumPy and xarray), Kormann & Meixner (2001), Wang et al. (2006), and a backward Lagrangian stochastic particle model, all behind one interface | `build_climatology`, `FFPModel`, `KormannMeixnerModel`, `WangFootprintModel`, `LSFootprintModelAdapter` |
+| **Climatologies from tower data** | Maps AmeriFlux-style columns onto the models, drops physically invalid half-hours, and aggregates per-timestep footprints into 2-D climatologies | `build_climatology`, `compute_aerodynamic_params` |
+| **Daily and monthly summaries** | Period means, optionally weighted by ET derived from latent heat | `summarize_periods` |
+| **Geospatial export** | GeoPackage contours, GeoTIFF rasters, and CSV contour statistics, projected to an auto-selected UTM zone | `export_contours_gpkg`, `export_rasters_geotiff`, `export_contour_stats_csv` |
+| **OpenET masking** | Reprojects daily OpenET valid-data masks onto the footprint grid and reports how much source weight survives | `mask_summaries`, `mask_rasters_geotiff` |
+| **Representativeness** | Footprint-to-target-area analysis after Chu et al. (2021): 80 % climatology metrics (X80, A80, S80, seasonal and day–night overlap), plus land-cover and vegetation-index evaluations against a series of target discs, each reduced to a HIGH/MEDIUM/LOW index | `assess_representativeness`, `monthly_climatologies`, `evaluate_landcover`, `evaluate_vegetation_index`, `plot_level_bars` |
+| **Model comparison** | Runs several models side by side and reports RMSE, peak-location bias, and 80 % source-area overlap | `fluxfootprints.compare` |
+| **Animation** | Hourly/daily/monthly MP4 and WebM videos of footprint time series, with optional georeferenced basemaps | `fluxfootprints.footprint_animation` |
+| **Forcing data retrieval** | NLDAS forcing and time series, and Google Earth Engine retrieval of NLCD and Landsat EVI | `fetch_nldas_forcing_dataset`, `fetch_nlcd`, `fetch_landsat_evi` |
 
 ---
 
@@ -236,6 +253,35 @@ print(masked.daily_domain_coverage["openet_retained_frac"])
 mask_rasters_geotiff("out/", "openet/daily/")
 ```
 
+#### Footprint-to-target-area representativeness
+
+How well does the source area stand in for the grid cell or pixel window the
+site is used to represent? `assess_representativeness` runs the whole method of
+Chu et al. (2021) — monthly day/night climatologies truncated at the 80 %
+contour, their fetch, area, symmetry, and overlap indices, and land-cover and
+vegetation-index comparisons against a series of target discs:
+
+```python
+from fluxfootprints import assess_representativeness
+
+results = assess_representativeness(
+    model,
+    station_lat=41.6285, station_lon=-83.3471, site_id="US-CRT",
+    landcover="nlcd_2016.tif",                       # or fetch_nlcd(...)
+    continuous={"2011-07-15": "evi_20110715.tif"},   # or fetch_landsat_evi(...)
+    tz=-5,
+)
+results.query("scope == 'site' and kind == 'continuous'")[
+    ["slope", "r_squared", "level"]
+]
+```
+
+See the [representativeness
+page](https://fluxfootprints.readthedocs.io/en/latest/representativeness.html)
+for the theory and the [worked
+example](https://fluxfootprints.readthedocs.io/en/latest/notebooks/representativeness_example.html)
+for an end-to-end run.
+
 The package also includes helpers to pull forcing data
 (`fetch_nldas_forcing_dataset`, `call_nldas_time_series`) and to turn per-row
 fetch geometry into daily centroids and density rasters
@@ -266,6 +312,30 @@ Note that `wang` implements this 2006 paper (`Wang2006Approximate` in
 `docs/refs.bib`), **not** the separate Wang & Davis (2008) convective
 boundary-layer model listed there as `Wang2008Analytical`.
 
+If you use the **representativeness** analysis
+(`fluxfootprints.representativeness`), cite the method paper it reimplements:
+
+> Chu, H., Luo, X., Ouyang, Z., et al. (2021).
+> **Representativeness of Eddy-Covariance flux footprints for areas surrounding AmeriFlux sites**.
+> *Agricultural and Forest Meteorology*, 301–302, 108350.
+> [https://doi.org/10.1016/j.agrformet.2021.108350](https://doi.org/10.1016/j.agrformet.2021.108350)
+
+That method in turn rests on two earlier papers, which are worth citing
+alongside it when the corresponding criterion matters. The 50 % / 80 %
+dominant-class thresholds of the land-cover index come from:
+
+> Göckede, M., Foken, T., Aubinet, M., et al. (2008).
+> **Quality control of CarboEurope flux data — Part 1: Coupling footprint analyses with flux data quality assessment to evaluate sites in forest ecosystems**.
+> *Biogeosciences*, 5(2), 433–450.
+> [https://doi.org/10.5194/bg-5-433-2008](https://doi.org/10.5194/bg-5-433-2008)
+
+and the sensor location bias Δ is that of:
+
+> Schmid, H.P., & Lloyd, C.R. (1999).
+> **Spatial representativeness and the location bias of flux footprints over inhomogeneous areas**.
+> *Agricultural and Forest Meteorology*, 93(3), 195–209.
+> [https://doi.org/10.1016/S0168-1923(98)00119-1](https://doi.org/10.1016/S0168-1923(98)00119-1)
+
 You may also cite the software directly (see `CITATION.cff`).
 
 ---
@@ -282,6 +352,14 @@ All contributions — bug reports, suggestions, or code — are welcome!
 
 ### Development Road-map
 
+* [x] Footprint-to-target-area representativeness after Chu et al. (2021)
+  (`fluxfootprints.representativeness`)
+* [x] Validation of the representativeness metrics against the authors'
+  published Zenodo archive (see `docs/validation.md`)
+* [x] Google Earth Engine retrieval of NLCD and Landsat EVI for the
+  representativeness inputs (`fluxfootprints.representativeness_data`)
+* [ ] Validate the categorical and continuous representativeness evaluations
+  against Datasets S4–S6, not only the Sect. 2.2 geometry metrics
 * [ ] Footprint uncertainty quantification via Monte-Carlo resampling
 * [ ] Broader OpenET API integration and comparison
 * [ ] Consolidate `tools.py` into `by_row_fetch_tools.py`

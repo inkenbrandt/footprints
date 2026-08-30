@@ -131,6 +131,28 @@ from .representativeness import (
     export_representativeness_tables,
 )
 
+from .representativeness_data import (
+    NLCD_COLLECTION,
+    LANDSAT_COLLECTIONS,
+    LandsatBands,
+    fetch_nlcd,
+    fetch_landsat_evi,
+)
+
+from .representativeness_plotting import (
+    RADIUS_CMAP,
+    LEVEL_CMAP,
+    FOOTPRINT_COLOR,
+    REFERENCE_COLOR,
+    radius_colors,
+    level_colors,
+    plot_landcover_composition,
+    plot_footprint_target_scatter,
+    plot_bias_density,
+    plot_level_bars,
+)
+
+
 __all__ = [
     # Base interface
     "BaseFootprintModel",
@@ -248,6 +270,23 @@ __all__ = [
     "assess_representativeness",
     "representativeness_table",
     "export_representativeness_tables",
+    # Representativeness input data (Earth Engine; extras: gee)
+    "NLCD_COLLECTION",
+    "LANDSAT_COLLECTIONS",
+    "LandsatBands",
+    "fetch_nlcd",
+    "fetch_landsat_evi",
+    # Representativeness plotting
+    "RADIUS_CMAP",
+    "LEVEL_CMAP",
+    "FOOTPRINT_COLOR",
+    "REFERENCE_COLOR",
+    "radius_colors",
+    "level_colors",
+    "plot_landcover_composition",
+    "plot_footprint_target_scatter",
+    "plot_bias_density",
+    "plot_level_bars",
     # Constants
     "KAPPA",
     "__version__",

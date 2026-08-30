@@ -51,3 +51,4 @@ docs/notebooks/.DS_Store
 /.claude
 /uv.lock
 /tests/__pycache__
+/data/Chu et al dataset

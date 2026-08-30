@@ -42,6 +42,14 @@ same ``run()`` / ``get_footprint_climatology()`` API:
 
    exp
    modeltypes
+   validation
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Representativeness
+
+   representativeness
+   Worked example <notebooks/representativeness_example.ipynb>
 
 .. toctree::
    :maxdepth: 2
