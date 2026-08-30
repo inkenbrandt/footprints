@@ -252,6 +252,8 @@ class Level(str, Enum):
     True
     >>> Level("medium")
     <Level.MEDIUM: 'medium'>
+    >>> str(Level.HIGH)  # the value, not "Level.HIGH"
+    'high'
 
     References
     ----------
@@ -261,6 +263,18 @@ class Level(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+
+    # ``enum.StrEnum`` semantics, which the class promises above but which a
+    # plain ``(str, Enum)`` mixin does not give: without these, ``str()`` and
+    # ``format()`` fall back to ``Enum.__str__`` and render "Level.HIGH".
+    # That leaks into any consumer that stringifies a member instead of
+    # comparing it, and pandas is one of them -- the numpy-backed ``str``
+    # dtype coerces the right-hand side of a comparison with ``str()``, so
+    # ``frame["level"] == Level.HIGH`` is silently all-False there. Spelt out
+    # rather than inherited from ``enum.StrEnum`` because that is 3.11+ and
+    # this package supports 3.10.
+    __str__ = str.__str__
+    __format__ = str.__format__
 
 
 # ------------------------------
