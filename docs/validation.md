@@ -186,6 +186,55 @@ paper's conclusions:
   0.9, matching the Sect. 3.2 attribution to canopies that change through the
   growing season.
 
+## The climatology model upstream
+
+The tests above hold the climatology fixed and check our metrics. The
+complementary check — build the climatology ourselves and compare it with the
+published raster — lives in the validation-data workspace, because it needs raw
+AmeriFlux BASE data as well as the archive:
+
+| | |
+|---|---|
+| Reader and comparison utilities | `data/validation_data/scripts/chu2020_reference.py` |
+| Raster subset, inventory and reference metrics | `data/validation_data/scripts/inspect_chu2020_rasters.py` |
+| Model-versus-reference comparison | `data/validation_data/scripts/compare_chu2020_climatology.py` |
+| Reports | `data/validation_data/metadata/Chu2020/Chu2020_raster_inspection.md`, `Chu2020_step5_report.md` |
+
+The case is **US-ARM 2011**, all twelve months, daytime and nighttime, at the
+4 m system: the one site-year where a Chu site-year, a raw BASE record held
+locally, and an existing preparation script coincide. The modelled climatology
+is run on the published raster's own cell lattice, so registration is exact and
+nothing is resampled.
+
+What it found, in one line each:
+
+- **Orientation reproduces.** The modelled centroid bearing is within 6° of the
+  published one in every one of the 24 month-periods, and the 16-sector weight
+  profiles correlate at 0.988–1.000.
+- **Shape reproduces.** Taking our source area at the reference's own size in
+  cells, the two regions overlap at IoU 0.94–0.98.
+- **Extent is looser** — X80 within −25 % to +16 %, median about −8 % — and it
+  is looser for a structural reason. The tail of a climatology is flat, so A80
+  gains about 11 % for every additional per cent of enclosed mass and is 1.8
+  times larger at the 85 % contour than at the 80 %; the published 80 % source
+  area is where *our* 76–84 % contour falls. A few per cent of difference in
+  the mass distribution therefore reads as tens of per cent of A80.
+- **The unshared inputs dominate that residual.** Chu et al. publish neither
+  their roughness length, their displacement height, nor their boundary-layer
+  height. Swapping our fitted z0 for the `0.1 × canopy` rule alone moves X80 by
+  15–17 percentage points, well past the residual being explained.
+
+The moral for the metric functions is the useful part: **X80 and A80 are not
+the right things to assert agreement on between two implementations** unless
+their inputs are shared. Bearing, sector profile, and area-matched IoU are.
+
+One convention is worth repeating because getting it wrong is silent: the 80 %
+contour is an *absolute* mass, not a share of what the model domain happened to
+capture. `_source_weight_threshold` accumulates `density × cell_area` until it
+reaches 0.8, and so does the reference FFP implementation. Taking 0.8 of the
+captured mass instead moves A80 by about 30 % on this benchmark, with no error
+raised anywhere.
+
 ## Limitations
 
 - The comparison covers the Sect. 2.2 **footprint-geometry** metrics only. The
@@ -195,7 +244,9 @@ paper's conclusions:
 - Four site-years of 712 are checked. They were chosen to span regimes and to
   include the paper's named exemplars, not sampled at random.
 - Because the comparison starts from Dataset S2, it validates the metric code
-  but **not** the climatology model that produces the footprints upstream.
+  but **not** the climatology model that produces the footprints upstream. That
+  gap is covered separately — see [the climatology comparison](#the-climatology-model-upstream)
+  below.
 - Numbering caution: `representativeness_table(results, dataset)` maps `"S5"` to
   site-month statistics and `"S6"` to site-level regressions, which is swapped
   relative to this data release, where S5 is site-level and S6 is site-month.

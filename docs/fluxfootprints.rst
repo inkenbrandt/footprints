@@ -167,6 +167,23 @@ timestamp overlays and optional georeferenced basemaps.
    :show-inheritance:
    :undoc-members:
 
+Benchmark data preparation
+--------------------------
+
+fluxfootprints.canonical\_schema module
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The canonical input contract every prepared benchmark dataset is converted to:
+field registry with units, allowed ranges and provenance classes, the JSON
+provenance sidecar, the meteorological wind-direction convention, and a
+validator that reports contract violations without ever converting a unit or
+touching the frame.
+
+.. automodule:: fluxfootprints.canonical_schema
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 Meteorological data retrieval
 -----------------------------
 

@@ -52,7 +52,6 @@ docs/notebooks/.DS_Store
 /.claude
 /uv.lock
 /tests/__pycache__
-/data/validation_data
-/data/validation_data/raw/Chu et al dataset
-/data/validation_data/raw/neon_cper
-/data/validation_data/raw/ameriflux_US-ARM
+/data/validation_data/*
+
+

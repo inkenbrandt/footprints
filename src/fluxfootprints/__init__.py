@@ -153,6 +153,36 @@ from .representativeness_plotting import (
 )
 
 
+from ...data.validation_data.scripts.canonical_schema import (
+    PROVENANCE_SCHEMA_VERSION,
+    WIND_DIR_CONVENTION,
+    CARDINAL_SECTORS,
+    CANONICAL_FIELDS,
+    REQUIRED_FIELDS,
+    FFP_INPUT_FIELDS,
+    OPTIONAL_FIELDS,
+    Provenance,
+    FieldSpec,
+    Issue,
+    ValidationReport,
+    CanonicalSchemaError,
+    canonical_field_table,
+    normalize_units,
+    wrap_degrees,
+    angular_difference,
+    cardinal_sector,
+    parse_variable_provenance,
+    format_variable_provenance,
+    provenance_sidecar_path,
+    write_provenance_sidecar,
+    load_provenance_sidecar,
+    validate_canonical_frame,
+    validate_canonical_file,
+    read_canonical,
+    assert_canonical,
+)
+
+
 __all__ = [
     # Base interface
     "BaseFootprintModel",
@@ -289,7 +319,34 @@ __all__ = [
     "plot_level_bars",
     # Constants
     "KAPPA",
+    # Canonical benchmark schema
+    "PROVENANCE_SCHEMA_VERSION",
+    "WIND_DIR_CONVENTION",
+    "CARDINAL_SECTORS",
+    "CANONICAL_FIELDS",
+    "REQUIRED_FIELDS",
+    "FFP_INPUT_FIELDS",
+    "OPTIONAL_FIELDS",
+    "Provenance",
+    "FieldSpec",
+    "Issue",
+    "ValidationReport",
+    "CanonicalSchemaError",
+    "canonical_field_table",
+    "normalize_units",
+    "wrap_degrees",
+    "angular_difference",
+    "cardinal_sector",
+    "parse_variable_provenance",
+    "format_variable_provenance",
+    "provenance_sidecar_path",
+    "write_provenance_sidecar",
+    "load_provenance_sidecar",
+    "validate_canonical_frame",
+    "validate_canonical_file",
+    "read_canonical",
+    "assert_canonical",
     "__version__",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
