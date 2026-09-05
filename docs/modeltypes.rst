@@ -1,6 +1,6 @@
 
 Outline of Flux Measurement Footprint Estimation Approaches
-=======================================================
+===========================================================
 
 The concept of the flux footprint is used to estimate the **location and relative importance of passive scalar sources** that influence flux measurements taken at a specific point :cite:`Kljun2015SimpleGMD,Kljun2004Simple`. Footprint information is vital for connecting atmospheric observations to their surface sources and is especially important for designing field experiments and interpreting flux measurements over heterogeneous areas :cite:`Rannik2012Footprint`.
 

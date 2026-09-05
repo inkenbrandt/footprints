@@ -1,4 +1,4 @@
-"""
+﻿"""
 kormann_meixner_footprint.py
 ================================================
 Python implementation of the analytical flux-footprint model of Kormann & Meixner (2001).
@@ -15,20 +15,20 @@ The implementation follows the *analytical* approach described in Section 4 of t
 paper to relate Monin-Obukhov similarity profiles to the power-law formulation used
 in the footprint derivation.  If you require the more accurate (but slower)
 *numerical* approach, see the companion functions in
-:pyfunc:`analytical_power_law_parameters` and :pyfunc:`numerical_power_law_parameters`—the
+:func:`analytical_power_law_parameters` and :func:`numerical_power_law_parameters`â€”the
 remainder of the code is agnostic to which parameter-estimation routine is used.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy.special import gamma, gammaincc  # upper incomplete Γ
+from scipy.special import gamma, gammaincc  # upper incomplete Î“
 from typing import Tuple
 
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-KAPPA = 0.4  # von-Kármán constant
+KAPPA = 0.4  # von-KÃ¡rmÃ¡n constant
 PI_SQRT2 = np.sqrt(2.0 * np.pi)
 
 # -----------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def _descalar(a: np.ndarray) -> float | np.ndarray:
 
 def _phi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
     """
-    Compute the non-dimensional wind shear function φ_m(z/L).
+    Compute the non-dimensional wind shear function Ï†_m(z/L).
 
     This function returns the stability correction for momentum
     as a function of the stability parameter z/L. It follows
@@ -67,7 +67,7 @@ def _phi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
     Returns
     -------
     float or np.ndarray
-        The value of φ_m(z/L), the stability correction for momentum.
+        The value of Ï†_m(z/L), the stability correction for momentum.
     """
     z_over_L = np.asarray(z_over_L, dtype=float)
     with np.errstate(invalid="ignore"):
@@ -78,7 +78,7 @@ def _phi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
 
 def _phi_c(z_over_L: float | np.ndarray) -> float | np.ndarray:
     """
-    Compute the non-dimensional scalar diffusivity function φ_c(z/L).
+    Compute the non-dimensional scalar diffusivity function Ï†_c(z/L).
 
     This function returns the stability correction for scalar transport
     (e.g., heat, vapor) as a function of the stability parameter z/L,
@@ -93,7 +93,7 @@ def _phi_c(z_over_L: float | np.ndarray) -> float | np.ndarray:
     Returns
     -------
     float or np.ndarray
-        The value of φ_c(z/L), the stability correction for scalar transport.
+        The value of Ï†_c(z/L), the stability correction for scalar transport.
     """
     z_over_L = np.asarray(z_over_L, dtype=float)
     with np.errstate(invalid="ignore"):
@@ -104,7 +104,7 @@ def _phi_c(z_over_L: float | np.ndarray) -> float | np.ndarray:
 
 def _psi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
     """
-    Compute the integrated stability correction function ψ_m(z/L) for momentum.
+    Compute the integrated stability correction function Ïˆ_m(z/L) for momentum.
 
     This function calculates the integral form of the Monin-Obukhov
     stability correction for momentum. For unstable conditions, it uses
@@ -119,7 +119,7 @@ def _psi_m(z_over_L: float | np.ndarray) -> float | np.ndarray:
     Returns
     -------
     float or np.ndarray
-        The value of ψ_m(z/L), the integrated stability correction for momentum.
+        The value of Ïˆ_m(z/L), the integrated stability correction for momentum.
     """
     z_over_L = np.asarray(z_over_L, dtype=float)
     with np.errstate(invalid="ignore"):
@@ -147,7 +147,7 @@ def analytical_power_law_parameters(
     u_star: float | np.ndarray,
     u_zm: float | np.ndarray,
 ) -> Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray, float | np.ndarray]:
-    """Return *m*, *n*, *U*, *κ* using the *analytical* matching approach.
+    """Return *m*, *n*, *U*, *Îº* using the *analytical* matching approach.
 
     Accepts scalars or same-shaped arrays for every argument, so a whole
     column of per-timestep inputs can be resolved in one vectorized call
@@ -160,11 +160,11 @@ def analytical_power_law_parameters(
     z_0
         Aerodynamic roughness length (m).
     L
-        Obukhov length (m) (negative ⇒ unstable).
+        Obukhov length (m) (negative â‡’ unstable).
     u_star
-        Friction velocity (m s⁻¹).
+        Friction velocity (m sâ»Â¹).
     u_zm
-        Mean wind speed at *z_m* (m s⁻¹).
+        Mean wind speed at *z_m* (m sâ»Â¹).
 
     Returns
     -------
@@ -202,7 +202,7 @@ def analytical_power_law_parameters(
 
 def length_scale_xi(z: float, U: float, kappa: float, m: float, n: float) -> float:
     """
-    Calculate the characteristic footprint length-scale ξ(z).
+    Calculate the characteristic footprint length-scale Î¾(z).
 
     This function implements Eq. (19) from Kormann & Meixner (2001) to compute
     the length scale based on measurement height and atmospheric parameters.
@@ -214,7 +214,7 @@ def length_scale_xi(z: float, U: float, kappa: float, m: float, n: float) -> flo
     U : float
         Mean horizontal wind speed at height z (m/s).
     kappa : float
-        von Kármán constant (typically ~0.4).
+        von KÃ¡rmÃ¡n constant (typically ~0.4).
     m : float
         Power law exponent for wind speed profile.
     n : float
@@ -223,7 +223,7 @@ def length_scale_xi(z: float, U: float, kappa: float, m: float, n: float) -> flo
     Returns
     -------
     float
-        Characteristic length-scale ξ(z) (m).
+        Characteristic length-scale Î¾(z) (m).
     """
     r = 2.0 + m - n
     return (U * z**r) / (r**2 * kappa)
@@ -247,7 +247,7 @@ def crosswind_integrated_footprint(
     x : float or np.ndarray
         Downwind distance(s) from the tower (m).
     xi : float
-        Footprint length-scale ξ(z) computed using `length_scale_xi` (m).
+        Footprint length-scale Î¾(z) computed using `length_scale_xi` (m).
     m : float
         Power law exponent for wind speed profile.
     n : float
@@ -274,7 +274,7 @@ def footprint_2d(
     u_zm: float,
     sigma_v: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return 2-D footprint density φ(x, y, z_m).
+    """Return 2-D footprint density Ï†(x, y, z_m).
 
     Parameters
     ----------
@@ -282,17 +282,17 @@ def footprint_2d(
         1-D arrays of upstream and cross-stream distances (m).  Positive *x* is
         up-wind.
     xi, m, n
-        Parameters returned by :pyfunc:`length_scale_xi` and
-        :pyfunc:`analytical_power_law_parameters`.
+        Parameters returned by :func:`length_scale_xi` and
+        :func:`analytical_power_law_parameters`.
     u_zm
-        Mean wind speed at measurement height (m s⁻¹).
+        Mean wind speed at measurement height (m sâ»Â¹).
     sigma_v
-        Standard deviation of cross-wind velocity fluctuations (m s⁻¹).
+        Standard deviation of cross-wind velocity fluctuations (m sâ»Â¹).
 
     Returns
     -------
     X, Y, phi
-        Meshgrids of *x*, *y* and the footprint density φ (m⁻²).
+        Meshgrids of *x*, *y* and the footprint density Ï† (mâ»Â²).
     """
     x = np.asarray(x)
     y = np.asarray(y)
@@ -301,7 +301,7 @@ def footprint_2d(
     # Cross-wind integrated footprint
     f_x = crosswind_integrated_footprint(X, xi, m, n)
 
-    # Cross-wind dispersion σ(x) (short-range limit)
+    # Cross-wind dispersion Ïƒ(x) (short-range limit)
     sigma = sigma_v * X / u_zm
 
     # Gaussian cross-wind distribution Dy(x, y)
@@ -323,7 +323,7 @@ def footprint_at_points(
     """Evaluate the closed-form 2-D footprint density directly at given points.
 
     Implements the same Eq. (19)/(21) formulation as
-    :pyfunc:`crosswind_integrated_footprint`/:pyfunc:`footprint_2d`, but
+    :func:`crosswind_integrated_footprint`/:func:`footprint_2d`, but
     takes ``x``/``y`` as same-shaped arrays of arbitrary points (e.g. an
     already-rotated output grid) rather than building the density on the
     outer product of separate 1-D wind-aligned axes. This lets a footprint
@@ -339,17 +339,17 @@ def footprint_at_points(
         the sensor, where the model is undefined, and are assigned zero
         density.
     xi, m, n
-        Parameters returned by :pyfunc:`length_scale_xi` and
-        :pyfunc:`analytical_power_law_parameters`.
+        Parameters returned by :func:`length_scale_xi` and
+        :func:`analytical_power_law_parameters`.
     u_zm
-        Mean wind speed at measurement height (m s⁻¹).
+        Mean wind speed at measurement height (m sâ»Â¹).
     sigma_v
-        Standard deviation of cross-wind velocity fluctuations (m s⁻¹).
+        Standard deviation of cross-wind velocity fluctuations (m sâ»Â¹).
 
     Returns
     -------
     np.ndarray
-        Footprint density φ (m⁻²), same shape as ``x``/``y``.
+        Footprint density Ï† (mâ»Â²), same shape as ``x``/``y``.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -388,7 +388,7 @@ def cumulative_fetch(x_p: float, xi: float, m: float, n: float) -> float:
     x_p : float
         Downwind distance from the tower (m) at which the cumulative flux contribution is evaluated.
     xi : float
-        Characteristic length-scale ξ(z) computed using `length_scale_xi` (m).
+        Characteristic length-scale Î¾(z) computed using `length_scale_xi` (m).
     m : float
         Power law exponent for wind speed profile.
     n : float
@@ -401,7 +401,7 @@ def cumulative_fetch(x_p: float, xi: float, m: float, n: float) -> float:
     """
     r = 2.0 + m - n
     mu = (1.0 + m) / r
-    return gammaincc(mu, xi / x_p)  # upper incomplete Γ / Γ(μ)
+    return gammaincc(mu, xi / x_p)  # upper incomplete Î“ / Î“(Î¼)
 
 
 def effective_fetch(fraction: float, xi: float, m: float, n: float) -> float:
@@ -416,7 +416,7 @@ def effective_fetch(fraction: float, xi: float, m: float, n: float) -> float:
     fraction : float
         Desired cumulative flux contribution (must be in the open interval (0, 1)).
     xi : float
-        Characteristic length-scale ξ(z) computed using `length_scale_xi` (m).
+        Characteristic length-scale Î¾(z) computed using `length_scale_xi` (m).
     m : float
         Power law exponent for wind speed profile.
     n : float
@@ -437,7 +437,7 @@ def effective_fetch(fraction: float, xi: float, m: float, n: float) -> float:
     if not 0.0 < fraction < 1.0:
         raise ValueError("fraction must be in the open interval (0, 1)")
 
-    # root-solve gammaincc(mu, xi/x) = fraction  ⇒  xi/x = Q⁻¹
+    # root-solve gammaincc(mu, xi/x) = fraction  â‡’  xi/x = Qâ»Â¹
     r = 2.0 + m - n
     mu = (1.0 + m) / r
 

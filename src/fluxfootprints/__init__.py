@@ -153,7 +153,7 @@ from .representativeness_plotting import (
 )
 
 
-from ...data.validation_data.scripts.canonical_schema import (
+from .canonical_schema import (
     PROVENANCE_SCHEMA_VERSION,
     WIND_DIR_CONVENTION,
     CARDINAL_SECTORS,

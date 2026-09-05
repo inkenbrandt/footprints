@@ -7,7 +7,7 @@ Model interface
 ---------------
 
 fluxfootprints.base\_footprint\_model module
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. automodule:: fluxfootprints.base_footprint_model
    :members:
