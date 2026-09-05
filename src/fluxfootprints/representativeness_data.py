@@ -238,7 +238,7 @@ def initialize(project: str | None = None, **kwargs: Any) -> ModuleType:
 
     try:
         ee.Initialize(project=project, **kwargs)
-    except Exception as exc:  # pragma: no cover - needs a live EE session
+    except Exception as exc:
         raise RuntimeError(
             "Earth Engine could not be initialised. Authenticate once with\n"
             "    earthengine authenticate\n"

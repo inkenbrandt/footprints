@@ -27,6 +27,7 @@ The one thing asserted without the fake is the import guard: importing
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -300,7 +301,9 @@ def make_ee(catalog, collections, requests, queried):
     module.Reducer = SimpleNamespace(mean=lambda: "mean")
     module.Geometry = SimpleNamespace(
         Point=lambda coords, proj=None: SimpleNamespace(
-            buffer=lambda radius: SimpleNamespace(coords=coords, radius=radius)
+            buffer=lambda radius: SimpleNamespace(
+                coords=coords, radius=radius, proj=proj
+            )
         )
     )
     module.Feature = lambda geometry, properties: {"properties": dict(properties)}
@@ -788,3 +791,463 @@ def test_compute_pixels_failure_names_the_causes(nlcd_ee):
     nlcd_ee.module.data.computePixels = explode
     with pytest.raises(RuntimeError, match="response size limit"):
         rd.fetch_nlcd(TOWER_X, TOWER_Y, UTM, 2016, radius=30.0)
+
+
+# ----------------------------
+# Session set-up
+# ----------------------------
+@pytest.fixture
+def unauthenticated_ee(fake_ee):
+    """A stand-in ``ee`` holding no credentials, so ``initialize`` must act."""
+    fake_ee.module.data._credentials = None
+    fake_ee.calls = []
+    fake_ee.module.Initialize = lambda **kwargs: fake_ee.calls.append(kwargs)
+    return fake_ee
+
+
+def test_initialize_forwards_the_project_and_extra_arguments(unauthenticated_ee):
+    """The Cloud project is the whole reason to call this directly."""
+    returned = rd.initialize(project="my-cloud-project", opt_url="https://example")
+    assert returned is unauthenticated_ee.module
+    assert unauthenticated_ee.calls == [
+        {"project": "my-cloud-project", "opt_url": "https://example"}
+    ]
+
+
+def test_initialize_runs_at_most_once_per_process(unauthenticated_ee):
+    """Repeated fetches in one session must not re-enter ee.Initialize."""
+    rd.initialize(project="my-cloud-project")
+    rd.initialize()
+    rd.initialize(project="a-different-project")
+    assert unauthenticated_ee.calls == [{"project": "my-cloud-project"}]
+    assert rd._INITIALIZED is True
+
+
+def test_initialize_failure_names_the_authentication_command(unauthenticated_ee):
+    """A missing credential is a set-up problem, so say how to fix it."""
+
+    def refuse(**kwargs):
+        raise RuntimeError("Please authorize access to your Earth Engine account.")
+
+    unauthenticated_ee.module.Initialize = refuse
+    with pytest.raises(RuntimeError, match="earthengine authenticate"):
+        rd.initialize()
+    # The session is not marked ready, so a later call can still succeed.
+    assert rd._INITIALIZED is False
+
+
+def test_public_names_all_exist():
+    """__all__ is the advertised surface of the module; it must not go stale."""
+    assert [name for name in rd.__all__ if not hasattr(rd, name)] == []
+
+
+# ----------------------------
+# Sensor table
+# ----------------------------
+def test_band_roles_match_each_sensor():
+    """
+    TM and OLI number their bands differently, and Eq. 4 is asymmetric.
+
+    Swapping red for NIR between the two sensors would leave every call
+    working and every EVI wrong, which no other assertion here would catch.
+    """
+    tm, oli = rd.LANDSAT_COLLECTIONS
+    assert (tm.label, tm.blue, tm.red, tm.nir) == (
+        "LANDSAT_5",
+        "SR_B1",
+        "SR_B3",
+        "SR_B4",
+    )
+    assert (oli.label, oli.blue, oli.red, oli.nir) == (
+        "LANDSAT_8",
+        "SR_B2",
+        "SR_B4",
+        "SR_B5",
+    )
+    assert tm.qa == oli.qa == "QA_PIXEL"
+
+
+def test_landsat_bands_are_frozen():
+    """The table is module-level state; a caller must not be able to edit it."""
+    import dataclasses
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        rd.LANDSAT_COLLECTIONS[0].red = "SR_B4"
+
+
+# ----------------------------
+# CRS handling
+# ----------------------------
+def test_projection_prefers_the_authority_code_over_wkt():
+    assert rd._projection({"crsCode": UTM}) == UTM
+    assert rd._projection({"crsWkt": "PROJCRS[...]"}) == "PROJCRS[...]"
+
+
+# ----------------------------
+# Grid construction
+# ----------------------------
+def test_pixel_grid_rejects_a_non_finite_northing():
+    """y is checked as well as x, which the finite-position message covers."""
+    with pytest.raises(ValueError, match="finite"):
+        rd._pixel_grid(0.0, np.nan, 300.0, 30.0, {"crsCode": UTM}, bands=2)
+
+
+def test_pixel_grid_rejects_an_infinite_radius():
+    with pytest.raises(ValueError, match="radius"):
+        rd._pixel_grid(0.0, 0.0, np.inf, 30.0, {"crsCode": UTM}, bands=2)
+
+
+def test_pixel_grid_sizes_the_response_by_band_count():
+    """The mask travels with the data, so both bands count against the cap."""
+    call = (0.0, 0.0, 1000.0, 1.0, {"crsCode": UTM})
+    grid, _, _ = rd._pixel_grid(*call, bands=1)
+    assert grid["dimensions"] == {"width": 2000, "height": 2000}
+    with pytest.raises(ValueError, match="response limit"):
+        rd._pixel_grid(*call, bands=2)
+
+
+# ----------------------------
+# Eq. 4 edge cases
+# ----------------------------
+def test_evi_leaves_a_near_zero_denominator_unclipped():
+    """
+    Eq. 4 is returned as the paper states it, outliers included.
+
+    Over a bright bare surface ``NIR + 6 RED - 7.5 BLUE + 1`` can approach
+    zero. Clipping the result here would quietly redefine the index, so the
+    outlier has to survive for the caller to screen.
+    """
+
+    def digital_number(reflectance):
+        return (reflectance - rd.SR_OFFSET) / rd.SR_SCALE
+
+    # Reflectances NIR 0.1, RED 0.0, BLUE 1.1 / 7.5 zero the denominator.
+    scene = landsat_scene(
+        (digital_number(1.1 / 7.5), digital_number(0.0), digital_number(0.1)),
+        QA_CLEAR,
+        "2015-06-01",
+        shape=(1, 1),
+    )
+    value = rd._evi(scene, rd.LANDSAT_COLLECTIONS[1]).bands["evi"][0, 0]
+    assert abs(value) > 1e3  # far outside the physical range of the index
+
+
+def test_evi_keeps_an_off_swath_pixel_masked():
+    """A pixel the swath never reached must not come back as a real EVI."""
+    scene = landsat_scene(
+        (BLUE_DN, RED_DN, NIR_DN), QA_CLEAR, "2015-06-01", shape=(1, 2)
+    )
+    scene.masks["QA_PIXEL"] = np.array([[True, False]])
+    result = rd._evi(scene, rd.LANDSAT_COLLECTIONS[1])
+    assert result.bands["valid"].tolist() == [[1.0, 0.0]]
+
+
+# ----------------------------
+# Date normalisation
+# ----------------------------
+@pytest.mark.parametrize("value", [None, float("nan"), pd.NaT])
+def test_timestamp_rejects_a_missing_date(value):
+    """A NaT slips past the parser, so it is caught on its own."""
+    with pytest.raises(ValueError, match="must be a real date"):
+        rd._timestamp(value, "end")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2015-06-01",
+        "2015-06-01 13:45:00",
+        dt.date(2015, 6, 1),
+        pd.Timestamp("2015-06-01T13:45").to_pydatetime(),
+        pd.Timestamp("2015-06-01T13:45"),
+    ],
+)
+def test_timestamp_normalises_every_accepted_type(value):
+    """Whatever a caller passes, Earth Engine sees one YYYY-MM-DD form."""
+    assert rd._timestamp(value, "start") == "2015-06-01"
+
+
+# ----------------------------
+# Scene screening
+# ----------------------------
+def _crafted_metadata(fake_ee, features):
+    """Answer the screening query with hand-written feature properties."""
+    fake_ee.module.FeatureCollection = lambda collection: SimpleNamespace(
+        getInfo=lambda: features
+    )
+    return fake_ee.module
+
+
+def test_clear_scenes_reports_an_unknown_fraction_as_nan(fake_ee):
+    """
+    A scene Earth Engine returns no fraction for must not read as spotless.
+
+    ``obscured_fraction`` reaches the caller on the array it filters on, so a
+    null has to arrive as ``nan`` rather than as a plausible number.
+    """
+    module = _crafted_metadata(
+        fake_ee,
+        {
+            "features": [
+                {
+                    "properties": {
+                        "index": "LC08_20150801",
+                        "time_start": int(pd.Timestamp("2015-08-01").value // 10**6),
+                        "obscured_fraction": None,
+                    }
+                },
+                {
+                    "properties": {
+                        "index": "LC08_20150817",
+                        "time_start": int(pd.Timestamp("2015-08-17").value // 10**6),
+                        "obscured_fraction": 0.004,
+                    }
+                },
+            ]
+        },
+    )
+    scenes = rd._clear_scenes(
+        module,
+        rd.LANDSAT_COLLECTIONS[1],
+        disc=None,
+        first="2015-01-01",
+        last="2016-01-01",
+        scale=30.0,
+        max_cloud=0.01,
+        projection=UTM,
+    )
+    assert [scene[0] for scene in scenes] == [
+        pd.Timestamp("2015-08-01"),
+        pd.Timestamp("2015-08-17"),
+    ]
+    assert [scene[2] for scene in scenes] == ["LC08_20150801", "LC08_20150817"]
+    assert np.isnan(scenes[0][3])
+    assert scenes[1][3] == pytest.approx(0.004)
+
+
+@pytest.mark.parametrize("response", [None, {}, {"features": []}])
+def test_clear_scenes_survives_an_empty_response(fake_ee, response):
+    """No scene over the window is an ordinary answer, not an error."""
+    module = _crafted_metadata(fake_ee, response)
+    assert (
+        rd._clear_scenes(
+            module,
+            rd.LANDSAT_COLLECTIONS[0],
+            disc=None,
+            first="2015-01-01",
+            last="2016-01-01",
+            scale=30.0,
+            max_cloud=0.01,
+            projection=UTM,
+        )
+        == []
+    )
+
+
+# ----------------------------
+# fetch_nlcd
+# ----------------------------
+def test_fetch_nlcd_says_so_when_the_collection_is_empty(fake_ee):
+    """An empty catalogue must not print an empty list of epochs."""
+    fake_ee.collections[rd.NLCD_COLLECTION] = []
+    with pytest.raises(ValueError, match=r"\(none\)"):
+        rd.fetch_nlcd(TOWER_X, TOWER_Y, UTM, 2016)
+
+
+def test_fetch_nlcd_reads_the_collection_and_band_it_is_given(fake_ee):
+    """A newer release has to be reachable without editing the module."""
+    fake_ee.collections["USGS/NLCD_RELEASES/2021_REL/NLCD"] = [
+        FakeImage({"cover": np.array([[71.0]])}, properties={"system:index": "2021"})
+    ]
+    nlcd = rd.fetch_nlcd(
+        TOWER_X,
+        TOWER_Y,
+        UTM,
+        2021,
+        radius=15.0,
+        collection="USGS/NLCD_RELEASES/2021_REL/NLCD",
+        band="cover",
+    )
+    assert nlcd.values.tolist() == [[71.0]]
+    assert nlcd.attrs["band"] == "cover"
+    assert nlcd.attrs["source"] == "USGS/NLCD_RELEASES/2021_REL/NLCD/2021"
+    assert rd.NLCD_COLLECTION not in fake_ee.queried
+
+
+def test_fetch_nlcd_records_its_provenance(nlcd_ee):
+    """The attrs are what a later reader has to reconstruct the fetch from."""
+    nlcd = rd.fetch_nlcd(TOWER_X, TOWER_Y, UTM, 2016, radius=30.0, scale=30.0)
+    # rioxarray records the nodata it was given; the rest is this module's.
+    assert np.isnan(nlcd.attrs.pop("_FillValue"))
+    assert nlcd.attrs == {
+        "long_name": "NLCD land cover class",
+        "source": f"{rd.NLCD_COLLECTION}/2016",
+        "band": rd.NLCD_BAND,
+        "year": 2016,
+        "scale_m": 30.0,
+        "radius_m": 30.0,
+        # _align_raster must resample class codes with nearest neighbour.
+        "categorical": 1,
+    }
+
+
+def test_fetch_nlcd_refuses_an_oversized_tile_before_asking(nlcd_ee):
+    """The size check is local, so an over-large grid costs no request."""
+    with pytest.raises(ValueError, match="response limit"):
+        rd.fetch_nlcd(TOWER_X, TOWER_Y, UTM, 2016, radius=50_000.0, scale=1.0)
+    assert nlcd_ee.requests == []
+
+
+# ----------------------------
+# fetch_landsat_evi
+# ----------------------------
+def test_fetch_landsat_evi_builds_the_disc_in_the_target_crs(landsat_ee):
+    """
+    The screening disc is buffered by `radius` in metres.
+
+    Constructed without an explicit projection the point would default to
+    degrees, and ``buffer(60)`` would then span most of a continent.
+    """
+    rd.fetch_landsat_evi(TOWER_X, TOWER_Y, UTM, "2010-01-01", "2016-01-01", radius=60.0)
+    assert REDUCTIONS
+    for call in REDUCTIONS:
+        assert call["geometry"].coords == [TOWER_X, TOWER_Y]
+        assert call["geometry"].proj == UTM
+        assert call["geometry"].radius == 60.0
+
+
+def test_fetch_landsat_evi_works_in_a_crs_without_an_epsg_code(landsat_ee):
+    """A bespoke CRS has to reach Earth Engine as WKT, everywhere it is used."""
+    from pyproj import CRS
+
+    bespoke = CRS.from_proj4("+proj=tmerc +lat_0=0 +lon_0=-111 +k=0.9996 +units=m")
+    scenes = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, bespoke, "2010-01-01", "2016-01-01", radius=60.0
+    )
+    assert len(scenes) == 2
+    for request in landsat_ee.requests:
+        assert "crsCode" not in request["grid"]
+        assert request["grid"]["crsWkt"].startswith(("PROJCRS", "PROJCS"))
+    for call in REDUCTIONS:
+        assert call["crs"].startswith(("PROJCRS", "PROJCS"))
+    assert scenes[0].rio.crs.to_epsg() is None
+    assert CRS.from_user_input(scenes[0].rio.crs).equals(bespoke)
+
+
+def test_fetch_landsat_evi_lifts_the_cap_when_max_scenes_is_none(landsat_ee):
+    """None has to mean no ceiling, not a ceiling of zero."""
+    scenes = rd.fetch_landsat_evi(
+        TOWER_X,
+        TOWER_Y,
+        UTM,
+        "2010-01-01",
+        "2016-01-01",
+        radius=60.0,
+        max_cloud=0.6,
+        max_scenes=None,
+    )
+    assert len(scenes) == 3
+    assert len(landsat_ee.requests) == 3
+
+
+def test_fetch_landsat_evi_keeps_everything_at_max_cloud_one(landsat_ee):
+    scenes = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, UTM, "2010-01-01", "2016-01-01", radius=60.0, max_cloud=1.0
+    )
+    assert len(scenes) == 3
+
+
+def test_fetch_landsat_evi_screens_strictly_at_max_cloud_zero(landsat_ee):
+    """The threshold is exclusive, as ``ee.Filter.lt`` reads it."""
+    scenes = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, UTM, "2010-01-01", "2016-01-01", radius=60.0, max_cloud=0.0
+    )
+    assert scenes == []
+    assert landsat_ee.requests == []
+
+
+def test_fetch_landsat_evi_accepts_an_empty_window(landsat_ee):
+    """`end` is exclusive, so start == end is a legal, empty request."""
+    scenes = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, UTM, "2015-01-01", "2015-01-01", radius=60.0
+    )
+    assert scenes == []
+
+
+def test_fetch_landsat_evi_orders_same_day_scenes_by_id(fake_ee):
+    """
+    Two scenes acquired the same day must come back in a settled order.
+
+    Sorting on the timestamp alone would leave adjacent-path scenes in
+    whatever order the collections happened to answer in, which makes a
+    retrieval unreproducible.
+    """
+    same_day = []
+    for index in ("LC08_B", "LC08_A"):
+        scene = landsat_scene((BLUE_DN, RED_DN, NIR_DN), QA_CLEAR, "2015-09-01")
+        scene.properties["system:index"] = index
+        same_day.append(scene)
+    fake_ee.collections["LANDSAT/LC08/C02/T1_L2"] = same_day
+    for scene in same_day:
+        identifier = scene.get("system:index")
+        fake_ee.catalog[f"LANDSAT/LC08/C02/T1_L2/{identifier}"] = scene
+
+    fetched = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, UTM, "2015-01-01", "2016-01-01", radius=60.0
+    )
+    assert [scene.attrs["scene_id"] for scene in fetched] == ["LC08_A", "LC08_B"]
+
+
+def test_fetch_landsat_evi_records_its_provenance(landsat_ee):
+    """Each array has to name the scene it came from and the index applied."""
+    (scene,) = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, UTM, "2015-01-01", "2016-01-01", radius=60.0, scale=30.0
+    )
+    assert np.isnan(scene.attrs.pop("_FillValue"))
+    assert scene.attrs == {
+        "long_name": "Enhanced Vegetation Index",
+        "source": "LANDSAT/LC08/C02/T1_L2/LC08_20150801",
+        "spacecraft": "LANDSAT_8",
+        "scene_id": "LC08_20150801",
+        "date": "2015-08-01",
+        "obscured_fraction": pytest.approx(0.0),
+        "scale_m": 30.0,
+        "radius_m": 60.0,
+        "equation": "2.5 * (NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1)",
+    }
+
+
+def test_fetch_landsat_evi_asks_for_one_identical_grid_per_scene(landsat_ee):
+    """Every scene lands on the same grid, or the series cannot be stacked."""
+    scenes = rd.fetch_landsat_evi(
+        TOWER_X, TOWER_Y, UTM, "2010-01-01", "2016-01-01", radius=60.0
+    )
+    assert len(landsat_ee.requests) == len(scenes) == 2
+    grids = [request["grid"] for request in landsat_ee.requests]
+    assert grids[0] == grids[1]
+    assert set(landsat_ee.requests[0]["expression"].bands) == {"evi", "valid"}
+
+
+def test_fetch_landsat_evi_validates_before_touching_earth_engine(fake_ee):
+    """A bad threshold or window must not cost a session or a query."""
+    with pytest.raises(ValueError, match="max_cloud"):
+        rd.fetch_landsat_evi(
+            TOWER_X, TOWER_Y, UTM, "2015-01-01", "2016-01-01", max_cloud=2.0
+        )
+    with pytest.raises(ValueError, match="not a date"):
+        rd.fetch_landsat_evi(TOWER_X, TOWER_Y, UTM, "not a date", "2016-01-01")
+    assert fake_ee.queried == []
+    assert fake_ee.requests == []
+
+
+def test_fetch_landsat_evi_surfaces_a_failed_scene_request(landsat_ee):
+    """A scene that fails mid-retrieval must name itself in the error."""
+
+    def explode(request):
+        raise RuntimeError("Quota exceeded.")
+
+    landsat_ee.module.data.computePixels = explode
+    with pytest.raises(RuntimeError, match="LANDSAT_5 scene LT05_20110501"):
+        rd.fetch_landsat_evi(
+            TOWER_X, TOWER_Y, UTM, "2010-01-01", "2016-01-01", radius=60.0
+        )
