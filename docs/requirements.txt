@@ -15,6 +15,7 @@ pyproj
 affine
 requests
 netcdf4
+pyarrow
 
 # Documentation toolchain (matches the extensions enabled in conf.py)
 sphinx

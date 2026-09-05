@@ -29,6 +29,7 @@ dependencies = [
     "affine>=2.4", 
     "requests>=2.28", 
     "netcdf4>=1.6",
+    "pyarrow>=12.0",
 ]
 
 
