@@ -116,6 +116,8 @@ VEG_PRESETS = {
     "phragmites": {"d_h_fraction": 0.75, "z0_fraction": 0.090},
     "wetland_grass": {"d_h_fraction": 0.70, "z0_fraction": 0.110},
     "pinyon_juniper": {"d_h_fraction": 0.60, "z0_fraction": 0.100},
+    "open_water": {"d_h_fraction": 0.0, "z0_val": 0.0002},
+    "playa": {"d_h_fraction": 0.0, "z0_val": 0.0002},
 }
 
 # Unified Flexible Input Type Alias
@@ -221,11 +223,12 @@ def compute_aerodynamic_params(
 
     if veg_type is not None:
         veg_type_clean = veg_type.lower()
-        if veg_type_clean not in VEG_PRESETS:
+        if veg_type_clean not in VEG_PRESETS and veg_type_clean not in ['playa', 'open_water']:
             raise ValueError(
                 f"Unknown veg_type '{veg_type}'. Available options: {list(VEG_PRESETS.keys())}"
-            )
-        preset = VEG_PRESETS[veg_type_clean]
+                )
+        else:
+            preset = VEG_PRESETS.get(veg_type_clean, {})
     else:
         preset = {}
 
@@ -236,6 +239,8 @@ def compute_aerodynamic_params(
         d_h_val = 10 ** (0.979 * np.log10(h_c) - 0.154)
     elif "d_h_fraction" in preset:
         d_h_val = h_c * preset["d_h_fraction"]
+    elif veg_type_clean in ['playa', 'open_water']:
+        d_h_val = 0.0
     else:
         raise ValueError(
             "Missing displacement height rule! Specify 'd_h_ratio' or pass a valid 'veg_type'."
@@ -248,6 +253,8 @@ def compute_aerodynamic_params(
         z0_val = 0.26 * (h_c - d_h_val)
     elif "z0_fraction" in preset:
         z0_val = h_c * preset["z0_fraction"]
+    elif veg_type_clean in ['playa', 'open_water']:
+        z0_val = 0.0006
     else:
         raise ValueError(
             "Missing roughness length rule! Specify 'z0_ratio' or pass a valid 'veg_type'."
