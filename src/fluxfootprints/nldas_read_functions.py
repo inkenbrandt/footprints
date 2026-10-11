@@ -58,9 +58,10 @@ def parse_nldas_csv(ts):
                 headers[key] = value.strip()
         except ValueError as e:
             raise ValueError(
-                "The returned CSV is empty.\n"
+                "The returned CSV is empty or malformed.\n"
                 "Please ensure that your subsetting bounds are within the extent of your dataset\n"
-                "or that your permissions are set up correctly"
+                "or that your permissions are set up correctly (Earthdata tokens expire after 60 days).\n"
+                f"Response began with:\n{ts[:500]}"
             ) from e
 
         # Read the csv proper
