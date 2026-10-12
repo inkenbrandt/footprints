@@ -465,7 +465,79 @@ def summarize_periods(
     monthly: bool = True,
     normalize_each_time: bool = False,
 ) -> SummaryResult:
-    """Build daily/monthly summaries matching Kljun canonical denominator logic."""
+    """Build daily/monthly summaries matching Kljun canonical denominator logic.
+
+    Aggregates a model's time-resolved 2-D footprint into daily and/or monthly
+    mean footprints, ET-weighted footprints (optional), and domain-coverage
+    statistics. Timesteps whose footprint integrates to zero (e.g. model
+    failures or filtered records) are treated as invalid and excluded from
+    every average and from the ET-weighting denominator.
+
+    Parameters
+    ----------
+    model : BaseFootprintModel
+        A footprint model that has already been run, so that ``model.f_2d`` is
+        populated and ``model.get_footprint_timeseries()`` returns an
+        ``xr.DataArray`` with dims ``("time", "x", "y")`` holding footprint
+        density (m^-2). If the model exposes ``dx`` and ``dy`` they are used as
+        the grid cell size; otherwise cell size is inferred from the ``x``/``y``
+        coordinate spacing.
+    df : pd.DataFrame
+        Time-indexed input data. Only used to supply the ET/LE column; it is
+        reindexed onto the footprint ``time`` coordinate using exact matches,
+        so timestamps absent from ``df`` get NaN weights.
+    et_source : str or None, default "LE"
+        Name of the column in ``df`` used for ET weighting. If None or not
+        present in ``df``, ET-weighted outputs are silently skipped.
+    is_le : bool, default True
+        If True, ``et_source`` is latent energy (W m^-2) and is converted to
+        ET (mm hr^-1) by dividing by 680.6. Set False when ``et_source``
+        already holds ET in mm hr^-1 (e.g. NLDAS).
+    calc_et_weighted : bool, default True
+        Toggle ET-weighted footprints and ET-weighted coverage on/off.
+    daily : bool, default True
+        Compute daily (``"1D"``) aggregates.
+    monthly : bool, default True
+        Compute monthly (``"MS"``, month-start labelled) aggregates.
+    normalize_each_time : bool, default False
+        If True, rescale each valid time slice so it sums to 1 over x, y
+        before averaging. Note this normalizes the raw *sum* (not the
+        area-integral), so the resulting values are per-cell weights rather
+        than densities. Coverage statistics are always computed on the
+        un-normalized footprint.
+
+    Returns
+    -------
+    SummaryResult
+        Fields are populated according to the ``daily``, ``monthly`` and ET
+        flags; unrequested outputs remain None.
+
+        - ``f_daily_mean`` / ``f_monthly_mean`` : xr.DataArray
+            Unweighted mean of valid footprint slices per period.
+        - ``f_daily_et_weighted`` / ``f_monthly_et_weighted`` : xr.DataArray
+            ``sum(f * ET) / sum(ET)`` over valid slices per period. NaN for
+            periods whose ET sum is <= 0.
+        - ``daily_domain_coverage`` / ``monthly_domain_coverage`` : pd.DataFrame
+            Indexed by period, with columns ``mean_coverage_pct``,
+            ``et_weighted_coverage_pct`` (only when ET is used),
+            ``min_coverage_pct``, ``max_coverage_pct`` and
+            ``valid_timesteps``. Coverage is the percentage of the footprint
+            captured inside the model domain (``sum(f) * dx * dy * 100``).
+
+    Raises
+    ------
+    ValueError
+        If the model has no computed ``f_2d`` or does not provide a
+        time-resolved footprint.
+
+    Notes
+    -----
+    - Coverage values can exceed 100% close to the tower, where a narrow
+      crosswind Gaussian is under-resolved by the grid. This discretization
+      artifact is intentionally left unclamped.
+    - Negative ET values are not clipped and therefore enter the weighting
+      as-is; filter or clip ``et_source`` beforehand if that is undesirable.
+    """
 
     if not hasattr(model, "f_2d") or model.f_2d is None:
         raise ValueError("Model must have f_2d attribute computed")
@@ -902,7 +974,66 @@ def export_rasters_geotiff(
     dtype="float32",
     nodata=0.0,
 ) -> Path:
-    """Export each time slice as GeoTIFF, with optional target CRS reprojection."""
+    """
+    Export each time slice of the footprint summaries as a single-band GeoTIFF.
+
+    The footprint grid (``model.x``, ``model.y``) is given in metres relative
+    to the tower. It is first placed in the local WGS 84 UTM zone by offsetting
+    it with the tower's projected coordinates. If ``crs_out`` names a different
+    CRS, each slice is then reprojected onto that CRS with bilinear resampling.
+
+    Parameters
+    ----------
+    model : FFPModel
+        A footprint model that has been run. Its ``x`` and ``y`` attributes are
+        1-D, evenly spaced coordinate arrays (metres from the tower) with at
+        least two points each.
+    summaries : SummaryResult
+        Output of the daily/monthly summary step. The attributes
+        ``f_daily_mean``, ``f_monthly_mean``, ``f_daily_et_weighted`` and
+        ``f_monthly_et_weighted`` are read as ``xr.DataArray`` objects with
+        dims ``("time", "x", "y")``. Missing or ``None`` attributes are
+        skipped.
+    station_lat, station_lon : float
+        Tower latitude and longitude in decimal degrees (WGS 84). Used to pick
+        the UTM zone and to anchor the grid.
+    out_dir : str or Path
+        Output directory. Created if it does not exist.
+    crs_out : str or int, default "auto"
+        Target CRS for the output rasters. ``"auto"`` writes in the local UTM
+        zone without resampling. Any other value accepted by
+        ``pyproj.CRS.from_user_input`` (e.g. ``4326``, ``"EPSG:5070"``)
+        triggers reprojection.
+    which : iterable of str, default ("daily_mean", "monthly_mean", "daily_etw", "monthly_etw")
+        Layers to export. Valid names are ``"daily_mean"``, ``"monthly_mean"``,
+        ``"daily_etw"`` and ``"monthly_etw"``.
+    prefix : str, default "ffp"
+        Filename prefix.
+    dtype : str, default "float32"
+        Output raster data type. Also selects the deflate predictor: 3 for
+        floating-point types, 2 for integer types.
+    nodata : float, default 0.0
+        Nodata value written to the raster metadata. Reprojected cells outside
+        the source extent are also filled with this value.
+
+    Returns
+    -------
+    Path
+        The output directory.
+
+    Raises
+    ------
+    ValueError
+        If ``model.x`` or ``model.y`` has fewer than two points, or if
+        ``which`` contains an unknown layer name.
+
+    Notes
+    -----
+    Files are named ``{prefix}_{layer}_{YYYYMMDD}.tif`` for daily layers and
+    ``{prefix}_{layer}_{YYYYMM}.tif`` for monthly layers. Rasters at least
+    256 x 256 pixels are written tiled with 256-pixel blocks; smaller rasters
+    are written striped.
+    """
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1042,7 +1173,59 @@ def export_contour_stats_csv(
     crs_out: str | int = "auto",
     levels=(0.8,),
 ) -> Path:
-    """Export contour stats to CSV (adapted for FFPModel)."""
+    """
+    Write the area and centroid of footprint source-area contours to a CSV.
+
+    For each layer, contour level and time slice, the smallest region holding
+    fraction ``r`` of the normalised footprint is traced as a polygon. The
+    polygon is shifted from tower-relative metres into ``crs_out``, and its
+    area and centroid are written as one row.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Not used. Kept for signature compatibility with the other export
+        helpers.
+    model : FFPModel
+        A footprint model that has been run. Its ``x`` and ``y`` attributes
+        are 1-D coordinate arrays in metres relative to the tower.
+    summaries : SummaryResult
+        Output of the daily/monthly summary step. The attributes
+        ``f_daily_mean``, ``f_monthly_mean``, ``f_daily_et_weighted`` and
+        ``f_monthly_et_weighted`` are read as ``xr.DataArray`` objects with a
+        ``time`` dimension. ``None`` layers are skipped.
+    station_lat, station_lon : float
+        Tower latitude and longitude in decimal degrees (WGS 84).
+    csv_path : str or Path
+        Path of the CSV file to write. Overwritten if it exists.
+    rn_col, h_col, le_col, g_col : str, optional
+        Not used. Kept for signature compatibility.
+    method : {"auto", "skimage", "rasterio"}, default "auto"
+        Contour extraction backend passed to
+        ``_make_contour_polygon_from_field_alt``. ``"auto"`` tries
+        scikit-image first and falls back to rasterio.
+    crs_out : str or int, default "auto"
+        CRS the polygons are placed in before area and centroid are computed.
+        ``"auto"`` uses the local WGS 84 UTM zone. Any other value must be a
+        projected CRS in metres, because the grid offsets are added directly
+        to the tower's projected coordinates and area is converted from m^2.
+    levels : iterable of float, default (0.8,)
+        Cumulative source-area fractions (0-1) to contour.
+
+    Returns
+    -------
+    Path
+        Path of the written CSV.
+
+    Notes
+    -----
+    The CSV has the columns ``layer``, ``time`` (ISO 8601), ``r`` (contour
+    level), ``area_ha`` (polygon area in hectares), ``centroid_lon`` and
+    ``centroid_lat`` (WGS 84 degrees). Only the largest polygon is kept for
+    each slice, so a footprint split into several patches is
+    under-reported. Slices where no contour can be traced,
+    such as an all-zero or all-NaN field, are skipped without a row.
+    """
 
 
     x = model.x
