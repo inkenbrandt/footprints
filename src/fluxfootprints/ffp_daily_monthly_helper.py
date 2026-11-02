@@ -1162,6 +1162,153 @@ def export_rasters_geotiff(
 
     return Path(out_dir)
 
+
+def export_summaries_zarr(
+    model: BaseFootprintModel,
+    summaries: SummaryResult,
+    station_lat: float,
+    station_lon: float,
+    store: str | Path,
+    which=("daily_mean", "monthly_mean", "daily_etw", "monthly_etw"),
+    include_climatology: bool = True,
+    dtype="float32",
+    chunks: dict | None = None,
+    mode: str = "w",
+) -> Path:
+    """
+    Export footprint summaries to a single georeferenced Zarr store.
+
+    Unlike :func:`export_rasters_geotiff`, which writes one file per time
+    slice, every requested layer goes into one store as a ``(time, y, x)``
+    array. Daily and monthly layers keep separate time axes, ``time_daily``
+    and ``time_monthly``. The grid stays in metres relative to the tower
+    (``x``, ``y``); the local WGS 84 UTM coordinates are added as the
+    ``easting`` and ``northing`` coordinates, and a CF ``spatial_ref`` grid
+    mapping variable records the CRS, so GDAL, rioxarray and other CF-aware
+    tools can place the data.
+
+    Requires the optional ``zarr`` package
+    (``pip install fluxfootprints[zarr]``).
+
+    Parameters
+    ----------
+    model : BaseFootprintModel
+        A footprint model that has been run. Its ``x`` and ``y`` attributes are
+        1-D coordinate arrays in metres from the tower.
+    summaries : SummaryResult
+        Output of :func:`summarize_periods`. Missing or ``None`` layers are
+        skipped.
+    station_lat, station_lon : float
+        Tower latitude and longitude in decimal degrees (WGS 84).
+    store : str or Path
+        Output Zarr store, usually a directory path ending in ``.zarr``.
+    which : iterable of str, default ("daily_mean", "monthly_mean", "daily_etw", "monthly_etw")
+        Layers to export. Valid names are ``"daily_mean"``, ``"monthly_mean"``,
+        ``"daily_etw"`` and ``"monthly_etw"``.
+    include_climatology : bool, default True
+        Also write the model's overall climatology as ``climatology`` with
+        dims ``(y, x)``, if it is available.
+    dtype : str, default "float32"
+        Data type of the footprint arrays.
+    chunks : dict, optional
+        Chunk sizes per dimension, e.g. ``{"time_daily": 30}``. Needs ``dask``.
+    mode : str, default "w"
+        Write mode passed to :meth:`xarray.Dataset.to_zarr`. ``"w"``
+        overwrites an existing store.
+
+    Returns
+    -------
+    Path
+        The path of the Zarr store.
+
+    Raises
+    ------
+    ValueError
+        If ``which`` contains an unknown layer name, or nothing is left to
+        write.
+    ImportError
+        If the ``zarr`` package is not installed.
+    """
+    from .base_footprint_model import write_zarr
+
+    x = np.asarray(model.x, dtype=float)
+    y = np.asarray(model.y, dtype=float)
+
+    utm_epsg = _choose_utm_epsg_pyproj(station_lon, station_lat)
+    utm_crs = CRS.from_epsg(utm_epsg)
+    to_proj = Transformer.from_crs(CRS.from_epsg(4326), utm_crs, always_xy=True)
+    x0, y0 = to_proj.transform(station_lon, station_lat)
+
+    layer_map = {
+        "daily_mean": getattr(summaries, "f_daily_mean", None),
+        "monthly_mean": getattr(summaries, "f_monthly_mean", None),
+        "daily_etw": getattr(summaries, "f_daily_et_weighted", None),
+        "monthly_etw": getattr(summaries, "f_monthly_et_weighted", None),
+    }
+    long_names = {
+        "daily_mean": "Daily mean footprint",
+        "monthly_mean": "Monthly mean footprint",
+        "daily_etw": "Daily ET-weighted footprint",
+        "monthly_etw": "Monthly ET-weighted footprint",
+    }
+
+    data_vars = {}
+    for name in which:
+        if name not in layer_map:
+            raise ValueError(f"Unknown layer '{name}'")
+        da = layer_map[name]
+        if da is None:
+            continue
+        time_dim = "time_daily" if name.startswith("daily") else "time_monthly"
+        da = da.transpose("time", "y", "x").rename({"time": time_dim}).astype(dtype)
+        da = da.assign_coords(x=x, y=y)
+        da.attrs = {
+            "long_name": long_names[name],
+            "units": "m-2",
+            "grid_mapping": "spatial_ref",
+        }
+        data_vars[name] = da
+
+    if include_climatology:
+        fclim = getattr(model, "fclim_2d", None)
+        if isinstance(fclim, xr.DataArray) and {"x", "y"} <= set(fclim.dims):
+            clim = fclim.transpose("y", "x").astype(dtype).assign_coords(x=x, y=y)
+            clim.attrs = {
+                "long_name": "Footprint climatology",
+                "units": "m-2",
+                "grid_mapping": "spatial_ref",
+            }
+            data_vars["climatology"] = clim
+
+    if not data_vars:
+        raise ValueError("No footprint layers available to write")
+
+    ds = xr.Dataset(data_vars)
+    ds = ds.assign_coords(
+        easting=("x", x + x0, {"units": "m", "standard_name": "projection_x_coordinate"}),
+        northing=("y", y + y0, {"units": "m", "standard_name": "projection_y_coordinate"}),
+        spatial_ref=xr.DataArray(
+            np.int32(0),
+            attrs={**utm_crs.to_cf(), "crs_wkt": utm_crs.to_wkt(), "epsg_code": f"EPSG:{utm_epsg}"},
+        ),
+    )
+    ds["x"].attrs = {"units": "m", "long_name": "Distance east of tower"}
+    ds["y"].attrs = {"units": "m", "long_name": "Distance north of tower"}
+    ds.attrs = {
+        "title": "Flux footprint summaries",
+        "station_lat": float(station_lat),
+        "station_lon": float(station_lon),
+        "tower_easting": float(x0),
+        "tower_northing": float(y0),
+        "crs": f"EPSG:{utm_epsg}",
+        "Conventions": "CF-1.8",
+        "source": "fluxfootprints",
+    }
+
+    write_zarr(ds, store, mode=mode, chunks=chunks)
+    return Path(store)
+
+
 def export_contour_stats_csv(
     df: pd.DataFrame,
     model: FFPModel,

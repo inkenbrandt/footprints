@@ -79,6 +79,73 @@ def source_weight_threshold(
 _source_weight_threshold = source_weight_threshold
 
 
+def _json_safe_attr(value):
+    """Return `value` in a form the Zarr JSON metadata can hold."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_attr(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _json_safe_attr(v) for k, v in value.items()}
+    return str(value)
+
+
+def write_zarr(
+    ds: xr.Dataset,
+    store,
+    mode: str = "w",
+    chunks: dict | None = None,
+    **kwargs,
+) -> None:
+    """
+    Write an xarray Dataset to a Zarr store.
+
+    Thin wrapper around :meth:`xarray.Dataset.to_zarr` shared by the model
+    classes and the summary export helpers. Attributes are converted to
+    JSON-compatible types first, because Zarr keeps metadata as JSON.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset to write. It is not modified.
+    store : str, Path or zarr store
+        Output store, usually a directory path ending in ``.zarr``.
+    mode : str, default "w"
+        Write mode passed to :meth:`xarray.Dataset.to_zarr`.
+    chunks : dict, optional
+        Chunk sizes per dimension, applied with :meth:`xarray.Dataset.chunk`
+        before writing. Needs ``dask``.
+    **kwargs
+        Passed on to :meth:`xarray.Dataset.to_zarr`.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``zarr`` package is not installed.
+    """
+    try:
+        import zarr  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "Writing Zarr output requires the 'zarr' package. Install it with "
+            "'pip install fluxfootprints[zarr]' or 'pip install zarr'."
+        ) from exc
+
+    out = ds.copy()
+    out.attrs = {str(k): _json_safe_attr(v) for k, v in out.attrs.items()}
+    for name in out.variables:
+        out[name].attrs = {
+            str(k): _json_safe_attr(v) for k, v in out[name].attrs.items()
+        }
+    if chunks:
+        out = out.chunk(chunks)
+    out.to_zarr(store, mode=mode, **kwargs)
+
+
 class BaseFootprintModel(ABC):
     """
     Abstract base class for flux footprint models.
@@ -269,3 +336,33 @@ class BaseFootprintModel(ABC):
         results = self.get_results()
         results.to_netcdf(filepath)
         self.logger.info(f"Results saved to {filepath}")
+
+    def to_zarr(
+        self,
+        store,
+        mode: str = "w",
+        chunks: dict | None = None,
+        **kwargs,
+    ) -> None:
+        """
+        Save results to a Zarr store.
+
+        Requires the optional ``zarr`` package
+        (``pip install fluxfootprints[zarr]``).
+
+        Parameters
+        ----------
+        store : str, Path or zarr store
+            Output store, usually a directory path ending in ``.zarr``.
+        mode : str, default "w"
+            Write mode passed to :meth:`xarray.Dataset.to_zarr`. ``"w"``
+            overwrites an existing store, ``"w-"`` fails if it exists and
+            ``"a"`` appends (combine with ``append_dim="time"``).
+        chunks : dict, optional
+            Chunk sizes per dimension, e.g. ``{"time": 24}``, applied with
+            :meth:`xarray.Dataset.chunk` before writing. Needs ``dask``.
+        **kwargs
+            Passed on to :meth:`xarray.Dataset.to_zarr`.
+        """
+        write_zarr(self.get_results(), store, mode=mode, chunks=chunks, **kwargs)
+        self.logger.info(f"Results saved to {store}")

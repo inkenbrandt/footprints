@@ -18,7 +18,7 @@ import pandas as pd
 import xarray as xr
 from scipy import signal
 
-from .base_footprint_model import BaseFootprintModel, _source_weight_threshold
+from .base_footprint_model import BaseFootprintModel, _source_weight_threshold, write_zarr
 
 
 class FFPModel(BaseFootprintModel):
@@ -1736,6 +1736,7 @@ class FFPModel(BaseFootprintModel):
                                     results[f"{r_level}_{key}"] = value
 
                     self.logger.info("FFP model calculations completed successfully")
+                    self.results = results
                     return results
 
                 except Exception as e:
@@ -1750,13 +1751,22 @@ class FFPModel(BaseFootprintModel):
         self.logger.info("FFP model calculations completed")
         return None
 
-    def save_results(self, filename: str):
+    def save_results(self, filename: str, format: str | None = None):
         """
-        Save model results to a netCDF file.
+        Save model results to a netCDF file or a Zarr store.
 
         Args:
             filename: Path where the results should be saved
+            format: ``"netcdf"`` or ``"zarr"``. If None, a path ending in
+                ``.zarr`` is written as Zarr and anything else as netCDF.
+                Zarr output needs the optional ``zarr`` package.
         """
+        if format is None:
+            format = "zarr" if str(filename).rstrip("/\\").endswith(".zarr") else "netcdf"
+        format = format.lower()
+        if format not in ("netcdf", "zarr"):
+            raise ValueError(f"format must be 'netcdf' or 'zarr', got {format!r}")
+
         if getattr(self, "f_2d", None) is None or getattr(self, "fclim_2d", None) is None:
             raise RuntimeError("No results to save. Did you call run() first?")
 
@@ -1778,5 +1788,8 @@ class FFPModel(BaseFootprintModel):
             }
         )
 
-        results.to_netcdf(filename)
+        if format == "zarr":
+            write_zarr(results, filename)
+        else:
+            results.to_netcdf(filename)
         self.logger.info(f"Results saved to {filename}")

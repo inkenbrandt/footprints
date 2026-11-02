@@ -489,4 +489,5 @@ class ffp_climatology_new(BaseFootprintModel):
                             "domain_y": ("y", self.y),
                         }
                     )
+            self.results = results
             return results

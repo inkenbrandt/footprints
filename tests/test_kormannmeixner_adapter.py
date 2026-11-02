@@ -191,3 +191,15 @@ def test_build_climatology_km_missing_z0_raises():
             dy=10.0,
             domain=tuple(DOMAIN),
         )
+
+
+def test_to_zarr_round_trips_results(tmp_path):
+    pytest.importorskip("zarr")
+    model = KormannMeixnerModel(df=make_df(n=3), domain=DOMAIN, dx=50.0, dy=50.0)
+    results = model.run()
+    out = tmp_path / "km.zarr"
+    model.to_zarr(out)
+    ds = xr.open_zarr(out)
+    assert ds.attrs["model"] == results.attrs["model"]
+    for name in results.data_vars:
+        np.testing.assert_allclose(ds[name].values, results[name].values)

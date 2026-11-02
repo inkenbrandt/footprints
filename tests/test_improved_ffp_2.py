@@ -341,3 +341,33 @@ def test_save_results_writes_file(tmp_path, small_model):
     small_model.save_results(str(out))
     assert out.exists()
     assert out.stat().st_size > 0
+
+def test_save_results_writes_zarr(tmp_path, small_model):
+    pytest.importorskip("zarr")
+    small_model.run(return_result=False)
+    out = tmp_path / "ffp_results.zarr"
+    small_model.save_results(str(out))
+    assert out.is_dir()
+    ds = xr.open_zarr(out)
+    assert "footprint_climatology" in ds
+    np.testing.assert_allclose(
+        ds["footprint_climatology"].values, small_model.fclim_2d.values
+    )
+
+
+def test_save_results_rejects_unknown_format(tmp_path, small_model):
+    small_model.run(return_result=False)
+    with pytest.raises(ValueError, match="format"):
+        small_model.save_results(str(tmp_path / "out.bin"), format="hdf4")
+
+
+def test_to_zarr_round_trips_results(tmp_path, small_model):
+    pytest.importorskip("zarr")
+    results = small_model.run(return_result=True)
+    out = tmp_path / "results.zarr"
+    small_model.to_zarr(out)
+    ds = xr.open_zarr(out)
+    assert set(results.data_vars) <= set(ds.data_vars)
+    np.testing.assert_allclose(
+        ds["footprint_climatology"].values, results["footprint_climatology"].values
+    )

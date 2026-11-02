@@ -153,6 +153,7 @@ model.get_footprint_timeseries()    # per-timestamp 3-D,    dims (time, x, y)
 model.get_coordinates()             # (x, y) arrays in metres
 model.get_results()                 # full xarray.Dataset
 model.to_netcdf("footprint.nc")
+model.to_zarr("footprint.zarr")     # needs: pip install fluxfootprints[zarr]
 ```
 
 ---

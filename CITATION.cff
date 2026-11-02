@@ -1,12 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 authors:
-- family-names: "Kljun"
-  given-names: "Natascha"
-  orcid: "https://orcid.org/0000-0001-9650-2184"
-- family-names: "Volk"
-  given-names: "John"
-  orcid: "https://orcid.org/0000-0001-9994-1545"
 - family-names: "Inkenbrandt"
   given-names: "Paul"
   orcid: "https://orcid.org/0000-0002-9194-5936"

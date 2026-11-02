@@ -71,3 +71,5 @@ docs/notebooks/station_oet_US-UTN.parquet
 docs/notebooks/station_oet_US-UTP.parquet
 docs/notebooks/station_oet_US-UTV.parquet
 docs/notebooks/station_oet_US-UTW.parquet
+/.ruff_cache
+/.mypy_cache

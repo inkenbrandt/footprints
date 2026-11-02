@@ -310,3 +310,41 @@ def test_export_contour_stats_csv_smoke(tmp_path, amf_like_df):
     assert out.exists()
     header = out.read_text().splitlines()[0]
     assert "area_ha" in header and "centroid_lon" in header
+
+def test_export_summaries_zarr_smoke(tmp_path, amf_like_df):
+    pytest.importorskip("zarr")
+    pytest.importorskip("pyproj")
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
+    res = helper.summarize_periods(clim, amf_like_df, daily=True, monthly=True)
+    store = helper.export_summaries_zarr(
+        model=clim,
+        summaries=res,
+        station_lat=40.0,
+        station_lon=-111.9,
+        store=tmp_path / "summaries.zarr",
+        which=("daily_mean", "monthly_mean"),
+    )
+    ds = xr.open_zarr(store)
+    assert ds["daily_mean"].dims == ("time_daily", "y", "x")
+    assert ds["monthly_mean"].dims == ("time_monthly", "y", "x")
+    assert ds.sizes["time_daily"] == res.f_daily_mean.sizes["time"]
+    assert ds["daily_mean"].attrs["grid_mapping"] == "spatial_ref"
+    assert ds.attrs["crs"] == "EPSG:32612"
+    np.testing.assert_allclose(
+        ds["daily_mean"].isel(time_daily=0).values,
+        res.f_daily_mean.isel(time=0).transpose("y", "x").values,
+        rtol=1e-6,
+        atol=1e-12,
+    )
+    # Tower sits at the origin of the local grid
+    i0 = int(np.argmin(np.abs(ds["x"].values)))
+    assert ds["easting"].values[i0] == pytest.approx(ds.attrs["tower_easting"])
+
+
+def test_export_summaries_zarr_unknown_layer(tmp_path, amf_like_df):
+    clim = helper.build_climatology(amf_like_df.copy(), **AMF_CLIM_PARAMS)
+    res = helper.summarize_periods(clim, amf_like_df, daily=True, monthly=False)
+    with pytest.raises(ValueError, match="Unknown layer"):
+        helper.export_summaries_zarr(
+            clim, res, 40.0, -111.9, tmp_path / "x.zarr", which=("bogus",)
+        )

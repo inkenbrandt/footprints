@@ -1,5 +1,5 @@
 # footprints/__init__.py
-from .base_footprint_model import BaseFootprintModel, source_weight_threshold
+from .base_footprint_model import BaseFootprintModel, source_weight_threshold, write_zarr
 from .improved_ffp import FFPModel
 from .kormannmeixner_adapter import KormannMeixnerModel
 from .ls_footprint_adapter import LSFootprintModelAdapter
@@ -15,6 +15,7 @@ from .ffp_daily_monthly_helper import (
     summarize_periods,
     export_contours_gpkg,
     export_rasters_geotiff,
+    export_summaries_zarr,
     export_contour_stats_csv,
     compute_aerodynamic_params,
     choose_utm_epsg,
@@ -119,6 +120,8 @@ __all__ = [
     # Export helpers
     "export_contours_gpkg",
     "export_rasters_geotiff",
+    "export_summaries_zarr",
+    "write_zarr",
     "export_contour_stats_csv",
     # Shared helpers
     "source_weight_threshold",
