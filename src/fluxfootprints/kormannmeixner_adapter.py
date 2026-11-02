@@ -101,10 +101,9 @@ class KormannMeixnerModel(BaseFootprintModel):
         footprint_sum = np.zeros((len(self.x), len(self.y)))
 
         # Process each timestep. The per-timestep footprint is evaluated
-        # directly in the output frame: the fixed output grid is mapped
-        # back into the wind-aligned frame (x = downwind distance, y =
-        # crosswind offset) via the inverse of the rotation/reflection used
-        # to place the footprint, then the closed-form KM density is
+        # directly in the output frame: each point of the fixed output grid
+        # is projected into the wind-aligned frame (x = upwind distance from
+        # the tower, y = crosswind offset), then the closed-form KM density is
         # evaluated at those points. This avoids rebuilding a Delaunay
         # triangulation (scipy.interpolate.griddata) on every timestep and
         # is exact rather than a linear-interpolation approximation of the
@@ -116,13 +115,14 @@ class KormannMeixnerModel(BaseFootprintModel):
                     raise ValueError(f"non-finite length scale xi={xi[i]!r}")
 
                 if not np.isnan(wind_dir[i]):
-                    # Wind direction available: invert the forward rotation
-                    # (X_src = X cosθ - Y sinθ, Y_src = X sinθ + Y cosθ) to
-                    # recover wind-aligned coordinates for each output point.
+                    # Wind direction available: the wind blows FROM θ
+                    # (clockwise from north), so the upwind unit vector is
+                    # (sin θ, cos θ) in (east, north). Project onto it and
+                    # onto the perpendicular (cos θ, -sin θ).
                     angle_rad = np.radians(wind_dir[i])
                     cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
-                    x_wind = X_grid * cos_a + Y_grid * sin_a
-                    y_wind = -X_grid * sin_a + Y_grid * cos_a
+                    x_wind = X_grid * sin_a + Y_grid * cos_a
+                    y_wind = X_grid * cos_a - Y_grid * sin_a
                 else:
                     # No wind direction: invert the standard negative-upwind
                     # placement (X_src = -X, Y_src = Y).

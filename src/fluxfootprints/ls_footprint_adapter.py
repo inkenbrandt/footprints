@@ -98,6 +98,8 @@ class LSFootprintModelAdapter(BaseFootprintModel):
                 # Run model
                 model = BackwardLSModel(cfg)
                 model.run()
+                if not model.footprint_2d.any():
+                    raise ValueError("no particle touchdowns inside the domain")
 
                 # Get footprint
                 if footprint_sum is None:

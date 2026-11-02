@@ -76,7 +76,7 @@ def test_model_grid_shapes():
     )
     m = BackwardLSModel(cfg)
     # Expected number of bins:
-    nx = int(cfg.domain[0] / cfg.dx)         # x in [-x_max, 0] → x_max/dx bins
+    nx = int((2 * cfg.domain[0]) / cfg.dx)   # x in [-x_max, x_max] → 2*x_max/dx bins
     ny = int((2 * cfg.domain[1]) / cfg.dy)   # y in [-y_max, y_max] → 2*y_max/dy bins
     assert m.footprint_2d.shape == (nx, ny)
     # Bin centers lengths also match
@@ -168,3 +168,24 @@ def test_update_velocity_shapes_and_finiteness():
     u2, v2, w2 = m._update_velocity(z, u, v, w)
     assert u2.shape == (n,) and v2.shape == (n,) and w2.shape == (n,)
     assert np.isfinite(u2).all() and np.isfinite(v2).all() and np.isfinite(w2).all()
+
+
+@pytest.mark.parametrize(
+    "wind_dir, upwind",
+    [(270.0, (-1, 0)), (90.0, (1, 0)), (180.0, (0, -1)), (0.0, (0, 1))],
+)
+def test_footprint_lies_upwind_of_tower(wind_dir, upwind):
+    # Regression: touchdowns used to be rotated 90 degrees and binned only at
+    # x <= 0, so most wind directions gave an empty (NaN) footprint.
+    cfg = LSFootprintConfig(
+        zm=5.0, ustar=0.4, L=-50.0, h=1000.0, wind_dir_deg=wind_dir, z0=0.05,
+        n_particles=2000, domain=(400.0, 400.0), dx=10.0, dy=10.0, seed=3,
+    )
+    m = BackwardLSModel(cfg)
+    m.run()
+    x_c, y_c, F = m.footprint()
+    assert np.isfinite(F).all() and F.sum() > 0
+    cx = (F * x_c[:, None]).sum() / F.sum()
+    cy = (F * y_c[None, :]).sum() / F.sum()
+    assert cx * upwind[0] + cy * upwind[1] > 20.0          # well upwind
+    assert abs(cx * upwind[1] - cy * upwind[0]) < 10.0     # little crosswind offset

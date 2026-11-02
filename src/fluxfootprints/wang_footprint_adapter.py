@@ -10,14 +10,14 @@ import xarray as xr
 from scipy.ndimage import gaussian_filter
 
 from .base_footprint_model import BaseFootprintModel
-from .wang_footprint import wang2006_fy, reconstruct_gaussian_2d
+from .wang_footprint import _sigma_y, wang2006_fy
 
 
 class WangFootprintModel(BaseFootprintModel):
     """
     Wang et al. (2006) convective footprint model adapter.
 
-    Wraps :func:`wang2006_fy` and :func:`reconstruct_gaussian_2d` in the
+    Wraps :func:`wang2006_fy` and a Gaussian crosswind spread in the
     standard :class:`BaseFootprintModel` interface. Intended to be driven
     through :func:`fluxfootprints.ffp_daily_monthly_helper.build_climatology`,
     which resolves per-timestep inputs into a DataFrame with the standardized
@@ -40,6 +40,11 @@ class WangFootprintModel(BaseFootprintModel):
             Standard deviation of lateral velocity fluctuations [m s⁻¹].
         umean : float or Series
             Mean wind speed at zm [m s⁻¹].
+
+        Optional column ``wind_dir`` (degrees, direction the wind blows
+        FROM) orients each footprint upwind of the tower; without it the
+        footprint is placed along -x. Each timestep's footprint is
+        normalized to integrate to 1 over the domain before averaging.
     """
 
     REQUIRED_COLUMNS = ["zm", "h", "ol", "sigmav", "umean"]
@@ -69,40 +74,50 @@ class WangFootprintModel(BaseFootprintModel):
         
         self.df = self._validate_input_df(self.df)
 
-        # Setup x domain (positive upwind)
+        # Output grid, matching the requested domain exactly.
         xmin, xmax, ymin, ymax = self.domain
-        self.x = np.arange(0, abs(xmin) + self.dx, self.dx)
-        
-        # Initialize accumulator
-        footprint_sum_2d = None
+        self.x = np.arange(xmin, xmax + self.dx, self.dx)
+        self.y = np.arange(ymin, ymax + self.dy, self.dy)
+        X_grid, Y_grid = np.meshgrid(self.x, self.y, indexing="ij")
+
+        # Fine 1-D upwind axis reaching the farthest grid corner. f_y(x) is
+        # computed (and normalized) on it once per timestep, then sampled at
+        # each grid point's upwind distance.
+        r_max = float(np.hypot(np.abs(self.x).max(), np.abs(self.y).max()))
+        step = min(self.dx, self.dy) / 4.0
+        x_upwind = np.arange(0.0, r_max + step, step)
+
+        wind_dir = (
+            self.df["wind_dir"].to_numpy(dtype=float)
+            if "wind_dir" in self.df.columns
+            else np.full(len(self.df), np.nan)
+        )
+
+        footprint_sum = np.zeros((len(self.x), len(self.y)))
         n_valid = 0
         
-        for idx, row in self.df.iterrows():
+        for i, (idx, row) in enumerate(self.df.iterrows()):
             try:
-                # Calculate 1D footprint
-                fy = wang2006_fy(
-                    self.x,
-                    zm=row["zm"],
-                    h=row["h"],
-                    L=row["ol"],
-                )
-                
-                # Reconstruct 2D
-                X, Y, F = reconstruct_gaussian_2d(
-                    self.x,
-                    fy,
-                    sigma_v=row["sigmav"],
-                    U=row["umean"],
-                    y_max=abs(ymax),
-                    ny=int((ymax - ymin) / self.dy) + 1,
-                )
-                
-                if footprint_sum_2d is None:
-                    footprint_sum_2d = F
-                    self.y = Y[:, 0]  # Extract y coordinates
-                else:
-                    footprint_sum_2d += F
-                
+                # Project the grid into the wind-aligned frame. The wind blows
+                # FROM θ (clockwise from north), so the upwind unit vector is
+                # (sin θ, cos θ). Without a wind direction the footprint is
+                # placed upwind along -x (wind from the west, θ = 270).
+                theta = np.radians(wind_dir[i] if np.isfinite(wind_dir[i]) else 270.0)
+                d = X_grid * np.sin(theta) + Y_grid * np.cos(theta)   # upwind distance
+                c = X_grid * np.cos(theta) - Y_grid * np.sin(theta)   # crosswind offset
+
+                fy = wang2006_fy(x_upwind, zm=row["zm"], h=row["h"], L=row["ol"])
+                fy_grid = np.interp(d, x_upwind, fy, left=0.0, right=0.0)
+
+                # Gaussian crosswind spread, as in reconstruct_gaussian_2d
+                sig = _sigma_y(np.clip(d, 0.0, None), sigma_v=row["sigmav"], U=row["umean"])
+                gauss = np.exp(-0.5 * (c / sig) ** 2) / (np.sqrt(2.0 * np.pi) * sig)
+                F = np.where(d > 0, fy_grid * gauss, 0.0)
+
+                total = F.sum() * self.dx * self.dy
+                if not np.isfinite(total) or total <= 0:
+                    raise ValueError("footprint falls outside the domain")
+                footprint_sum += F / total
                 n_valid += 1
                 
             except Exception as e:
@@ -112,13 +127,9 @@ class WangFootprintModel(BaseFootprintModel):
         if n_valid == 0:
             raise RuntimeError("No valid footprints calculated")
         
-        # Flip x to match standard convention (negative upwind)
-        self.x = -self.x[::-1]
-        footprint_sum_2d = footprint_sum_2d[:, ::-1]
-        
         # Create climatology
         self.fclim_2d = xr.DataArray(
-            footprint_sum_2d.T / n_valid,
+            footprint_sum / n_valid,
             dims=("x", "y"),
             coords={"x": self.x, "y": self.y},
         )

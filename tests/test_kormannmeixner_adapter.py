@@ -203,3 +203,21 @@ def test_to_zarr_round_trips_results(tmp_path):
     assert ds.attrs["model"] == results.attrs["model"]
     for name in results.data_vars:
         np.testing.assert_allclose(ds[name].values, results[name].values)
+
+
+@pytest.mark.parametrize(
+    "wind_dir, upwind",
+    [(270.0, (-1, 0)), (90.0, (1, 0)), (180.0, (0, -1)), (0.0, (0, 1))],
+)
+def test_footprint_lies_upwind_of_tower(wind_dir, upwind):
+    # Regression: the footprint used to be mirrored across y = x.
+    df = make_df(n=1)
+    df["wind_dir"] = wind_dir
+    model = KormannMeixnerModel(df=df, domain=DOMAIN, dx=10.0, dy=10.0)
+    fclim = model.run()["footprint_climatology"].transpose("x", "y")
+    F = fclim.values
+    cx = float((F * fclim.x.values[:, None]).sum() / F.sum())
+    cy = float((F * fclim.y.values[None, :]).sum() / F.sum())
+    assert cx * upwind[0] + cy * upwind[1] > 0.5 * np.hypot(cx, cy) > 0
+    assert abs(cx * upwind[1] - cy * upwind[0]) < 0.1 * np.hypot(cx, cy)
+

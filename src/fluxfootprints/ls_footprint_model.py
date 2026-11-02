@@ -105,9 +105,11 @@ class BackwardLSModel:
         self.cfg = cfg
         self.rng = cfg.rng()
 
-        # Pre‑compute grid for footprint accumulation
+        # Pre‑compute grid for footprint accumulation. Touchdowns are binned
+        # in geographic coordinates (x east, y north) and the upwind side
+        # depends on wind direction, so the grid spans both sides of the tower.
         x_max, y_max = cfg.domain
-        self.x_bins = np.arange(-x_max, 0 + cfg.dx, cfg.dx)  # upstream is −x
+        self.x_bins = np.arange(-x_max, x_max + cfg.dx, cfg.dx)
         self.y_bins = np.arange(-y_max, y_max + cfg.dy, cfg.dy)
         self.footprint_2d = np.zeros((len(self.x_bins) - 1, len(self.y_bins) - 1))
 
@@ -173,7 +175,9 @@ class BackwardLSModel:
 
         steps = int(cfg.t_max / cfg.dt)
 
-        # Rotate mean wind coordinate frame so x is upstream
+        # Wind-aligned frame: x_w along the direction the wind blows toward,
+        # y_w crosswind. For a wind blowing FROM wind_dir_deg (clockwise from
+        # north) the upwind unit vector is (sin θ, cos θ) in (east, north).
         wind_dir_rad = math.radians(cfg.wind_dir_deg)
         cosd, sind = math.cos(wind_dir_rad), math.sin(wind_dir_rad)
 
@@ -189,14 +193,16 @@ class BackwardLSModel:
 
             # Backward‑in‑time displacements (negative mean wind direction)
             dt = cfg.dt
-            # Rotate to tower‑aligned coordinates (sensor/reference)
-            # Upwind (−x) is along mean wind; we subtract because backward
-            dx_upwind = -(U_mean + u) * dt
+            # Backward in time, so displacements are subtracted: x_w decreases,
+            # i.e. particles travel upwind.
+            dx_wind = -(U_mean + u) * dt
             dy_cross = -v * dt
             dz = -w * dt
 
-            x += dx_upwind * cosd - dy_cross * sind  # rotate back to geographic
-            y += dx_upwind * sind + dy_cross * cosd
+            # Rotate to geographic: x_w maps to -(sin θ, cos θ) (downwind) and
+            # y_w to (cos θ, -sin θ).
+            x += -dx_wind * sind + dy_cross * cosd
+            y += -dx_wind * cosd - dy_cross * sind
             z += dz
 
             # Check for landings and drop landed particles from further
@@ -222,8 +228,11 @@ class BackwardLSModel:
                 z[above] = 2 * cfg.h - z[above]  # mirror reflection
                 w[above] *= -1  # invert vertical velocity when reflecting
 
-        # Normalise to unit flux contribution
-        self.footprint_2d /= np.sum(self.footprint_2d * cfg.dx * cfg.dy)
+        # Normalise to unit flux contribution. If no particle landed inside the
+        # domain the footprint stays all-zero instead of becoming 0/0 = NaN.
+        total = np.sum(self.footprint_2d * cfg.dx * cfg.dy)
+        if total > 0:
+            self.footprint_2d /= total
 
     # ---------------------------------
     # Accumulation helper
