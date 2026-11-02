@@ -57,3 +57,17 @@ docs/notebooks/.DS_Store
 
 footprint_workflow_v2-1.ipynb
 /docs/notebooks/NLDAS_Download_and_Summarize (2).ipynb
+docs/notebooks/df_all.csv
+docs/notebooks/df_all.parquet
+docs/notebooks/station_oet_US-CdM.parquet
+docs/notebooks/station_oet_US-UTB.parquet
+docs/notebooks/station_oet_US-UTD.parquet
+docs/notebooks/station_oet_US-UTE.parquet
+docs/notebooks/station_oet_US-UTG.parquet
+docs/notebooks/station_oet_US-UTJ.parquet
+docs/notebooks/station_oet_US-UTL.parquet
+docs/notebooks/station_oet_US-UTM.parquet
+docs/notebooks/station_oet_US-UTN.parquet
+docs/notebooks/station_oet_US-UTP.parquet
+docs/notebooks/station_oet_US-UTV.parquet
+docs/notebooks/station_oet_US-UTW.parquet
