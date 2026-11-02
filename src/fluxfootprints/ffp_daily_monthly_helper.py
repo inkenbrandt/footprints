@@ -230,6 +230,7 @@ def compute_aerodynamic_params(
         else:
             preset = VEG_PRESETS.get(veg_type_clean, {})
     else:
+        veg_type_clean = None
         preset = {}
 
     # 3. Calculate Displacement Height (d_h)
