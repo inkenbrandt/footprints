@@ -671,8 +671,8 @@ def _make_contour_polygon_from_field_alt(
     method: str = "auto",
 ):
     """
-    Extract polygon boundary for cumulative-source threshold using
-    scikit-image or rasterio vectorization.
+    Extract a polygon from a field in (y, x) order using scikit-image or
+    rasterio vectorization. Coordinate arrays give the cell centers.
     """
     z = np.array(z2d, dtype=float, copy=True)
     z[z < 0] = 0.0
@@ -692,6 +692,8 @@ def _make_contour_polygon_from_field_alt(
     x = np.asarray(x)
     y = np.asarray(y)
     nx, ny = x.size, y.size
+    if z.shape != (ny, nx):
+        raise ValueError("z2d must have shape (len(y), len(x))")
     col_ix = np.arange(nx, dtype=float)
     row_ix = np.arange(ny, dtype=float)
 
@@ -726,9 +728,10 @@ def _make_contour_polygon_from_field_alt(
                 return None
             xres = float(x[1] - x[0])
             yres = float(y[1] - y[0])
-            left = x.min() - xres / 2.0
-            top = y.max() + yres / 2.0
-            transform = Affine.translation(left, top) * Affine.scale(xres, -yres)
+            # Match the actual row/column direction, including ascending y.
+            transform = Affine.translation(
+                x[0] - xres / 2.0, y[0] - yres / 2.0
+            ) * Affine.scale(xres, yres)
             geoms = list(features.shapes(mask, mask=None, transform=transform))
             polys = [g for g, v in geoms if int(v) == 1]
             if not polys:
@@ -882,7 +885,7 @@ def export_contours_gpkg(
         for r in levels:
             records = []
             for i in range(da.sizes["time"]):
-                z = da.isel(time=i).values
+                z = da.isel(time=i).transpose("y", "x").values
                 verts = _make_contour_polygon_from_field_alt(
                     z, x, y, level=float(r), method=contour_method
                 )
@@ -1097,15 +1100,12 @@ def export_rasters_geotiff(
         if da is None:
             return
         
-        da_gis = da.transpose("time", "y", "x")
+        da_gis = da.transpose("time", "y", "x").sortby("x").sortby("y", ascending=False)
         times = pd.to_datetime(da_gis["time"].values)
 
         for i, ts in enumerate(times):
             arr = da_gis.isel(time=i).values.astype(dtype)
             
-            if y[1] > y[0]:
-                arr = np.flipud(arr)
-
             if layername.startswith("daily"):
                 suf = ts.strftime("%Y%m%d")
             else:
@@ -1413,7 +1413,7 @@ def export_contour_stats_csv(
                 return
             for r in levels:
                 for i in range(da.sizes["time"]):
-                    z = da.isel(time=i).values
+                    z = da.isel(time=i).transpose("y", "x").values
                     verts = _make_contour_polygon_from_field_alt(
                         z, x, y, level=float(r), method=method
                     )

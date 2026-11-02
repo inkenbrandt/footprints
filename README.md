@@ -201,6 +201,19 @@ names:
 | `z0`       | m     | Roughness length               |
 | `h`        | m     | Boundary-layer height          |
 
+`wind_dir` is meteorological: the direction the wind comes **from**, clockwise
+from north. Geographic model outputs use **x east, y north**, with the tower
+at `(0, 0)`. Thus 0°/360° puts the source area north, 90° east, 180° south,
+and 270° west. KM and Wang adapters default to sources along negative x when
+no wind direction is supplied. Low-level analytical functions use their
+documented wind-aligned axes instead.
+
+Use xarray dimension names when converting outputs: model fields use `(x, y)`,
+while plotting and GIS libraries commonly expect rows along y and columns
+along x. For example, use `field.transpose("y", "x")` for a conventional
+image array. The package's plotting and GIS export methods handle this
+conversion, including north-up GeoTIFF row order.
+
 You do not normally have to rename anything yourself: `build_climatology`
 accepts a **column name, a scalar, or a `pandas.Series`** for each of these and
 assembles the standardised frame for you, so AmeriFlux-style names

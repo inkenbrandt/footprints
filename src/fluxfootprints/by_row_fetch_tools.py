@@ -223,8 +223,14 @@ def generate_density_raster(
     ymin, ymax = ymin - buffer_distance, ymax + buffer_distance
 
     # Create a mesh grid
-    xgrid = np.arange(xmin, xmax, resolution)
-    ygrid = np.arange(ymin, ymax, resolution)
+    # Evaluate at pixel centers in north-up raster order: west to east,
+    # north to south. The affine transform describes the pixel edges.
+    width = int(np.ceil((xmax - xmin) / resolution))
+    height = int(np.ceil((ymax - ymin) / resolution))
+    xmax = xmin + width * resolution
+    ymin = ymax - height * resolution
+    xgrid = xmin + (np.arange(width) + 0.5) * resolution
+    ygrid = ymax - (np.arange(height) + 0.5) * resolution
     xmesh, ymesh = np.meshgrid(xgrid, ygrid)
 
     # Perform KDE with weights

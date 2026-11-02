@@ -222,7 +222,7 @@ def run_ffp_xr(
         Tuple of arrays representing the x and y coordinates of the footprint grid.
     """
 
-    from ffp_xr import ffp_climatology_new as _FFPXR
+    from .ffp_xr import ffp_climatology_new as _FFPXR
 
     if logger is None:
         import logging
@@ -260,13 +260,14 @@ def run_km(
     Compute a toy 2D footprint based on a Kormann–Meixner-style analytic solution.
 
     This simplified implementation models the footprint as a product of a
-    1D Gamma distribution in the along-wind (y) direction and a Gaussian in the
-    cross-wind (x) direction. It is intended as a minimal, conceptual reference.
+    1D Gamma distribution in the upwind direction and a Gaussian in the
+    crosswind direction. It is intended as a minimal, conceptual reference.
 
     Parameters
     ----------
     met : pandas.DataFrame
-        Meteorological input data (unused in this implementation, but included for API compatibility).
+        Meteorological input data. ``wind_dir`` is the direction the wind
+        comes FROM, clockwise from north. If absent, use wind from the west.
     zm : float, optional
         Measurement height above displacement height [m]. Default is 2.0.
     z0 : float, optional
@@ -295,7 +296,7 @@ def run_km(
     xmin, xmax, ymin, ymax = domain
     x = np.arange(xmin, xmax + dx, dx)
     y = np.arange(ymin, ymax + dx, dx)
-    xv, yv = np.meshgrid(x, y)
+    xv, yv = np.meshgrid(x, y, indexing="ij")
 
     # Parameters (roughly tuned to mimic FFP peak)
     m, n = 1.0, 0.5  # power‑law exponents for u, K (neutral)
@@ -307,16 +308,33 @@ def run_km(
     # Cross‑wind Gaussian std ~  σ = a * |x|
     a = 0.35
 
-    fy = (xi ** ((1 + m) / r)) / (r * scipy.special.gamma((1 + m) / r))
-    fy = fy * (np.abs(yv) ** (m / r - 1)) * np.exp(-xi / np.abs(yv))
-
-    cross = (1 / (np.sqrt(2 * np.pi) * a * np.abs(yv))) * np.exp(
-        -(xv**2) / (2 * (a**2) * yv**2)
-    )
-
-    f2d = fy * cross
-    f2d[np.isnan(f2d)] = 0.0
-    f2d /= f2d.sum() * dx**2  # normalize
+    directions = met["wind_dir"].to_numpy(dtype=float) if "wind_dir" in met else [270.0]
+    f2d = np.zeros_like(xv, dtype=float)
+    n_valid = 0
+    for direction in directions:
+        if not np.isfinite(direction) or not 0 <= direction <= 360:
+            continue
+        theta = np.deg2rad(direction)
+        upwind = xv * np.sin(theta) + yv * np.cos(theta)
+        crosswind = xv * np.cos(theta) - yv * np.sin(theta)
+        # Evaluate only upwind; abs(distance) would mirror a second lobe downwind.
+        mask = upwind > 0
+        d = upwind[mask]
+        fy = (xi ** ((1 + m) / r)) / (r * scipy.special.gamma((1 + m) / r))
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            fy = fy * d ** (m / r - 1) * np.exp(-xi / d)
+            cross = np.exp(-0.5 * (crosswind[mask] / (a * d)) ** 2) / (
+                np.sqrt(2 * np.pi) * a * d
+            )
+        field = np.zeros_like(f2d)
+        field[mask] = np.nan_to_num(fy * cross)
+        total = field.sum() * dx**2
+        if total > 0:
+            f2d += field / total
+            n_valid += 1
+    if n_valid == 0:
+        raise ValueError("No valid footprints inside the domain")
+    f2d /= n_valid
     return f2d, (xv, yv)
 
 

@@ -183,7 +183,7 @@ def reconstruct_gaussian_2d(
     Returns
     -------
     (X, Y, F) : Tuple[np.ndarray, np.ndarray, np.ndarray]
-        • X, Y : 2‑D coordinate grids (shape *len(x) × ny*).
+        • X, Y : 2‑D coordinate grids (shape *ny × len(x)*).
         • F    : 2‑D footprint array f(x_i, y_j) (m⁻²) normalised so that
                   ∬ F dx dy = 1.
     """

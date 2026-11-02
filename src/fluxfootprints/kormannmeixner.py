@@ -245,7 +245,7 @@ def crosswind_integrated_footprint(
     Parameters
     ----------
     x : float or np.ndarray
-        Downwind distance(s) from the tower (m).
+        Positive upwind source distance(s) from the tower (m).
     xi : float
         Footprint length-scale Î¾(z) computed using `length_scale_xi` (m).
     m : float
@@ -334,9 +334,9 @@ def footprint_at_points(
     Parameters
     ----------
     x, y
-        Arrays of downwind distance and crosswind offset (m) in the
-        wind-aligned frame, same shape. Points with ``x <= 0`` are upwind of
-        the sensor, where the model is undefined, and are assigned zero
+        Arrays of upwind source distance and crosswind offset (m) in the
+        wind-aligned frame, same shape. Points with ``x <= 0`` are at or downwind
+        of the sensor, where the model is undefined, and are assigned zero
         density.
     xi, m, n
         Parameters returned by :func:`length_scale_xi` and

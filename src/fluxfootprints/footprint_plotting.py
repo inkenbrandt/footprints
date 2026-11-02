@@ -13,6 +13,16 @@ class FootprintPlotter:
         self.default_colormap = cm.jet
         self.default_line_width = 0.5
 
+    @staticmethod
+    def _coordinate_grid(x, y, f):
+        """Match package (x, y) fields to 1-D axes or explicit 2-D grids."""
+        x, y, f = np.asarray(x), np.asarray(y), np.asarray(f)
+        if x.ndim == y.ndim == 1:
+            x, y = np.meshgrid(x, y, indexing="ij")
+        if x.shape != y.shape or f.shape != x.shape:
+            raise ValueError("Footprint and coordinate grids must have matching shapes")
+        return x, y, f
+
     def get_contour_levels(self, f: np.ndarray, dx: float, dy: float, 
                           rs: list[float] | None = None) -> list[tuple[float, float, float]]:
         """Calculate contour levels at specified percentages of the footprint integral."""
@@ -40,6 +50,7 @@ class FootprintPlotter:
     def get_contour_vertices(self, x: np.ndarray, y: np.ndarray, f: np.ndarray, 
                            lev: float) -> tuple[list | None, list | None]:
         """Get vertices of contour at specified level."""
+        x, y, f = self._coordinate_grid(x, y, f)
         cs = plt.contour(x, y, f, [lev])
         plt.close()
         
@@ -62,7 +73,9 @@ class FootprintPlotter:
                       normalize: str | None = None, colormap = None,
                       line_width: float = 0.5, iso_labels: bool | None = None,
                       title: str | None = None) -> tuple[plt.Figure, plt.Axes]:
-        """Plot footprint function and contours."""
+        """Plot a field in (x, y) order for 1-D axes, or matching 2-D grids."""
+
+        x_2d, y_2d, fs = self._coordinate_grid(x_2d, y_2d, fs)
         
         if colormap is None:
             colormap = self.default_colormap
@@ -72,8 +85,7 @@ class FootprintPlotter:
 
         # Handle contour levels if provided
         if clevs is not None:
-            clevs = clevs[::-1]  # Reverse order for pyplot.contour
-            clevs = [clev for clev in clevs if clev is not None]
+            clevs = sorted({clev for clev in clevs if clev is not None and np.isfinite(clev)})
             
             # Plot contours
             levs = clevs
@@ -91,9 +103,9 @@ class FootprintPlotter:
         # Plot heatmap if requested
         if show_heatmap:
             norm = LogNorm() if normalize == 'log' else None
-            extent = (x_2d.min(), x_2d.max(), y_2d.min(), y_2d.max())
-            im = ax.imshow(fs, cmap=colormap, extent=extent, norm=norm,
-                         origin='lower', aspect='equal')
+            im = ax.pcolormesh(x_2d, y_2d, fs, cmap=colormap, norm=norm,
+                               shading='auto')
+            ax.set_aspect('equal')
             plt.colorbar(im, ax=ax, shrink=0.8, format='%.2e', 
                         label='Flux contribution (m⁻²)')
 
@@ -131,7 +143,7 @@ def add_plotting_to_footprint(FluxFootprint):
         # Create plot
         fig, ax = plotter.plot_footprint(
             ds.x.values, ds.y.values,
-            mean_footprint.values,
+            mean_footprint.transpose("x", "y").values,
             clevs=[x[2] for x in clevs],
             show_heatmap=show_heatmap,
             iso_labels=True,
@@ -158,7 +170,7 @@ def add_plotting_to_footprint(FluxFootprint):
         # Create plot
         fig, ax = plotter.plot_footprint(
             ds.x.values, ds.y.values,
-            footprint.values,
+            footprint.transpose("x", "y").values,
             clevs=[x[2] for x in clevs],
             show_heatmap=show_heatmap,
             iso_labels=True,

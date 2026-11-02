@@ -526,6 +526,8 @@ class FFPModel(BaseFootprintModel):
         """
         Apply roughness sublayer (RSL) corrections to crosswind dispersion.
         """
+        # This method can also be called before calc_xr_footprint().
+        self.rotated_theta = self.theta - np.deg2rad(self.ds["wind_dir"])
         # Calculate RSL parameters
         h_rs = 10 * self.ds["z0"]
         z_star = self.n_rsl * h_rs
@@ -548,37 +550,23 @@ class FFPModel(BaseFootprintModel):
             T = ps1 * self.ds["zm"] / self.ds["ustar"]
             sigma_y0 = self.ds["sigmav"] * T
 
-            # Base crosswind spread as a function of x → expand over y to (x, y)
-            sigma_y_1d = xr.DataArray(
-                self.calc_crosswind_spread(self.x),
-                dims=("x",),
-                coords={"x": self.x},
-            )
-            sigma_y_grid = sigma_y_1d.expand_dims(y=self.y)  # (x, y)
-
-            # Broadcast to (time, x, y)
-            sigma_y_grid_3d = sigma_y_grid.expand_dims(time=self.ds.time)
-            sigma_y0_3d = sigma_y0.broadcast_like(sigma_y_grid_3d)
-            in_rsl_3d = in_rsl.broadcast_like(sigma_y_grid_3d)
+            # Blind-zone correction (time-only), needed when scaling distance.
+            self.x_min = self.ds["ustar"] * T
+            # Use the rotated upwind distance at every grid point. Geographic
+            # self.x would make dispersion depend on east/west position even
+            # for northerly winds and would not rotate with the footprint.
+            sigma_y_grid_3d = self.calc_crosswind_spread(self.calc_scaled_distance_rsl())
 
             # Combine near-source and far-field terms where in RSL
             self.sigma_y = xr.where(
-                in_rsl_3d,
-                np.sqrt(sigma_y0_3d ** 2 + sigma_y_grid_3d ** 2),
+                in_rsl,
+                np.sqrt(sigma_y0 ** 2 + sigma_y_grid_3d ** 2),
                 sigma_y_grid_3d,
             )
 
-            # Blind-zone correction (time-only)
-            self.x_min = self.ds["ustar"] * T
-
         else:
-            # Outside RSL: keep base spread and shape it to (time, x, y)
-            sigma_y_1d = xr.DataArray(
-                self.calc_crosswind_spread(self.x),
-                dims=("x",),
-                coords={"x": self.x},
-            )
-            self.sigma_y = sigma_y_1d.expand_dims(y=self.y).expand_dims(time=self.ds.time)
+            # Outside RSL, use the same wind-aligned spread as the base model.
+            self.sigma_y = self.calc_crosswind_spread(self.calc_scaled_distance_rsl())
             # No blind-zone correction needed; keep as NaN series
             self.x_min = xr.full_like(self.ds["ustar"], np.nan)
 
@@ -756,7 +744,7 @@ class FFPModel(BaseFootprintModel):
            where he ≈ 0.8h is the entrainment height
         2. Stability validity (Eq. 27): -15.5 ≤ zm/L
         3. Turbulence validity: u* > 0.1 m/s, σv > 0
-        4. Roughness sublayer validity: zm > z* ≈ n*hrs
+        4. Roughness sublayer validity (unless rslayer=True): zm > z* ≈ n*hrs
            where hrs ≈ 10z₀ and 2 ≤ n ≤ 5 (Section 2)
 
         Returns
@@ -767,6 +755,8 @@ class FFPModel(BaseFootprintModel):
         - turbulence_valid: True where u* > 0.1 and σv > 0
         - rsl_valid: True where measurement height above RSL
         Combined per-timestep validity is stored in self.valid_footprint (dims: time).
+        With rslayer=True, RSL corrections replace the rsl_valid requirement;
+        the height, stability and turbulence requirements still apply.
         """
         # Per-timestep boolean validity flags (dims: time)
         height_valid = (
@@ -779,7 +769,9 @@ class FFPModel(BaseFootprintModel):
         rsl_valid = self.ds["rsl_valid"].astype(bool)
 
         # Combined per-timestep validity mask (dims: time)
-        self.valid_footprint = height_valid & stability_valid & turbulence_valid & rsl_valid
+        self.valid_footprint = height_valid & stability_valid & turbulence_valid
+        if not self.rslayer:
+            self.valid_footprint = self.valid_footprint & rsl_valid
 
         n_invalid = int((~self.valid_footprint).sum())
         if n_invalid > 0:
@@ -1131,8 +1123,8 @@ class FFPModel(BaseFootprintModel):
             self.logger.debug(f"Total sum before normalization: {total_sum:.2e}")
 
             if total_sum < 1e-10:
-                self.logger.warning("Near-zero sum, using uniform distribution")
-                self.fclim_2d = xr.ones_like(self.rho) / (len(self.x) * len(self.y))
+                self.logger.warning("Near-zero sum: no resolved footprint in the domain")
+                self.fclim_2d = xr.zeros_like(self.rho)
             else:
                 # Normalize: divide by number of valid timesteps only
                 self.fclim_2d = footprint_sum / max(valid_count, 1)

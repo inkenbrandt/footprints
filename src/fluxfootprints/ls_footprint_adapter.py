@@ -68,10 +68,6 @@ class LSFootprintModelAdapter(BaseFootprintModel):
 
         self.df = self._validate_input_df(self.df)
 
-        # Setup domain
-        xmin, xmax, ymin, ymax = self.domain
-        domain_extent = (abs(xmin), abs(ymax))
-
         # Initialize accumulator
         footprint_sum = None
         x_bins = None
@@ -90,7 +86,7 @@ class LSFootprintModelAdapter(BaseFootprintModel):
                     wind_dir_deg=float(row["wind_dir"]),
                     z0=float(row["z0"]),
                     n_particles=self.n_particles,
-                    domain=domain_extent,
+                    domain=tuple(self.domain),
                     dx=self.dx,
                     dy=self.dy,
                 )

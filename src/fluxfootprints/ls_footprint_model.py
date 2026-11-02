@@ -87,7 +87,8 @@ class LSFootprintConfig:
     n_particles: int = 20_000  # number of stochastic particles
     dt: float = 0.25  # time step (s)
     t_max: float = 600.0  # maximum integration time (s)
-    domain: Tuple[float, float] = (2000.0, 2000.0)  # (x_max, y_max) extent (m)
+    # Symmetric (x_max, y_max), or explicit (xmin, xmax, ymin, ymax), in meters.
+    domain: Tuple[float, float] | Tuple[float, float, float, float] = (2000.0, 2000.0)
     dx: float = 10.0  # horizontal grid resolution (m)
     dy: float = 10.0
 
@@ -108,9 +109,17 @@ class BackwardLSModel:
         # Pre‑compute grid for footprint accumulation. Touchdowns are binned
         # in geographic coordinates (x east, y north) and the upwind side
         # depends on wind direction, so the grid spans both sides of the tower.
-        x_max, y_max = cfg.domain
-        self.x_bins = np.arange(-x_max, x_max + cfg.dx, cfg.dx)
-        self.y_bins = np.arange(-y_max, y_max + cfg.dy, cfg.dy)
+        if len(cfg.domain) == 2:
+            x_max, y_max = cfg.domain
+            xmin, xmax, ymin, ymax = -x_max, x_max, -y_max, y_max
+        elif len(cfg.domain) == 4:
+            xmin, xmax, ymin, ymax = cfg.domain
+        else:
+            raise ValueError("domain must contain 2 extents or 4 bounds")
+        if xmin >= xmax or ymin >= ymax:
+            raise ValueError("domain bounds must be increasing")
+        self.x_bins = np.arange(xmin, xmax + cfg.dx, cfg.dx)
+        self.y_bins = np.arange(ymin, ymax + cfg.dy, cfg.dy)
         self.footprint_2d = np.zeros((len(self.x_bins) - 1, len(self.y_bins) - 1))
 
     # ---------------------------------------------------------------------
@@ -252,7 +261,10 @@ class BackwardLSModel:
         return x_c, y_c, self.footprint_2d
 
     def crosswind_integrated(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Return upstream distance array and integrated footprint f(x)."""
+        """Return geographic x and the marginal density integrated over northing.
+
+        This is a crosswind integral only for easterly/westerly winds.
+        """
         x_c, y_c, F = self.footprint()
         f_x = np.sum(F, axis=1) * self.cfg.dy  # integrate over y
         return x_c, f_x
@@ -287,10 +299,10 @@ if __name__ == "__main__":
     # Plot 2‑D footprint heatmap
     x, y, F = model.footprint()
     plt.figure(figsize=(6, 5))
-    plt.pcolormesh(y, x, F, shading="auto", cmap="viridis")
+    plt.pcolormesh(x, y, F.T, shading="auto", cmap="viridis")
     plt.colorbar(label="Footprint weight (m⁻²)")
-    plt.xlabel("Cross‑wind distance y (m)")
-    plt.ylabel("Upwind distance −x (m)")
+    plt.xlabel("Eastward distance x (m)")
+    plt.ylabel("Northward distance y (m)")
     plt.title("2‑D Lagrangian flux footprint")
     plt.tight_layout()
 
