@@ -1,0 +1,237 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "US-CdM",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -109.745804,
+          37.524693
+        ]
+      },
+      "properties": {
+        "stationid": "US-CdM",
+        "latitude_active_date": "2023-10-24",
+        "latitude_source_key": 118,
+        "longitude_active_date": "2023-10-24",
+        "longitude_source_key": 130,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTB",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -113.8298,
+          40.7847
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTB",
+        "latitude_active_date": "2021-09-20",
+        "latitude_source_key": 116,
+        "longitude_active_date": "2021-09-20",
+        "longitude_source_key": 128,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTD",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -109.5952,
+          38.1038
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTD",
+        "latitude_active_date": "2023-05-24",
+        "latitude_source_key": 112,
+        "longitude_active_date": "2023-05-24",
+        "longitude_source_key": 124,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTE",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -111.570816,
+          37.735287
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTE",
+        "latitude_active_date": "2024-06-18",
+        "latitude_source_key": 113,
+        "longitude_active_date": "2024-06-18",
+        "longitude_source_key": 125,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTG",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -110.162766,
+          39.018806
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTG",
+        "latitude_active_date": "2025-08-15",
+        "latitude_source_key": 309,
+        "latitude_notes": "station moved to avoid irrigation line; originally got value 30.01882167 from Paul but updated",
+        "longitude_active_date": "2025-08-15",
+        "longitude_source_key": 310,
+        "longitude_notes": "station moved to avoid irrigation line",
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTJ",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -109.53489,
+          37.281746
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTJ",
+        "latitude_active_date": "2024-06-03",
+        "latitude_source_key": 115,
+        "longitude_active_date": "2024-06-03",
+        "longitude_source_key": 127,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTL",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -109.65754,
+          40.187252
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTL",
+        "latitude_active_date": "2026-04-22",
+        "latitude_source_key": 336,
+        "latitude_notes": "station moved",
+        "longitude_active_date": "2026-04-22",
+        "longitude_source_key": 337,
+        "longitude_notes": "station moved",
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTM",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -109.57749,
+          38.58785
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTM",
+        "latitude_active_date": "2021-10-05",
+        "latitude_source_key": 111,
+        "longitude_active_date": "2021-10-05",
+        "longitude_source_key": 123,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTN",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -111.88127,
+          39.689617
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTN",
+        "latitude_active_date": null,
+        "latitude_source_key": 107,
+        "longitude_active_date": null,
+        "longitude_source_key": 119,
+        "location_status": "undated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTP",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -112.101358,
+          41.060347
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTP",
+        "latitude_active_date": "2024-05-28",
+        "latitude_source_key": 114,
+        "longitude_active_date": "2024-05-28",
+        "longitude_source_key": 126,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTV",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -109.954735,
+          40.12641
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTV",
+        "latitude_active_date": "2023-09-26",
+        "latitude_source_key": 108,
+        "longitude_active_date": "2023-09-26",
+        "longitude_source_key": 120,
+        "location_status": "dated"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "US-UTW",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -110.72905,
+          39.445362
+        ]
+      },
+      "properties": {
+        "stationid": "US-UTW",
+        "latitude_active_date": "2021-03-09",
+        "latitude_source_key": 110,
+        "longitude_active_date": "2021-03-09",
+        "longitude_source_key": 122,
+        "location_status": "dated"
+      }
+    }
+  ]
+}
