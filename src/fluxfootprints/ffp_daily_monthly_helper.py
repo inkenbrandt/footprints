@@ -645,7 +645,7 @@ def summarize_periods(
 # Export utilities
 # ------------------------------
 
-def _choose_utm_epsg_pyproj(lon: float, lat: float) -> int:
+def choose_utm_epsg(lon: float, lat: float) -> int:
     """Find the standard local WGS 84 UTM EPSG code using pyproj."""
     crs_info_list = query_utm_crs_info(
         datum_name="WGS 84",
@@ -657,6 +657,10 @@ def _choose_utm_epsg_pyproj(lon: float, lat: float) -> int:
         ),
     )
     return int(crs_info_list[0].code)
+
+
+# Private alias kept for existing internal callers.
+_choose_utm_epsg_pyproj = choose_utm_epsg
 
 
 def _make_contour_polygon_from_field_alt(

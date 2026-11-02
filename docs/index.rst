@@ -42,14 +42,6 @@ same ``run()`` / ``get_footprint_climatology()`` API:
 
    exp
    modeltypes
-   validation
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Representativeness
-
-   representativeness
-   Worked example <notebooks/representativeness_example.ipynb>
 
 .. toctree::
    :maxdepth: 2
@@ -70,7 +62,6 @@ same ``run()`` / ``get_footprint_climatology()`` API:
    Wang footprint model <notebooks/Getting_Started_Wang_Footprint.ipynb>
    Comparing footprint models <notebooks/footprint_model_comparison.ipynb>
    Animating footprint time series <notebooks/footprint_animation_example.ipynb>
-   Bootstrap footprint uncertainty <notebooks/bootstrap_footprint_uncertainty_example.ipynb>
 
 .. toctree::
    :maxdepth: 1
@@ -83,6 +74,12 @@ same ``run()`` / ``get_footprint_climatology()`` API:
    ``docs/notebooks/openet_comparison.ipynb`` are not listed above: they are
    built on the separate ``micromet`` package rather than on
    :mod:`fluxfootprints`, so they are excluded from this documentation.
+
+.. note::
+   Footprint representativeness (Chu et al., 2021), OpenET masking and
+   bootstrap footprint uncertainty now live in the companion
+   `footprint-analysis <https://github.com/inkenbrandt/footprint-analysis>`_
+   package, which builds on :mod:`fluxfootprints`.
 
 Indices and tables
 ------------------

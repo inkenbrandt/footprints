@@ -414,7 +414,7 @@ class FFPModel(BaseFootprintModel):
 
         See Also
         --------
-        fluxfootprints.representativeness.truncate_to_contour : Mask and
+        footprint_analysis.representativeness.truncate_to_contour : Mask and
             renormalise a climatology at this contour, after Chu et al. (2021).
         """
         if self.fclim_2d is None or float(self.fclim_2d.max()) < 1e-10:

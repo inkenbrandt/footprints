@@ -1,5 +1,5 @@
 # footprints/__init__.py
-from .base_footprint_model import BaseFootprintModel
+from .base_footprint_model import BaseFootprintModel, source_weight_threshold
 from .improved_ffp import FFPModel
 from .kormannmeixner_adapter import KormannMeixnerModel
 from .ls_footprint_adapter import LSFootprintModelAdapter
@@ -17,21 +17,10 @@ from .ffp_daily_monthly_helper import (
     export_rasters_geotiff,
     export_contour_stats_csv,
     compute_aerodynamic_params,
+    choose_utm_epsg,
+    SummaryResult,
 )
 
-from .openet_masking import (
-    apply_openet_mask,
-    mask_footprint_dataarray,
-    mask_summaries,
-    mask_rasters_geotiff,
-    index_openet_rasters,
-    openet_mask_on_grid,
-    footprint_grid_geometry,
-    parse_raster_date,
-    MaskedFootprint,
-    GridGeometry,
-)
-from .openet_raster_diagnostics import mask_rasters_geotiff_with_diagnostics
 
 from .footprint_animation import (
     FootprintAnimator,
@@ -76,81 +65,8 @@ from .ls_footprint_model import (  # noqa: E402
 
 from .wang_footprint import wang2006_fy, reconstruct_gaussian_2d
 
-from .representativeness import (
-    TARGET_RADII,
-    ASYMMETRY_THRESHOLD,
-    BIAS_THRESHOLD,
-    MIN_MATCHES,
-    Level,
-    ClimatologyMetrics,
-    WeightedValue,
-    CategoricalResult,
-    ContinuousResult,
-    RMAFit,
-    contour_level_for_fraction,
-    footprint_contour_mask,
-    truncate_to_contour,
-    target_area_mask,
-    potential_radiation,
-    partition_daynight,
-    monthly_climatologies,
-    footprint_fetch,
-    footprint_area,
-    symmetry_index,
-    footprint_symmetry,
-    climatology_metrics,
-    overlap,
-    seasonal_overlap,
-    daynight_overlap,
-    seasonal_overlap_index,
-    daynight_overlap_index,
-    footprint_weighted_value,
-    footprint_weighted_composition,
-    target_area_value,
-    target_area_composition,
-    sensor_location_bias,
-    sensor_location_bias_series,
-    rma_regression,
-    model2_regression,
-    classify_categorical,
-    classify_continuous,
-    categorical_representativeness,
-    continuous_representativeness,
-    evaluate_landcover,
-    evaluate_vegetation_index,
-    representativeness_summary,
-    SUMMARY_COLUMNS,
-    sample_raster_on_grid,
-    predict_sigmav,
-    export_representativeness_gpkg,
-    RESULT_INDEX,
-    RESULT_COLUMNS,
-    CHU_TABLE_COLUMNS,
-    assess_representativeness,
-    representativeness_table,
-    export_representativeness_tables,
-)
 
-from .representativeness_data import (
-    NLCD_COLLECTION,
-    LANDSAT_COLLECTIONS,
-    LandsatBands,
-    fetch_nlcd,
-    fetch_landsat_evi,
-)
 
-from .representativeness_plotting import (
-    RADIUS_CMAP,
-    LEVEL_CMAP,
-    FOOTPRINT_COLOR,
-    REFERENCE_COLOR,
-    radius_colors,
-    level_colors,
-    plot_landcover_composition,
-    plot_footprint_target_scatter,
-    plot_bias_density,
-    plot_level_bars,
-)
 
 
 from .canonical_schema import (
@@ -199,22 +115,14 @@ __all__ = [
     # Climatology workflow
     "build_climatology",
     "summarize_periods",
+    "SummaryResult",
     # Export helpers
     "export_contours_gpkg",
     "export_rasters_geotiff",
     "export_contour_stats_csv",
-    # OpenET masking
-    "apply_openet_mask",
-    "mask_footprint_dataarray",
-    "mask_summaries",
-    "mask_rasters_geotiff",
-    "mask_rasters_geotiff_with_diagnostics",
-    "index_openet_rasters",
-    "openet_mask_on_grid",
-    "footprint_grid_geometry",
-    "parse_raster_date",
-    "MaskedFootprint",
-    "GridGeometry",
+    # Shared helpers
+    "source_weight_threshold",
+    "choose_utm_epsg",
     # Animation
     "FootprintAnimator",
     "animate_footprint",
@@ -247,76 +155,6 @@ __all__ = [
     # Wang & Davis analytical model
     "wang2006_fy",
     "reconstruct_gaussian_2d",
-    # Representativeness (Chu et al., 2021)
-    "TARGET_RADII",
-    "ASYMMETRY_THRESHOLD",
-    "BIAS_THRESHOLD",
-    "MIN_MATCHES",
-    "Level",
-    "ClimatologyMetrics",
-    "WeightedValue",
-    "CategoricalResult",
-    "ContinuousResult",
-    "RMAFit",
-    "contour_level_for_fraction",
-    "footprint_contour_mask",
-    "truncate_to_contour",
-    "target_area_mask",
-    "potential_radiation",
-    "partition_daynight",
-    "monthly_climatologies",
-    "footprint_fetch",
-    "footprint_area",
-    "symmetry_index",
-    "footprint_symmetry",
-    "climatology_metrics",
-    "overlap",
-    "seasonal_overlap",
-    "daynight_overlap",
-    "seasonal_overlap_index",
-    "daynight_overlap_index",
-    "footprint_weighted_value",
-    "footprint_weighted_composition",
-    "target_area_value",
-    "target_area_composition",
-    "sensor_location_bias",
-    "sensor_location_bias_series",
-    "rma_regression",
-    "model2_regression",
-    "classify_categorical",
-    "classify_continuous",
-    "categorical_representativeness",
-    "continuous_representativeness",
-    "evaluate_landcover",
-    "evaluate_vegetation_index",
-    "representativeness_summary",
-    "SUMMARY_COLUMNS",
-    "sample_raster_on_grid",
-    "predict_sigmav",
-    "export_representativeness_gpkg",
-    "RESULT_INDEX",
-    "RESULT_COLUMNS",
-    "CHU_TABLE_COLUMNS",
-    "assess_representativeness",
-    "representativeness_table",
-    "export_representativeness_tables",
-    # Representativeness input data (Earth Engine; extras: gee)
-    "NLCD_COLLECTION",
-    "LANDSAT_COLLECTIONS",
-    "LandsatBands",
-    "fetch_nlcd",
-    "fetch_landsat_evi",
-    # Representativeness plotting
-    "RADIUS_CMAP",
-    "LEVEL_CMAP",
-    "FOOTPRINT_COLOR",
-    "REFERENCE_COLOR",
-    "radius_colors",
-    "level_colors",
-    "plot_landcover_composition",
-    "plot_footprint_target_scatter",
-    "plot_bias_density",
-    "plot_level_bars",
     # Constants
     "KAPPA",
     # Canonical benchmark schema
@@ -349,4 +187,4 @@ __all__ = [
     "__version__",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

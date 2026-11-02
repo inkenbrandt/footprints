@@ -12,7 +12,7 @@ import pandas as pd
 import xarray as xr
 
 
-def _source_weight_threshold(
+def source_weight_threshold(
     values: np.ndarray | xr.DataArray,
     cell_area: float,
     fraction: float,
@@ -21,7 +21,7 @@ def _source_weight_threshold(
     Find the footprint density enclosing a fraction of the total source weight.
 
     Shared kernel behind :meth:`~fluxfootprints.FFPModel.get_source_area_contour`
-    and :func:`~fluxfootprints.representativeness.contour_level_for_fraction`:
+    and ``footprint_analysis.representativeness.contour_level_for_fraction``:
     the grid is sorted in descending order and ``value * cell_area`` is
     accumulated until `fraction` is reached, so the value returned is the
     density of the last cell inside the contour.
@@ -73,6 +73,10 @@ def _source_weight_threshold(
     enclosed = np.cumsum(ordered) * cell_area
     idx = min(int(np.searchsorted(enclosed, fraction)), ordered.size - 1)
     return float(ordered[idx])
+
+
+# Private alias kept for existing internal callers.
+_source_weight_threshold = source_weight_threshold
 
 
 class BaseFootprintModel(ABC):

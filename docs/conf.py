@@ -35,12 +35,10 @@ extensions = [
     "nbsphinx",
 ]
 napoleon_numpy_docstring = True  # Set this to True for NumPy-style
-# Level and Provenance subclass str, so numpydoc would otherwise autosummary
-# every inherited str method (Level.count, Provenance.startswith, ...) and warn
-# that it cannot import them through the package namespace.
+# Provenance subclasses str, so numpydoc would otherwise autosummary every
+# inherited str method (Provenance.startswith, ...) and warn that it cannot
+# import them through the package namespace.
 numpydoc_show_inherited_class_members = {
-    "fluxfootprints.representativeness.Level": False,
-    "fluxfootprints.Level": False,
     "fluxfootprints.canonical_schema.Provenance": False,
     "fluxfootprints.Provenance": False,
 }
